@@ -1162,6 +1162,8 @@ class UnifiedLLM(ABC):
         **config,
     ):
         reject_legacy_cache_config(config)
+        # Freeze prevents field assignment, not mutations inside nested Any
+        # settings. Detach this small configuration once, never the history.
         self._reasoning_config = ReasoningConfig(
             levels=reasoning_levels, default=reasoning_default
         ).model_copy(deep=True)
