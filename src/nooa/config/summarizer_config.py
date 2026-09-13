@@ -9,6 +9,10 @@ class TokenBudgetConfig(BaseModel):
     """Config for TokenBudgetSummarizer.
 
     Set via: TokenBudgetSummarizer.install(agent, config=TokenBudgetConfig(...))
+
+    By default the summarizer forks the parent's completed request and reuses
+    its cached prefix. Set reuse_parent_prefix=False for standalone Markdown
+    summarization. An explicit different client also selects standalone mode.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -16,6 +20,7 @@ class TokenBudgetConfig(BaseModel):
     max_tokens: int = 100_000
     preserve_recent: int = 10
     target_chars: int = 1000
+    reuse_parent_prefix: bool = True
 
     def merge_with(self, other: "TokenBudgetConfig") -> "TokenBudgetConfig":
         if not other.model_fields_set:

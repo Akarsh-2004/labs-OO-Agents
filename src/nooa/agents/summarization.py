@@ -22,6 +22,9 @@ Example:
 """
 
 import asyncio
+import contextvars
+import copy
+import json
 import logging
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Annotated, Any
@@ -34,6 +37,9 @@ from nooa.metaclass import no_trace
 from nooa.strategies import PredictStrategy
 
 logger = logging.getLogger(__name__)
+
+# Inherited by the background task, never shared with concurrent parent work.
+_in_summary_fork = contextvars.ContextVar("in_summary_fork", default=False)
 
 if TYPE_CHECKING:
     from nooa.config.summarizer_config import MethodSummarizerConfig, TokenBudgetConfig
@@ -572,6 +578,157 @@ class TokenBudgetSummarizer(SummarizationAgent):
         # Percentage of LLM context
         TokenBudgetSummarizer.install(agent, config=TokenBudgetConfig(max_tokens=context_budget(my_llm, 0.8)))
     """
+
+    _unsub_llm: Annotated[Callable[[], None] | None, hidden] = None
+    _fork_enabled: Annotated[bool, hidden] = False
+    _pending_source: Annotated[tuple[tuple[str, str], ...] | None, hidden] = None
+
+    @hidden
+    @no_trace
+    def _install(self) -> None:
+        super()._install()
+        self._fork_enabled = self.config.reuse_parent_prefix and self.llm is self._target_agent.llm
+        if self._fork_enabled:
+            self._unsub_llm = self.target_event_manager.intercept("llm_call", self._fork_after_call)
+
+    @hidden
+    @no_trace
+    def _uninstall(self) -> None:
+        if self._unsub_llm:
+            self._unsub_llm()
+            self._unsub_llm = None
+        super()._uninstall()
+
+    @hidden
+    @no_trace
+    def _handle_after_turn(self, event: "EventBase") -> None:
+        # Forks start at LLM completion, before new response/tool events exist.
+        # The standalone path retains the existing AfterTurn lifecycle.
+        if not self._fork_enabled:
+            super()._handle_after_turn(event)
+
+    @hidden
+    @no_trace
+    async def _fork_after_call(self, ctx: Any, nxt: Any) -> Any:
+        """Branch the completed request; never clone or execute the parent agent.
+
+        The request already contains the parent tools, rendered history and live
+        context. Appending an instruction preserves the cached prefix, including
+        its native responses. The source range is chosen before dispatch: the
+        response and tool work produced by this turn must not be collapsed by a
+        summary that never saw them.
+        """
+        if _in_summary_fork.get() or self._pending_task is not None:
+            return await nxt(ctx)
+        tags = self.target_event_manager.keys()
+        selected = tags[: -self.config.preserve_recent] if self.config.preserve_recent else tags
+        source = tuple((tag, self.target_event_manager[tag].id) for tag in selected)
+        ctx = await nxt(ctx)
+        usage = ctx.response.usage if ctx.response is not None else None
+        if (
+            self._pending_task is not None
+            or not source
+            or usage is None
+            or usage.input_tokens <= self.config.max_tokens
+        ):
+            return ctx
+        start, end = source[0][0], source[-1][0]
+        if ctx.filtered_history or ctx.params.get("output_model") is not None or ctx.client is None:
+            logger.warning(
+                "Using standalone summarization: the request has filtered history, "
+                "structured output, or no effective client. Parent cache reuse is unavailable."
+            )
+            self._schedule_summarization(start, end)
+            return ctx
+
+        # Allocate only at a fork, not every parent turn. Strings remain shared;
+        # dictionaries belong to the fork; read-only response/boundary objects
+        # travel unchanged so their provider state is not flattened or copied.
+        try:
+            messages = [copy.deepcopy(m) if isinstance(m, dict) else m for m in ctx.messages]
+            params = copy.deepcopy(ctx.params)
+        except Exception:
+            logger.warning(
+                "Could not snapshot summary fork; parent call is unchanged", exc_info=True
+            )
+            return ctx
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    f"Background memory compaction: summarize only events {start} through {end} "
+                    f"in approximately {self.config.target_chars} characters. Other events are "
+                    "context only. Preserve decisions, exact numbers, outcomes and pending work. "
+                    "Write only the summary as plain text. Do not continue the original task "
+                    "or call any tools. This is an isolated summary, not an execution turn."
+                ),
+            }
+        )
+        fork = ctx.model_copy(
+            update={
+                "messages": messages,
+                "params": params,
+                "response": None,
+            }
+        )
+        self._pending_source = source
+        self._pending_range = (start, end)
+        self._pending_task = asyncio.create_task(self._run_fork(fork))
+        return ctx
+
+    @hidden
+    @no_trace
+    async def _run_fork(self, ctx: Any) -> None:
+        """Use the same policy chain; read a final answer without executing tools."""
+        token = _in_summary_fork.set(True)
+        try:
+
+            async def dispatch(request: Any) -> Any:
+                params = dict(request.params)
+                params.setdefault("output_model", None)
+                request.response = await request.client.acall(request.messages, **params)
+                return request
+
+            result = await self.target_event_manager.run_middleware("llm_call", ctx, dispatch)
+            response = result.response
+            if response is None:
+                raise ValueError("Summary middleware returned no response")
+            text = response.content
+            if response.tool_calls:
+                # CodeAct's unchanged instructions may require return_result.
+                # Decode that one data value; never call the parent tool or its
+                # validation/execution machinery, even for a valid-looking call.
+                if len(response.tool_calls) != 1 or response.tool_calls[0].name != "return_result":
+                    raise ValueError("Summary fork requested executable tools")
+                text = json.loads(response.tool_calls[0].arguments).get("result")
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError("Summary fork must return nonempty text")
+            if response.finish_reason in {"length", "max_tokens"}:
+                raise ValueError("Summary fork exhausted its output budget")
+            self._pending_summary = text
+        except Exception:
+            logger.warning("Summary fork failed; history is unchanged", exc_info=True)
+            self._pending_summary = None
+        finally:
+            _in_summary_fork.reset(token)
+            self.event_manager.clear()
+
+    @hidden
+    @no_trace
+    def _apply_pending_summary(self) -> None:
+        if self._pending_task is not None and self._pending_task.done():
+            if self._pending_source and self._pending_range:
+                current = tuple(
+                    (tag, event.id)
+                    for tag, event in self._get_events_in_range(*self._pending_range)
+                )
+                if current != self._pending_source:
+                    logger.warning(
+                        "Discarding stale summary: source events changed during the fork"
+                    )
+                    self._pending_summary = None
+            self._pending_source = None
+        super()._apply_pending_summary()
 
     @classmethod
     def install(

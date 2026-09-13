@@ -747,7 +747,8 @@ class TestSummarizationAsyncIntegration:
 
         # Very low budget to trigger summarization
         summarizer = TokenBudgetSummarizer(
-            test_agent, config=TokenBudgetConfig(max_tokens=50, preserve_recent=5)
+            test_agent,
+            config=TokenBudgetConfig(max_tokens=50, preserve_recent=5, reuse_parent_prefix=False),
         )
 
         # Mock the summarize method
@@ -829,7 +830,8 @@ class TestSummarizationAsyncIntegration:
 
         # Create summarizer with low threshold to trigger
         summarizer = TokenBudgetSummarizer(
-            agent, config=TokenBudgetConfig(max_tokens=100, preserve_recent=5)
+            agent,
+            config=TokenBudgetConfig(max_tokens=100, preserve_recent=5, reuse_parent_prefix=False),
         )
 
         # Mock the summarize method to return a fixed summary
@@ -983,7 +985,8 @@ class TestSummarizationAsyncIntegration:
         test_agent.runtime._last_prompt_tokens_actual = 200_000
 
         summarizer = TokenBudgetSummarizer(
-            test_agent, config=TokenBudgetConfig(max_tokens=100, preserve_recent=5)
+            test_agent,
+            config=TokenBudgetConfig(max_tokens=100, preserve_recent=5, reuse_parent_prefix=False),
         )
         summarizer.summarize = AsyncMock(return_value="Fresh Summary")
 
@@ -1037,7 +1040,8 @@ class TestSummarizationAsyncIntegration:
         test_agent.runtime._last_prompt_tokens_actual = 200_000
 
         summarizer = TokenBudgetSummarizer(
-            test_agent, config=TokenBudgetConfig(max_tokens=100, preserve_recent=5)
+            test_agent,
+            config=TokenBudgetConfig(max_tokens=100, preserve_recent=5, reuse_parent_prefix=False),
         )
         summarizer.summarize = AsyncMock(return_value="Summary")
 
