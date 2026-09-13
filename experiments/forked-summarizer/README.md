@@ -114,8 +114,11 @@ its owner. A small helper now copies only dict/list containers, sharing tools,
 clients and read-only response/boundary objects. Tests verify zero owner copies,
 unchanged parent request settings, detached nested dictionaries, async progress,
 one pending task, no recursive forks, safe result decoding, stale-range handling,
-fallback, and cancellation. The first full offline run passed 7,694 tests;
-final review-fix validation is recorded after the rerun.
+fallback, and cancellation. The first full offline run passed 7,694 tests.
+Final source head `23ac4824`: **7,699 passed, 6 skipped, 311 deselected and
+3 expected failures** in 266 seconds. Wren independently accepted that head
+after **2,473 scoped tests**; lint and formatting checks pass. This paragraph
+is the only subsequent change.
 
 Total live spending across the protocol probe, initial failed attempt, and
 successful installed probe: 12 calls, 95,472 input tokens and 786
