@@ -627,7 +627,15 @@ class EventManager:
             replaced_range=(actual_start, actual_end),
             children_tags=tags_to_collapse,
             summary_text=summary_text,
-            doc=f'To access collapsed events, call self.events["{summary_tag}"].children_tags',
+            # Keep recovery instructions independent of the generated summary.
+            doc=(
+                "Search original events (including archived): "
+                'self.events.query(query="keyword", limit=10). '
+                f'Read by tag, e.g. self.events["{actual_start}"]. '
+                f'Expand this summary: self.events[self.events["{summary_tag}"].children_tags]. '
+                "For nested summaries, expand their children_tags again. "
+                "Inspect originals when exact wording or omitted details matter."
+            ),
         )
         summary.tag = summary_tag
 
