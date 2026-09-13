@@ -182,6 +182,8 @@ class CodingAgent(InteractiveAgent):
     async def close(self) -> None:
         shell = self.shell
         try:
+            for summarizer in getattr(self, "_summarizers", []):
+                await summarizer.aclose()
             await self.skills.aclose()
         finally:
             try:

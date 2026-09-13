@@ -23,7 +23,6 @@ Example:
 
 import asyncio
 import contextvars
-import copy
 import json
 import logging
 from collections.abc import Callable
@@ -40,6 +39,16 @@ logger = logging.getLogger(__name__)
 
 # Inherited by the background task, never shared with concurrent parent work.
 _in_summary_fork = contextvars.ContextVar("in_summary_fork", default=False)
+
+
+def _copy_request_containers(value: Any) -> Any:
+    """Detach mutable JSON containers; borrow tools, responses and other objects."""
+    if isinstance(value, dict):
+        return {key: _copy_request_containers(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_copy_request_containers(item) for item in value]
+    return value
+
 
 if TYPE_CHECKING:
     from nooa.config.summarizer_config import MethodSummarizerConfig, TokenBudgetConfig
@@ -183,6 +192,18 @@ class SummarizationAgent(Agent):
         if self._pending_task and not self._pending_task.done():
             self._pending_task.cancel()
             self._pending_task = None
+
+    @hidden
+    @no_trace
+    async def aclose(self) -> None:
+        """Stop subscriptions and await cancellation before the shared client closes."""
+        task = self._pending_task
+        self._uninstall()
+        if task is not None:
+            await asyncio.gather(task, return_exceptions=True)
+        self._pending_task = None
+        self._pending_range = None
+        self._pending_summary = None
 
     # -------------------------------------------------------------------------
     # Event handlers
@@ -565,10 +586,21 @@ def context_budget(llm: Any, percent: float = 0.8, fallback: int = 100_000) -> i
 # Example Summarizers (Good Defaults)
 # =============================================================================
 class TokenBudgetSummarizer(SummarizationAgent):
-    """Summarize when event count exceeds token budget.
+    """Summarize old events asynchronously when provider input exceeds the budget.
 
-    Trigger: Event tokens > config.max_tokens
-    Action: Summarize oldest events, preserve N most recent
+    By default, fork the completed parent request with a trailing summary
+    instruction. Tools, model settings and cache key stay unchanged so the
+    provider can reuse its prefix. Only events present before that request
+    are eligible for collapse; the latest response/tool work stays active.
+
+    The fork never executes tools. A nonempty string returned through one
+    return_result call is read as data. An unusable reply gets one standalone
+    attempt; provider/policy failures leave history unchanged. A different
+    summarizer client, filtered history, structured output or
+    reuse_parent_prefix=False uses standalone summarization directly.
+
+    Completed summaries apply at BeforeTurn, provided the selected event IDs
+    still match. Owners should await aclose() before closing the shared client.
 
     Example:
         from nooa.config.summarizer_config import TokenBudgetConfig
@@ -645,8 +677,8 @@ class TokenBudgetSummarizer(SummarizationAgent):
         # dictionaries belong to the fork; read-only response/boundary objects
         # travel unchanged so their provider state is not flattened or copied.
         try:
-            messages = [copy.deepcopy(m) if isinstance(m, dict) else m for m in ctx.messages]
-            params = copy.deepcopy(ctx.params)
+            messages = _copy_request_containers(ctx.messages)
+            params = _copy_request_containers(ctx.params)
         except Exception:
             logger.warning(
                 "Could not snapshot summary fork; parent call is unchanged", exc_info=True
@@ -693,18 +725,32 @@ class TokenBudgetSummarizer(SummarizationAgent):
             response = result.response
             if response is None:
                 raise ValueError("Summary middleware returned no response")
-            text = response.content
-            if response.tool_calls:
-                # CodeAct's unchanged instructions may require return_result.
-                # Decode that one data value; never call the parent tool or its
-                # validation/execution machinery, even for a valid-looking call.
-                if len(response.tool_calls) != 1 or response.tool_calls[0].name != "return_result":
-                    raise ValueError("Summary fork requested executable tools")
-                text = json.loads(response.tool_calls[0].arguments).get("result")
-            if not isinstance(text, str) or not text.strip():
-                raise ValueError("Summary fork must return nonempty text")
-            if response.finish_reason in {"length", "max_tokens"}:
-                raise ValueError("Summary fork exhausted its output budget")
+            try:
+                text = response.content
+                if response.tool_calls:
+                    # Read CodeAct's final value as data, never as an invocation.
+                    if (
+                        len(response.tool_calls) != 1
+                        or response.tool_calls[0].name != "return_result"
+                    ):
+                        raise ValueError("Summary fork requested executable tools")
+                    text = json.loads(response.tool_calls[0].arguments).get("result")
+                if not isinstance(text, str) or not text.strip():
+                    raise ValueError("Summary fork must return nonempty text")
+                if response.finish_reason in {"length", "max_tokens"}:
+                    raise ValueError("Summary fork exhausted its output budget")
+            except (ValueError, TypeError, AttributeError):
+                # A structured return tool may not admit a string summary. Try
+                # standalone once, asynchronously. Do not take this fallback
+                # when the provider or middleware above raises (e.g. a denial).
+                logger.warning(
+                    "Unusable summary reply; trying standalone without parent cache reuse"
+                )
+                start, end = self._pending_range
+                await self._run_summarization(
+                    self._render_range_to_markdown(start, end), start, end
+                )
+                return
             self._pending_summary = text
         except Exception:
             logger.warning("Summary fork failed; history is unchanged", exc_info=True)

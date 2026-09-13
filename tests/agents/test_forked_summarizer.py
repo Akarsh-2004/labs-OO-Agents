@@ -124,6 +124,7 @@ async def test_fork_runs_middleware_without_recursive_forks_or_parent_statistics
 @pytest.mark.parametrize("problem", ["error", "tool", "empty", "stale"])
 async def test_bad_or_stale_summary_never_collapses_history(problem, caplog):
     agent, summarizer, ctx = setup()
+    summarizer.summarize = AsyncMock(side_effect=RuntimeError("standalone also failed"))
     if problem == "error":
         agent.llm.acall = AsyncMock(side_effect=RuntimeError("provider failed"))
     elif problem == "tool":
@@ -187,6 +188,7 @@ async def test_return_result_is_read_as_data_never_executed(result, valid):
     import json
 
     agent, summarizer, ctx = setup()
+    summarizer.summarize = AsyncMock(side_effect=RuntimeError("standalone also failed"))
     agent.llm.acall = AsyncMock(
         return_value=response(
             "",
@@ -315,11 +317,11 @@ async def test_install_does_not_change_parent_request_and_fork_uses_effective_cl
 async def test_fork_preparation_failure_does_not_fail_parent(caplog):
     agent, summarizer, ctx = setup()
 
-    class NotCopyable:
-        def __deepcopy__(self, memo):
-            raise TypeError("custom transport is not copyable")
+    class Unreadable(dict):
+        def items(self):
+            raise TypeError("invalid message mapping")
 
-    ctx.params["custom"] = NotCopyable()
+    ctx.messages[0] = Unreadable(role="system", content="broken")
 
     async def core(request):
         request.response = response("parent answer")
@@ -330,3 +332,99 @@ async def test_fork_preparation_failure_does_not_fail_parent(caplog):
     assert summarizer._pending_task is None
     assert "fork" in caplog.text.lower()
     summarizer._uninstall()
+
+
+@pytest.mark.asyncio
+async def test_fork_borrows_bound_tools_without_copying_their_owner():
+    from nooa.unifiedllm import Tool
+
+    agent, summarizer, ctx = setup()
+    copies = []
+
+    class Owner:
+        def __deepcopy__(self, memo):
+            copies.append(self)
+            return Owner()
+
+        def run(self, code: str) -> str:
+            raise AssertionError("Never execute this tool")
+
+    tool = Tool(name="run", callable=Owner().run, description="Run work")
+    ctx.params["tools"] = [tool]
+    agent.llm.acall = AsyncMock(return_value=response())
+
+    async def core(request):
+        request.response = response("parent")
+        return request
+
+    await agent.event_manager.run_middleware("llm_call", ctx, core)
+    await summarizer._pending_task
+    assert copies == []
+    assert agent.llm.acall.call_args.kwargs["tools"][0] is tool
+    summarizer._uninstall()
+
+
+@pytest.mark.asyncio
+async def test_unusable_fork_has_one_standalone_fallback():
+    agent, summarizer, ctx = setup()
+    agent.llm.acall = AsyncMock(
+        return_value=response(
+            "",
+            tool_calls=[
+                ToolCall(id="r", name="return_result", arguments='{"result":{"reason":"done"}}')
+            ],
+        )
+    )
+    summarizer.summarize = AsyncMock(return_value="fallback summary")
+
+    async def core(request):
+        request.response = response("parent")
+        return request
+
+    await agent.event_manager.run_middleware("llm_call", ctx, core)
+    await summarizer._pending_task
+    assert summarizer._pending_summary == "fallback summary"
+    summarizer.summarize.assert_awaited_once()
+    agent.llm.acall.assert_awaited_once()
+    summarizer._uninstall()
+
+
+def test_model_switch_preserves_standalone_choice():
+    from nooa.interactive import apply_model_limits
+
+    agent = Agent(llm=FakeLLMClient())
+    summarizer = TokenBudgetSummarizer.install(
+        agent, config=TokenBudgetConfig(reuse_parent_prefix=False)
+    )
+    apply_model_limits(agent)
+    assert summarizer.config.reuse_parent_prefix is False
+    summarizer._uninstall()
+
+
+@pytest.mark.asyncio
+async def test_aclose_awaits_cancelled_background_task():
+    agent, summarizer, ctx = setup()
+    entered, cancelled = asyncio.Event(), asyncio.Event()
+
+    async def wait(*args, **kwargs):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    agent.llm.acall = wait
+
+    async def core(request):
+        request.response = response("parent")
+        return request
+
+    await agent.event_manager.run_middleware("llm_call", ctx, core)
+    await asyncio.wait_for(entered.wait(), 1)
+    try:
+        await summarizer.aclose()
+        assert cancelled.is_set()
+        assert summarizer._pending_task is None
+        assert agent.event_manager._middleware["llm_call"] == []
+    finally:
+        summarizer._uninstall()

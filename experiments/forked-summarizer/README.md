@@ -5,7 +5,7 @@
 Can a background summarizer reuse the parent's cached prompt instead of
 rendering the same history as a new Markdown document under a different prompt?
 
-## Plan for review
+## Design reviewed with Wren
 
 Use the existing `llm_call` middleware boundary for token-budget summarization.
 After a successful parent request, launch one background call with that request's
@@ -28,7 +28,28 @@ Method-completion summarization remains standalone in this first change.
 Runtime changes should be limited to exposing the effective client and whether
 history is filtered on `LLMCallContext`, and making the effective cache key
 available there after dispatch. No new UnifiedLLM abstraction or provider rules.
-Estimated production delta: 150–200 lines, mostly the summarizer consumer.
+The implementation is concentrated in the summarizer consumer. The interactive
+coding agent also cancels pending summaries before closing its shared client,
+and model-limit updates preserve the selected summarization mode.
+
+## Usage
+
+```python
+summarizer = TokenBudgetSummarizer.install(
+    agent, config=TokenBudgetConfig(max_tokens=80_000, preserve_recent=10)
+)
+# Default: reuse the parent's prefix. For independent summarization instead:
+# TokenBudgetConfig(..., reuse_parent_prefix=False)
+# On shutdown, before closing agent.llm:
+await summarizer.aclose()
+```
+
+Same-model token-budget summaries benefit most when replacing most of a long
+history. Cache-read tokens still cost money: a cached whole-history fork is not
+necessarily cheaper than a small standalone range. Custom middleware is rerun
+and may edit the request; changing the prefix can reduce cache reuse. Context
+queries use the standalone path so unseen events are not summarized from a
+partial parent request. Normal rendering/truncation limits still apply.
 
 ## Experiment
 
@@ -82,7 +103,19 @@ An initial installed OpenAI probe found that CodeAct returns the summary in a
 worked but produced no summary. After a failing regression test, the consumer
 now accepts exactly one `return_result` containing a nonempty string as data;
 it does not execute any tool. Executable/mixed calls and malformed or empty
-results are logged and discarded, leaving history intact for a later attempt.
+results now trigger one standalone attempt with a warning about losing cache
+reuse. Provider or middleware exceptions do not trigger that fallback. If both
+summary attempts fail, history stays intact. The successful live measurements
+above predate these fallback/ownership/shutdown review fixes; the SDK request
+shape is unchanged and checked offline, not presented as another paid rerun.
+
+Wren's implementation review found that deep-copying a bound Tool could clone
+its owner. A small helper now copies only dict/list containers, sharing tools,
+clients and read-only response/boundary objects. Tests verify zero owner copies,
+unchanged parent request settings, detached nested dictionaries, async progress,
+one pending task, no recursive forks, safe result decoding, stale-range handling,
+fallback, and cancellation. The first full offline run passed 7,694 tests;
+final review-fix validation is recorded after the rerun.
 
 Total live spending across the protocol probe, initial failed attempt, and
 successful installed probe: 12 calls, 95,472 input tokens and 786
