@@ -63,13 +63,12 @@ def model_details(model, *, output_tokens, edited=False):
     line(f"Model details · {model['id']}", fg="bright_cyan", bold=True)
     for label, value in (
         ("Context window", tokens(model.get("context_length"))),
-        ("Maximum output", tokens((model.get("top_provider") or {}).get("max_completion_tokens"))),
+        (
+            "Maximum reply length",
+            tokens((model.get("top_provider") or {}).get("max_completion_tokens")),
+        ),
         ("Reasoning levels", ", ".join(levels) if levels else "Not listed"),
         ("Default reasoning", reasoning.get("default_effort") or "Not listed"),
-        (
-            "Published output default",
-            tokens((model.get("default_parameters") or {}).get("max_tokens")),
-        ),
         ("Setup check limit", f"{output_tokens:,} tokens per reply (checks only)"),
     ):
         line(f"{label:<25} {value}")

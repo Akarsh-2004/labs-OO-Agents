@@ -53,7 +53,6 @@ def test_model_details_show_published_limits_separately_from_setup_cap():
                     "supported_efforts": ["low", "medium", "high"],
                     "default_effort": "medium",
                 },
-                "default_parameters": {"max_tokens": 4096},
             },
             output_tokens=200,
         )
@@ -66,11 +65,11 @@ def test_model_details_show_published_limits_separately_from_setup_cap():
         "16,384",
         "low, medium, high",
         "medium",
-        "4,096",
         "200",
     ):
         assert text in result.output
-    assert "Published output default" in result.output
+    assert "Maximum reply length" in result.output
+    assert "Published output default" not in result.output
     assert "Setup check limit" in result.output
     assert "Source: OpenRouter" in result.output
     assert "not proof" not in result.output
@@ -90,5 +89,5 @@ def test_missing_model_details_stay_unknown_instead_of_becoming_recommendations(
 
     result = CliRunner().invoke(command)
     assert result.exit_code == 0, result.output
-    assert result.output.count("Not listed") == 5
+    assert result.output.count("Not listed") == 4
     assert "0 tokens" not in result.output.replace("200 tokens", "")
