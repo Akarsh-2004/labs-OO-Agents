@@ -226,7 +226,7 @@ def test_cross_provider_replay_warns_hides_opaque_state_and_keeps_reasoning_text
         target.close()
 
 
-def test_plain_reasoning_replays_as_ordinary_text_for_every_model() -> None:
+def test_plain_reasoning_replays_as_ordinary_text_for_other_models() -> None:
     source = CompletionClient(model="deepseek/deepseek-reasoner", api_key="account-a")
     target = CompletionClient(model="openai/gpt-4o", api_key="account-a")
     response = _chat_response(
@@ -243,7 +243,9 @@ def test_plain_reasoning_replays_as_ordinary_text_for_every_model() -> None:
         with patch("litellm.completion", return_value=response) as completion:
             target.call(_render(first))
 
-        assert all(part.native is None for part in first.parts)
+        # The origin marker keeps the native field for same-route replay, but
+        # contains no second copy of the text and is absent from public views.
+        assert first.model_dump_json().count("Plain reasoning.") == 1
         assistant = next(
             message
             for message in completion.call_args.kwargs["messages"]

@@ -5,6 +5,7 @@
 import copy
 import json
 
+import httpx
 import pytest
 from litellm.types.utils import Choices, Message, ModelResponse
 
@@ -15,8 +16,116 @@ from nooa.unifiedllm import CompletionClient
 from nooa.unifiedllm.chat_parts import capture_chat_parts, project_chat_turn
 from nooa.unifiedllm.replay_state import ReasoningReplayError, prepare_chat_messages, replay_scope
 from nooa.unifiedllm.response_parts import project_turn
+from nooa.unifiedllm.unifiedllm import _ClientHttp
 
 MODELS = ["anthropic/claude-sonnet-4", "gemini/gemini-2.5-pro", "openai/gateway-gemini"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("is_async", [False, True])
+async def test_reasoning_content_http_tool_loop_after_resume(is_async, monkeypatch, tmp_path):
+    requests = []
+    source = {
+        "role": "assistant",
+        "content": None,
+        "reasoning_content": "Check inputs.",
+        "tool_calls": [
+            {
+                "id": "c1",
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "arguments": "{}",
+                },
+            }
+        ],
+    }
+
+    def respond(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "completion-1",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "gateway-model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": source
+                        if len(requests) == 1
+                        else {"role": "assistant", "content": "done"},
+                        "finish_reason": "tool_calls" if len(requests) == 1 else "stop",
+                    }
+                ],
+            },
+        )
+
+    monkeypatch.setattr(
+        _ClientHttp,
+        "_httpx_hardening",
+        staticmethod(lambda: {"transport": httpx.MockTransport(respond)}),
+    )
+    client = CompletionClient(
+        "openai/gateway-model", api_key="test", api_base="https://hub.test/v1"
+    )
+    try:
+        history = [{"role": "user", "content": "lookup"}]
+        seed = await client.acall(history) if is_async else client.call(history)
+        with SQLiteStorageManager(tmp_path / "archive.db") as storage:
+            storage.event_backend.store("1", seed)
+        with SQLiteStorageManager(tmp_path / "archive.db") as storage:
+            restored = next(storage.event_backend.all_events())
+        history += [restored, {"role": "tool", "tool_call_id": "c1", "content": "0"}]
+        result = await client.acall(history) if is_async else client.call(history)
+        assert result.content == "done"
+        # LiteLLM omits null content on tool-only turns; the reasoning field
+        # and complete tool call must still reach the actual HTTP body.
+        assert requests[1]["messages"][1] == {
+            key: value for key, value in source.items() if value is not None
+        }
+    finally:
+        await client.aclose()
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "deepseek/deepseek-reasoner",
+        "openai/nvidia/deepseek-ai/deepseek-v4-pro",
+        "openai/nvidia/moonshotai/kimi-k2.5",
+        "openai/nvidia/zai-org/glm-5.3",
+        "openai/nvidia/qwen/qwen3-5-397b-a17b",
+    ],
+)
+def test_reasoning_content_replays_in_original_field_after_resume(model):
+    source = {
+        "role": "assistant",
+        "content": None,
+        "reasoning_content": "Check the original inputs.",
+        "tool_calls": [
+            {
+                "id": "c1",
+                "type": "function",
+                "function": {
+                    "name": "lookup",
+                    "arguments": "{}",
+                },
+            }
+        ],
+    }
+    scope = replay_scope(model, "chat", {})
+    assert scope is not None
+    turn = LLMResponse(parts=capture_chat_parts(source, scope), replay_scope=scope)
+    restored = LLMResponse.model_validate_json(turn.model_dump_json())
+    assert project_chat_turn(restored, scope)[0] == source
+    assert turn.model_dump_json().count("Check the original inputs.") == 1
+    other, _ = project_chat_turn(restored, "chat:openai:other")
+    assert "reasoning_content" not in other
+    assert other["content"] == source["reasoning_content"]
+    edited = restored.replace_text("changed")
+    assert "reasoning_content" not in project_chat_turn(edited, scope)[0]
 
 
 @pytest.mark.parametrize("scope", [None, "chat:gemini:test", "chat:openai:test"])

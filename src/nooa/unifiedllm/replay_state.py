@@ -30,6 +30,7 @@ _SUPPORTED_PROVIDERS = {
     "azure",
     "anthropic",
     "gemini",
+    "deepseek",  # Plain reasoning_content is required on thinking-mode tool turns.
 }
 
 

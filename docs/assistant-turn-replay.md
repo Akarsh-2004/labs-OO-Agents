@@ -87,6 +87,11 @@ every gateway or account accepts another issuer's opaque data.
 OpenAI encrypted reasoning, Anthropic signed/redacted thinking, and Gemini
 signatures stay with their owning parts. Plain reasoning is retained as readable
 text and can be sent to another model without the source's native extensions.
+When plain text arrived in Chat's `reasoning_content`, a small origin marker
+restores that field for compatible replay. This matters for DeepSeek thinking
+tool turns: moving reasoning into answer content is not equivalent. The marker
+contains no copy of the reasoning text. Changed models or edited turns still
+receive the text as ordinary assistant content, without the source field.
 Unknown capture routes warn and keep portable text while dropping opaque state.
 Nonempty provider fields in input dictionaries raise with instructions to pass
 an `LLMResponse` instead; both clients enforce that rule. Null or empty optional
@@ -98,6 +103,22 @@ binding; nonempty duplicate IDs and ambiguous native bindings raise.
 Provider strings remain immutable in storage. Container detachment happens at
 capture and final projection, without repeatedly copying large immutable string
 leaves. Live SDK responses and parsed Python results are excluded from archives.
+
+### Open-model tool replay check
+
+On 2026-09-14, two capped calls each through NVIDIA Inference Hub passed for
+DeepSeek V4 Pro, Kimi K3, GLM 5.3 and Qwen 3.5 397B. Each produced nonempty
+`reasoning_content` and a tool call. After closing/reopening SQLite, a new client
+sent exactly that text in the next request's `reasoning_content`; all four
+continuations completed. Both calls included trailing live-context messages.
+Total: 2,759 input tokens (including cached input), 797 output tokens, no retries.
+These tests establish field preservation and successful continuation, not whether
+each route rejects an omitted field or guarantees a cache hit. Run with
+`NOOA_RUN_OPEN_MODEL_REPLAY=1` and `NVIDIA_INFERENCE_API_KEY`:
+
+```bash
+uv run pytest -m integration -s tests/integration/test_open_model_tool_reasoning_live.py
+```
 
 ## Archives and collapse
 

@@ -104,7 +104,15 @@ def capture_chat_parts(message: Any, scope: str | None) -> tuple[AssistantPart, 
         "".join(part.text for part in parts),
         "\n".join(part.text for part in parts if part.text),
     }:
-        parts.append(AssistantReasoning(text=reasoning))
+        # Preserve the wire field, not another copy of its text. On compatible
+        # Chat replay (notably DeepSeek tool turns) it is protocol data, not
+        # answer content. Other destinations still receive readable text.
+        native_reasoning = (
+            {"reasoning_content": True}
+            if _field(message, "reasoning_content") == reasoning and scope is not None
+            else None
+        )
+        parts.append(AssistantReasoning(text=reasoning, native=native_reasoning))
 
     fields = _field(message, "provider_specific_fields")
     native_text: dict[str, Any] = {}
@@ -164,7 +172,9 @@ def capture_chat_parts(message: Any, scope: str | None) -> tuple[AssistantPart, 
         )
         return tuple(part.model_copy(update={"native": None}) for part in parts)
     if any(isinstance(part, ToolCall) and not part.id for part in parts) and any(
-        part.native for part in parts if not isinstance(part, AssistantText)
+        part.native and "reasoning_content" not in part.native
+        for part in parts
+        if not isinstance(part, AssistantText)
     ):
         raise ReasoningReplayError("Native reasoning requires nonempty tool call ids.")
     return tuple(parts)
@@ -214,6 +224,9 @@ def project_chat_turn(turn: LLMResponse, scope: str | None) -> tuple[dict, dict[
                 text.append(part.text)
         elif native:
             field, block = next(iter(native.items()))
+            if field == "reasoning_content":
+                message[field] = part.text
+                continue
             if field == "thinking_blocks" and block["type"] == "thinking":
                 block["thinking"] = part.text
             elif field == "reasoning_items":
