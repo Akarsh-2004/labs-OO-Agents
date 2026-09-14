@@ -2,11 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 """Effort declarations are data; consumers only select and inspect labels."""
 
+import ast
+import re
+from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import litellm
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from nooa.config.model_config import ModelConfig
@@ -214,3 +219,58 @@ async def test_fake_does_not_report_success_for_unknown_reasoning(asynchronous):
         else:
             client.call([], reasoning_level="low")
     assert client.call_count == 0
+
+
+async def test_agent_authoring_skill_reasoning_example(tmp_path, monkeypatch):
+    """Execute the shipped skill's registry and selection example without inference."""
+    from nooa.skill import _parse_skill_md
+    from nooa.unifiedllm import registry
+
+    def unexpected_request(*args, **kwargs):
+        pytest.fail("The skill example must not make live HTTP requests")
+
+    monkeypatch.setattr(httpx.Client, "send", unexpected_request)
+    monkeypatch.setattr(httpx.AsyncClient, "send", unexpected_request)
+    name, _, skill = _parse_skill_md(
+        Path(__file__).resolve().parents[2] / "skills/nooa-agent-authoring"
+    )
+    assert name == "nooa-agent-authoring"
+    declarations = re.findall(r"```yaml\n(.*?)```", skill, re.DOTALL)
+    assert len(declarations) == 1, "Provide one executable reasoning registry example"
+    config = yaml.safe_load(declarations[0])["models"]["my-route"]
+    (tmp_path / "llm_config.yaml").write_text(declarations[0])
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(registry, "MODELS", {})
+    monkeypatch.setattr(registry, "_loaded", False)
+    snippets = [
+        block
+        for block in re.findall(r"```python\n(.*?)```", skill, re.DOTALL)
+        if 'reload_registry(Path("llm_config.yaml"))' in block
+    ]
+    assert len(snippets) == 1, "Load the example registry before selecting its alias"
+    scope = {"messages": [{"role": "user", "content": "hello"}]}
+    with patch("litellm.aresponses", new_callable=AsyncMock) as transport:
+        transport.return_value = _response(True)
+        try:
+            await eval(
+                compile(snippets[0], "SKILL.md", "exec", ast.PyCF_ALLOW_TOP_LEVEL_AWAIT), scope
+            )
+            client = scope["llm"]
+            assert client.reasoning_levels == ("low", "medium", "high")
+            assert client.reasoning_default == "medium"
+            assert (
+                client._prepare_call_config({})["reasoning"]
+                == config["reasoning_levels"]["high"]["reasoning"]
+            )
+            assert (
+                client._prepare_call_config({"reasoning_level": None})["reasoning"]
+                == config["reasoning"]
+            )
+            assert (
+                transport.call_args.kwargs["reasoning"]
+                == config["reasoning_levels"]["low"]["reasoning"]
+            )
+            assert scope["reply"].content == "ok"
+        finally:
+            if "llm" in scope:
+                await scope["llm"].aclose()
