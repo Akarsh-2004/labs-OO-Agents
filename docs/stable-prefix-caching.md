@@ -48,8 +48,11 @@ only leading system/developer instructions, not arbitrary history.
 ## Provider mapping
 
 Anthropic marks the latest eligible content block before the boundary, never a
-thinking or redacted-thinking block. OpenAI Responses marks the latest eligible
-input-text block or function result and enables explicit mode. If necessary,
+thinking or redacted-thinking block. Images and documents are eligible, including
+the `image_url` and `file` forms that LiteLLM converts for Anthropic. OpenAI
+Responses marks the latest eligible input text, image, file or function result
+and enables explicit mode. Stable media must be inside the breakpoint rather
+than left after a preceding text block. If necessary,
 stable Responses instructions become an input-text block to carry that marker.
 If no eligible stable block exists, OpenAI explicit mode remains enabled with
 no breakpoint and logs a warning: the request does not cache anything. This can
@@ -128,6 +131,12 @@ Including these attempts, the round used 14 requests, 140,307 input tokens and
 5,856 output tokens, with retries disabled.
 
 Offline tests:
+
+Multimodal placement has regression tests through both serialized HTTP paths.
+The opt-in resume test now ends the OpenAI and Anthropic stable prefixes with a
+fixed image, and checks that the image itself carries the breakpoint. This adds
+no calls to the existing three-call scenario. The historical live numbers above
+predate this image case; they are not evidence of live image-cache support.
 
 ```sh
 uv run --extra nemo-relay pytest tests/unifiedllm/test_cache_policy.py tests/unifiedllm/test_explicit_cache_boundary.py

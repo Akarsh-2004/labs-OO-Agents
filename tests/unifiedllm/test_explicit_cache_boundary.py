@@ -567,6 +567,113 @@ async def test_anthropic_breakpoint_survives_user_message_coalescing() -> None:
     assert "cache_control" not in bodies[1]["messages"][0]["content"][0]
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+@pytest.mark.parametrize("with_text", [False, True])
+@pytest.mark.parametrize("media", ["image", "file"])
+async def test_multimodal_breakpoint_reaches_provider_http(provider, with_text, media):
+    bodies = []
+
+    def respond(request):
+        bodies.append(json.loads(request.content))
+        if provider == "anthropic":
+            return httpx.Response(
+                200,
+                json={
+                    "id": "msg_test",
+                    "type": "message",
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-5",
+                    "content": [{"type": "text", "text": "ok"}],
+                    "stop_reason": "end_turn",
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": 2, "output_tokens": 1},
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "id": "resp_test",
+                "object": "response",
+                "created_at": 0,
+                "status": "completed",
+                "model": "gpt-5.6",
+                "output": [
+                    {
+                        "id": "msg_test",
+                        "type": "message",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "ok", "annotations": []}],
+                    }
+                ],
+                "parallel_tool_calls": False,
+                "tools": [],
+            },
+        )
+
+    png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/a9sAAAAASUVORK5CYII="
+    if provider == "openai":
+        client = ResponsesClient(
+            "openai/gpt-5.6",
+            api_key="test",
+            api_base="https://example.test/v1",
+            cache_breakpoint="openai",
+        )
+        block = (
+            {"type": "input_image", "image_url": png}
+            if media == "image"
+            else {"type": "input_file", "file_id": "file-test"}
+        )
+        marker = "prompt_cache_breakpoint"
+    else:
+        client = CompletionClient(
+            "anthropic/claude-sonnet-4-5",
+            api_key="test",
+            api_base="https://example.test",
+            cache_breakpoint="anthropic",
+        )
+        block = (
+            {"type": "image_url", "image_url": {"url": png}}
+            if media == "image"
+            else {
+                "type": "file",
+                "file": {
+                    "filename": "test.pdf",
+                    "file_data": "data:application/pdf;base64,JVBERi0xLjQKJSVFT0YK",
+                },
+            }
+        )
+        marker = "cache_control"
+    content = ([{"type": "text", "text": "stable description"}] if with_text else []) + [block]
+    original = [
+        {"role": "user", "content": content},
+        CacheBoundary(),
+        {"role": "user", "content": "live state"},
+    ]
+    before = json.dumps([dict(message) for message in original])
+    await client._http.httpx_async.aclose()
+    transport = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+    client._http.httpx_async = transport
+    client._http.async_client.client = transport
+    try:
+        await client.acall(original)
+    finally:
+        await client.aclose()
+
+    messages = bodies[0]["input" if provider == "openai" else "messages"]
+    blocks = [part for message in messages for part in message["content"] if isinstance(part, dict)]
+    marked = [part for part in blocks if marker in part]
+    assert len(marked) == 1
+    assert marked[0]["type"] == (
+        f"input_{media}" if provider == "openai" else "image" if media == "image" else "document"
+    )
+    assert marked[0][marker] == (
+        {"mode": "explicit"} if provider == "openai" else {"type": "ephemeral"}
+    )
+    assert json.dumps([dict(message) for message in original]) == before
+
+
 def test_openai_skips_assistant_output_and_marks_latest_input() -> None:
     boundary = CacheBoundary()
     with ResponsesClient(model="openai/gpt-5.6", cache_breakpoint="openai") as client:

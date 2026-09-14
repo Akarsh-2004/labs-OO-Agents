@@ -23,8 +23,8 @@ def reject_legacy_cache_config(config: Mapping[str, Any]) -> None:
         )
 
 
-def _mark_responses_text(content: Any) -> tuple[Any, bool]:
-    """Attach an OpenAI explicit breakpoint to the last input-text block."""
+def _mark_responses_content(content: Any) -> tuple[Any, bool]:
+    """Mark the last cacheable input block, including stable images and files."""
     marker = {"mode": "explicit"}
     if isinstance(content, str):
         return [
@@ -37,7 +37,11 @@ def _mark_responses_text(content: Any) -> tuple[Any, bool]:
     if isinstance(content, list):
         for index in range(len(content) - 1, -1, -1):
             block = content[index]
-            if isinstance(block, dict) and block.get("type") == "input_text":
+            if isinstance(block, dict) and block.get("type") in {
+                "input_text",
+                "input_image",
+                "input_file",
+            }:
                 updated = list(content)
                 updated[index] = {**block, "prompt_cache_breakpoint": marker}
                 return updated, True
@@ -49,13 +53,13 @@ def _mark_responses_cache_breakpoint(messages: list[dict[str, Any]], boundary: i
     for index in range(boundary - 1, -1, -1):
         item = messages[index]
         if item.get("type") == "function_call_output":
-            output, marked = _mark_responses_text(item.get("output"))
+            output, marked = _mark_responses_content(item.get("output"))
             if marked:
                 messages[index] = {**item, "output": output}
                 return True
         # Assistant output uses output_text, which is not an eligible input block.
         if item.get("role") in {"system", "developer", "user"}:
-            content, marked = _mark_responses_text(item.get("content"))
+            content, marked = _mark_responses_content(item.get("content"))
             if marked:
                 messages[index] = {**item, "content": content}
                 return True
@@ -95,6 +99,9 @@ def _mark_anthropic(message: dict[str, Any]) -> dict[str, Any] | None:
                 "text",
                 "tool_result",
                 "image",
+                "image_url",
+                "document",
+                "file",
             }:
                 blocks = list(content)
                 blocks[i] = {**block, "cache_control": marker}
@@ -150,7 +157,7 @@ def apply_cache_policy(
         raise ValueError("The OpenAI explicit cache mapping requires ResponsesClient")
     marked = _mark_responses_cache_breakpoint(clean, boundary)
     if not marked and instructions:
-        content, marked = _mark_responses_text(instructions)
+        content, marked = _mark_responses_content(instructions)
         clean.insert(0, {"role": "system", "content": content})
         instructions = None
     if not marked:
@@ -159,6 +166,6 @@ def apply_cache_policy(
             "will not use prompt caching. Add stable instructions or place "
             "CacheBoundary() after reusable input text to enable cache writes."
         )
-    # No eligible stable text: explicit mode deliberately avoids caching a
+    # No eligible stable input: explicit mode deliberately avoids caching a
     # changing suffix. Never invent an empty text block just to host a marker.
     return clean, instructions, True

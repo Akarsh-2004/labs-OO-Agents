@@ -34,7 +34,7 @@ from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
 from nooa.context_blocks.renderer import render_context
 from nooa.context_blocks.renderers.cached import CachedBlockFormatter
 from nooa.storage import SQLiteStorageManager
-from nooa.unifiedllm import CompletionClient, LLMResponse, ResponsesClient, Tool
+from nooa.unifiedllm import CacheBoundary, CompletionClient, LLMResponse, ResponsesClient, Tool
 from nooa.unifiedllm.http_config import HttpConfig
 from nooa.unifiedllm.retry_config import RetryConfig
 
@@ -129,7 +129,7 @@ def _client(family):
     return CompletionClient(**config, max_tokens=2048)
 
 
-def _render(family, events, instructions, live_state):
+def _render(family, events, instructions, live_state, *, stable_image=False):
     blocks = [
         ResolvedBlock(
             key="instructions",
@@ -154,13 +154,31 @@ def _render(family, events, instructions, live_state):
             metadata=BlockMetadata(static=False, user_block=True),
         ),
     ]
-    return render_context(
+    messages = render_context(
         blocks,
         block_formatter=CachedBlockFormatter(),
         provider_formatter=(
             ResponsesProviderFormatter() if family == "openai" else OpenAIProviderFormatter()
         ),
     ).output
+    if stable_image:
+        # A fixed attachment after history must be inside the cache boundary,
+        # not left after a breakpoint on preceding text. This adds no API calls.
+        png = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        boundary = next(
+            i for i, message in enumerate(messages) if isinstance(message, CacheBoundary)
+        )
+        messages.insert(
+            boundary,
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Inert reference image; continue the task."},
+                    {"type": "image_url", "image_url": {"url": png}},
+                ],
+            },
+        )
+    return messages
 
 
 @pytest.mark.asyncio
@@ -220,7 +238,9 @@ async def test_reasoning_and_prompt_cache_survive_sqlite_resume(family, tmp_path
         instructions += "\n" + "\n".join(
             f"Record {i}: amber birch cedar dune elm fern grove hill." for i in range(rows)
         )
-        warm_messages = _render(family, events, instructions, "phase=warm")
+        warm_messages = _render(
+            family, events, instructions, "phase=warm", stable_image=family != "gemini"
+        )
         warm = await client.acall(warm_messages, tools=[TOOL])
         _report_usage(family, "warm", warm)
 
@@ -240,7 +260,9 @@ async def test_reasoning_and_prompt_cache_survive_sqlite_resume(family, tmp_path
     assert saved_response.parts == seed.parts
     assert saved_response.replay_scope == seed.replay_scope
     assert saved_response.usage == seed.usage
-    replay_messages = _render(family, restored, instructions, "phase=resumed")
+    replay_messages = _render(
+        family, restored, instructions, "phase=resumed", stable_image=family != "gemini"
+    )
     # Archive loading intentionally omits transient SDK responses and parsed
     # objects. Compare the public messages here; parts/native are checked above.
     assert [dict(message) for message in warm_messages[:-1]] == [
@@ -272,6 +294,11 @@ async def test_reasoning_and_prompt_cache_survive_sqlite_resume(family, tmp_path
     assert "phase=resumed" in json.dumps(resumed_suffix)
     assert warm_suffix != resumed_suffix
     assert warm_wire == resumed_wire, "SQLite resume changed the stable provider request"
+    if family != "gemini":
+        last_stable_block = resumed_wire[field][-1]["content"][-1]
+        marker = "prompt_cache_breakpoint" if family == "openai" else "cache_control"
+        assert last_stable_block["type"] == ("input_image" if family == "openai" else "image")
+        assert marker in last_stable_block, "stable image was left outside the cache breakpoint"
     wire_json = json.dumps(resumed_wire)
     assert all(secret in wire_json for secret in _secrets(saved_response)), (
         "native replay string missing on wire"

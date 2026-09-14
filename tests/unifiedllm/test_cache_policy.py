@@ -90,6 +90,59 @@ def test_boundary_copies_only_the_marker_target_containers():
     assert wire[2] is original[3]
 
 
+@pytest.mark.parametrize("with_text", [False, True])
+@pytest.mark.parametrize(
+    "mapping,block",
+    [
+        ("openai", {"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="}),
+        ("openai", {"type": "input_file", "file_id": "file-test"}),
+        (
+            "anthropic",
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGVsbG8="}},
+        ),
+        (
+            "anthropic",
+            {
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/png", "data": "aGVsbG8="},
+            },
+        ),
+        (
+            "anthropic",
+            {
+                "type": "document",
+                "source": {"type": "text", "media_type": "text/plain", "data": "stable"},
+            },
+        ),
+        ("anthropic", {"type": "file", "file": {"file_id": "file-test"}}),
+    ],
+)
+def test_boundary_marks_last_stable_multimodal_block(mapping, block, with_text):
+    content = (
+        [{"type": "input_text" if mapping == "openai" else "text", "text": "stable"}]
+        if with_text
+        else []
+    ) + [block]
+    original = [
+        {"role": "user", "content": content},
+        CacheBoundary(),
+        {"role": "user", "content": "dynamic"},
+    ]
+    before = json.dumps([dict(message) for message in original])
+    wire, _, _ = apply_cache_policy(original, mapping, responses=mapping == "openai")
+    key, marker = (
+        ("prompt_cache_breakpoint", {"mode": "explicit"})
+        if mapping == "openai"
+        else ("cache_control", {"type": "ephemeral"})
+    )
+    assert wire[0]["content"][-1] == {**block, key: marker}
+    assert wire[1] is original[2]
+    if with_text:
+        assert wire[0]["content"][0] is content[0]
+        assert key not in wire[0]["content"][0]
+    assert json.dumps([dict(message) for message in original]) == before
+
+
 @pytest.mark.parametrize("mapping", [None, "anthropic", "openai"])
 def test_no_stable_prefix_never_marks_dynamic_content(mapping, caplog):
     messages = [
