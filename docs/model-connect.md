@@ -14,8 +14,13 @@ uv run nooa connect
 ```
 
 Choose NVIDIA (build.nvidia.com), OpenAI, Anthropic, Google (Gemini), OpenRouter,
-or a custom endpoint. Presets fill in the public server URL, API format and key
-variable; model names still come from the endpoint, not a bundled list.
+or a custom endpoint. Presets fill in the public server URL and key variable;
+model names still come from the endpoint, not a bundled list. The order is
+server, credentials, model selection, then the request interface for that model.
+Presets suggest an interface, but an interactive setup asks you to confirm it
+after model selection. A server listing models is not evidence that every model
+on it uses the same interface. `--api-style` supplies an explicit choice, and
+scripted `--yes --provider ...` setup uses the preset default if none is supplied.
 The wizard asks what to call the model locally. It looks up model information, shows
 the proposed checks and their budget, then asks before sending paid requests.
 Each check shows progress and its result as it runs. Saving is a separate

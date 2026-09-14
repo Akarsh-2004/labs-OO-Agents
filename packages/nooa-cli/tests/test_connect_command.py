@@ -181,8 +181,8 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
         command,
         [],
         input=(
-            "custom\nhttps://api.test/v1\nchat\nCONNECT_WIZARD_KEY\ntemporary-secret\n"
-            "example-model\nmy-model\ny\ny\n"
+            "custom\nhttps://api.test/v1\nCONNECT_WIZARD_KEY\ntemporary-secret\n"
+            "example-model\nchat\nmy-model\ny\ny\n"
         ),
     )
     assert result.exit_code == 0, result.output
@@ -239,7 +239,7 @@ def test_provider_menu_fills_connection_defaults(
     monkeypatch.setattr(connect, "discover", discover)
     monkeypatch.setenv(key_env, "preset-test-key")
     result = CliRunner().invoke(
-        command, ["--no-catalogue", "--no-probe"], input=f"{provider}\ntest-model\nmy-model\ny\n"
+        command, ["--no-catalogue", "--no-probe"], input=f"{provider}\ntest-model\n\nmy-model\ny\n"
     )
     assert result.exit_code == 0, result.output
     assert seen == [(base, {"api_style": style, "api_key": "preset-test-key"})]
@@ -248,6 +248,48 @@ def test_provider_menu_fills_connection_defaults(
     assert "preset-test-key" not in result.output
     assert "Model server URL:" not in result.output
     assert "Key environment variable" not in result.output
+    assert result.output.index("Model:") < result.output.index("API format [")
+
+
+@pytest.mark.parametrize("style", ["chat", "responses", "anthropic"])
+def test_mixed_endpoint_selects_model_before_request_interface(tmp_path, monkeypatch, style):
+    import httpx
+
+    real_client = httpx.AsyncClient
+    seen = []
+
+    def handle(request):
+        seen.append(request)
+        assert request.method == "GET"
+        assert request.url.path == "/v1/models"
+        return httpx.Response(
+            200, json={"data": [{"id": "vendor-a/model"}, {"id": "vendor-b/model"}]}
+        )
+
+    monkeypatch.setattr(
+        httpx, "AsyncClient", lambda **kw: real_client(transport=httpx.MockTransport(handle), **kw)
+    )
+    path = tmp_path / "models.yaml"
+    result = CliRunner().invoke(
+        command,
+        [
+            "--endpoint",
+            "https://api.test/v1",
+            "--api-key-env",
+            "",
+            "--no-catalogue",
+            "--no-probe",
+            "--output",
+            str(path),
+        ],
+        input=f"vendor-b/model\n{style}\nselected\ny\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert len(seen) == 1
+    assert result.output.index("Model:") < result.output.index("API format [")
+    entry = yaml.safe_load(path.read_text())["models"]["selected"]
+    assert entry["api_style"] == style
+    assert entry["model_name"].endswith("/vendor-b/model")
 
 
 def test_provider_flag_supports_scripted_setup(tmp_path):

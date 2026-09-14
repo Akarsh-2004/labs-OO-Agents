@@ -91,6 +91,7 @@ def command(
 
     path = Path(output) if output else get_user_dir("llm_config.yaml")
     try:
+        default_style = "chat"
         click.echo("NOOA Connect — set up a model, check it, then choose whether to save.")
         click.echo("Type to filter choices; Tab completes. Arrow keys edit; Ctrl-C cancels.")
         if provider and provider not in (*connect.PROVIDERS, "custom"):
@@ -106,24 +107,24 @@ def command(
         if provider and provider != "custom":
             preset = connect.PROVIDERS[provider]
             endpoint = endpoint or preset.api_base
-            api_style = api_style or preset.api_style
+            default_style = preset.api_style
             if api_key_env is None:
                 api_key_env = preset.api_key_env
+        if yes and provider and provider != "custom":
+            api_style = api_style or default_style
         if yes and not all((model, alias, endpoint, api_style)):
             raise click.UsageError("With --yes supply MODEL, --endpoint, --api-style and --as.")
         endpoint = endpoint or prompt(
             "Model server URL", suggestions=[p.api_base for p in connect.PROVIDERS.values()]
         )
         endpoint = connect.normalize_endpoint(endpoint)
-        if not api_style:
-            click.echo(
-                "API format: chat = OpenAI-compatible; responses = OpenAI Responses; anthropic = Anthropic Messages."
-            )
-            api_style = prompt(
-                "API format", choices=["chat", "responses", "anthropic"], default="chat"
-            )
+        # Listing/authentication conventions do not choose the selected model's
+        # generation interface. A mixed server can list all models via /models.
+        discovery_style = api_style or default_style
         if api_key_env is None:
-            default_env = "ANTHROPIC_API_KEY" if api_style == "anthropic" else "OPENAI_API_KEY"
+            default_env = (
+                "ANTHROPIC_API_KEY" if discovery_style == "anthropic" else "OPENAI_API_KEY"
+            )
             api_key_env = (
                 default_env
                 if yes
@@ -138,7 +139,9 @@ def command(
             if api_key_env == "-":
                 api_key_env = ""
         # Validate before using an endpoint or collecting a credential.
-        connect.plan(alias or "candidate", model or "candidate", api_style, endpoint, api_key_env)
+        connect.plan(
+            alias or "candidate", model or "candidate", discovery_style, endpoint, api_key_env
+        )
         needs_key = not yes and not no_probe and api_key_env and not os.environ.get(api_key_env)
         api_key = (
             prompt("API key (used only for this setup)", hide_input=True)
@@ -151,7 +154,7 @@ def command(
             click.echo("Connecting to the server and listing models...")
             try:
                 found = asyncio.run(
-                    connect.discover(endpoint, api_style=api_style, api_key=api_key)
+                    connect.discover(endpoint, api_style=discovery_style, api_key=api_key)
                 )
             except connect.DiscoveryError as exc:
                 click.echo(f"Could not list models: {exc}", err=True)
@@ -167,6 +170,14 @@ def command(
                     f"Connected. Found {len(names)} model(s). Type part of a name to search, then Tab to select."
                 )
                 model = prompt("Model", choices=names)
+        if not api_style:
+            click.echo(f"Choose the request interface for {model}:")
+            click.echo(
+                "chat = OpenAI-compatible; responses = OpenAI Responses; anthropic = Anthropic Messages."
+            )
+            api_style = prompt(
+                "API format", choices=["chat", "responses", "anthropic"], default=default_style
+            )
         existing = None
         data = {}
         if path.exists():
