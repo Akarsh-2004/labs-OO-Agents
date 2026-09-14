@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+import pytest
 import yaml
 from click.testing import CliRunner
 from nooa_cli.commands.connect import command
@@ -180,7 +181,7 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
         command,
         [],
         input=(
-            "https://api.test/v1\nchat\nCONNECT_WIZARD_KEY\ntemporary-secret\n"
+            "custom\nhttps://api.test/v1\nchat\nCONNECT_WIZARD_KEY\ntemporary-secret\n"
             "example-model\nmy-model\ny\ny\n"
         ),
     )
@@ -206,3 +207,82 @@ def test_bare_command_cancel_before_endpoint_does_nothing(tmp_path, monkeypatch)
     result = CliRunner().invoke(command, [], input="")
     assert result.exit_code == 1
     assert not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize(
+    "provider,base,style,key_env",
+    [
+        ("nvidia", "https://integrate.api.nvidia.com/v1", "chat", "NVIDIA_API_KEY"),
+        ("openai", "https://api.openai.com/v1", "responses", "OPENAI_API_KEY"),
+        ("anthropic", "https://api.anthropic.com/v1", "anthropic", "ANTHROPIC_API_KEY"),
+        (
+            "google",
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+            "chat",
+            "GEMINI_API_KEY",
+        ),
+        ("openrouter", "https://openrouter.ai/api/v1", "chat", "OPENROUTER_API_KEY"),
+    ],
+)
+def test_provider_menu_fills_connection_defaults(
+    tmp_path, monkeypatch, provider, base, style, key_env
+):
+    from nooa import connect, paths
+
+    seen = []
+
+    async def discover(endpoint, **kwargs):
+        seen.append((endpoint, kwargs))
+        return connect.Discovery(endpoint, ({"id": "test-model"},))
+
+    monkeypatch.setattr(paths, "get_user_dir", lambda name: tmp_path / name)
+    monkeypatch.setattr(connect, "discover", discover)
+    monkeypatch.setenv(key_env, "preset-test-key")
+    result = CliRunner().invoke(
+        command, ["--no-catalogue", "--no-probe"], input=f"{provider}\ntest-model\nmy-model\ny\n"
+    )
+    assert result.exit_code == 0, result.output
+    assert seen == [(base, {"api_style": style, "api_key": "preset-test-key"})]
+    entry = yaml.safe_load((tmp_path / "llm_config.yaml").read_text())["models"]["my-model"]
+    assert (entry["api_base"], entry["api_style"], entry["api_key_env"]) == (base, style, key_env)
+    assert "preset-test-key" not in result.output
+    assert "Model server URL:" not in result.output
+    assert "Key environment variable" not in result.output
+
+
+def test_provider_flag_supports_scripted_setup(tmp_path):
+    path = tmp_path / "models.yaml"
+    result = CliRunner().invoke(
+        command,
+        [
+            "test-model",
+            "--provider",
+            "nvidia",
+            "--as",
+            "local",
+            "--no-catalogue",
+            "--no-probe",
+            "--yes",
+            "--output",
+            str(path),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert yaml.safe_load(path.read_text())["models"]["local"]["api_key_env"] == "NVIDIA_API_KEY"
+
+
+def test_large_model_list_and_invalid_choice_do_not_flood_terminal(tmp_path, monkeypatch):
+    from nooa import connect
+
+    async def discover(endpoint, **kwargs):
+        return connect.Discovery(endpoint, tuple({"id": f"vendor/model-{i}"} for i in range(1000)))
+
+    monkeypatch.setattr(connect, "discover", discover)
+    result = CliRunner().invoke(
+        command, args(tmp_path / "models.yaml")[1:], input="wrong\nvendor/model-42\ny\n"
+    )
+    assert result.exit_code == 0, result.output
+    assert "1000 model(s)" in result.output
+    assert "vendor/model-999" not in result.output
+    assert "vendor/model-998" not in result.output
+    assert len(result.output) < 6000

@@ -13,16 +13,28 @@ Start the guided setup with no arguments:
 uv run nooa connect
 ```
 
-It asks for the server URL, API format and key, lists models to choose from,
-and asks what to call the model locally. It looks up model information, shows
+Choose NVIDIA (build.nvidia.com), OpenAI, Anthropic, Google (Gemini), OpenRouter,
+or a custom endpoint. Presets fill in the public server URL, API format and key
+variable; model names still come from the endpoint, not a bundled list.
+The wizard asks what to call the model locally. It looks up model information, shows
 the proposed checks and their budget, then asks before sending paid requests.
 Each check shows progress and its result as it runs. Saving is a separate
 confirmation; Ctrl-C cancels setup. A pasted key is used only for this session;
 the saved entry names its environment variable, not its value.
 
+In a terminal, type part of a model name to filter a scrolling completion menu;
+Tab selects a match. Large catalogues do not print every model into the prompt.
+Provider, endpoint, API-format, alias, catalogue and confirmation prompts also
+complete their available choices. Key-variable completion uses environment
+variable **names only**, never their values. Secret entry is masked and has no
+completion or history. Arrow keys, Home/End, Backspace and Delete edit the
+current answer, including prefilled defaults. Piped input uses plain line prompts.
+
 Flags can prefill answers or support scripted setup:
 
 ```sh
+uv run nooa connect --provider nvidia
+
 uv run nooa connect gateway/model --as work-model \
   --endpoint https://gateway.example/v1 --api-style chat \
   --api-key-env MY_MODEL_KEY
@@ -36,6 +48,15 @@ name the appropriate key environment variable. `--prompt-key` reads a masked key
 for this setup only; Connect never saves it or changes environment variables.
 An empty `--api-key-env ''` supports local servers without authentication.
 In the wizard, enter `-` at the key-variable prompt for no authentication.
+
+Preset endpoints follow the public connection guides for
+[NVIDIA](https://docs.api.nvidia.com/nim/docs/api-quickstart),
+[OpenAI](https://developers.openai.com/api/reference/overview),
+[Anthropic](https://platform.claude.com/docs/en/api/overview),
+[Google's OpenAI-compatible API](https://ai.google.dev/gemini-api/docs/openai), and
+[OpenRouter](https://openrouter.ai/docs/quickstart). They do not certify that a
+particular model supports every optional feature; the approved probes check that
+endpoint. Frontends can reuse the defaults through `connect.PROVIDERS`.
 
 OpenRouter metadata supplies candidate model names, context and output limits,
 prices and reasoning levels where present. Confirm the candidate; a matching

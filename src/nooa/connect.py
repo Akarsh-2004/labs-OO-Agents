@@ -44,6 +44,36 @@ _PATHS = {"chat": "chat/completions", "responses": "responses", "anthropic": "me
 
 
 @dataclass(frozen=True)
+class ProviderPreset:
+    """Public connection defaults shared by frontends; models are discovered live."""
+
+    label: str
+    api_base: str
+    api_style: str
+    api_key_env: str
+
+
+PROVIDERS = {
+    "nvidia": ProviderPreset(
+        "NVIDIA (build.nvidia.com)", "https://integrate.api.nvidia.com/v1", "chat", "NVIDIA_API_KEY"
+    ),
+    "openai": ProviderPreset("OpenAI", "https://api.openai.com/v1", "responses", "OPENAI_API_KEY"),
+    "anthropic": ProviderPreset(
+        "Anthropic", "https://api.anthropic.com/v1", "anthropic", "ANTHROPIC_API_KEY"
+    ),
+    "google": ProviderPreset(
+        "Google (Gemini)",
+        "https://generativelanguage.googleapis.com/v1beta/openai",
+        "chat",
+        "GEMINI_API_KEY",
+    ),
+    "openrouter": ProviderPreset(
+        "OpenRouter", "https://openrouter.ai/api/v1", "chat", "OPENROUTER_API_KEY"
+    ),
+}
+
+
+@dataclass(frozen=True)
 class Probe:
     """One proposed POST, with no credentials in its body."""
 

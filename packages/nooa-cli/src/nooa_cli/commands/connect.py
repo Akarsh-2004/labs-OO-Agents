@@ -7,6 +7,10 @@ import click
 
 @click.command()
 @click.argument("model", required=False)
+@click.option(
+    "--provider",
+    help="Connection preset: nvidia, openai, anthropic, google, openrouter, or custom.",
+)
 @click.option("--as", "alias", help="Local model alias to save (otherwise prompted).")
 @click.option("--endpoint", help="API base URL (otherwise prompted).")
 @click.option("--api-style", type=click.Choice(["chat", "responses", "anthropic"]))
@@ -46,6 +50,7 @@ import click
 @click.option("--yes", is_flag=True, help="Approve the displayed plan and write without prompting.")
 def command(
     model,
+    provider,
     alias,
     endpoint,
     api_style,
@@ -67,7 +72,8 @@ def command(
     """Walk through model setup, check the connection, and save an alias.
 
     Run `uv run nooa connect` with no arguments for guided setup. Flags prefill
-    the answers; --yes requires MODEL, --endpoint, --api-style and --as.
+    the answers; --yes requires MODEL, --as and either --provider or an
+    explicit --endpoint and --api-style.
     MODEL is the exact endpoint model ID, without a LiteLLM routing prefix.
     """
     import asyncio
@@ -81,27 +87,52 @@ def command(
     from nooa import connect
     from nooa.paths import get_user_dir
 
+    from ._connect_prompts import confirm, environment_names, prompt
+
     path = Path(output) if output else get_user_dir("llm_config.yaml")
     try:
+        click.echo("NOOA Connect — set up a model, check it, then choose whether to save.")
+        click.echo("Type to filter choices; Tab completes. Arrow keys edit; Ctrl-C cancels.")
+        if provider and provider not in (*connect.PROVIDERS, "custom"):
+            raise click.UsageError(
+                "Unknown provider. Choose nvidia, openai, anthropic, google, openrouter, or custom."
+            )
+        if not provider and not endpoint and not yes:
+            click.echo("Choose a provider (or custom for another server):")
+            for name, preset in connect.PROVIDERS.items():
+                click.echo(f"  {name}: {preset.label}")
+            click.echo("  custom: Custom endpoint")
+            provider = prompt("Provider", choices=(*connect.PROVIDERS, "custom"))
+        if provider and provider != "custom":
+            preset = connect.PROVIDERS[provider]
+            endpoint = endpoint or preset.api_base
+            api_style = api_style or preset.api_style
+            if api_key_env is None:
+                api_key_env = preset.api_key_env
         if yes and not all((model, alias, endpoint, api_style)):
             raise click.UsageError("With --yes supply MODEL, --endpoint, --api-style and --as.")
-        click.echo("NOOA Connect — set up a model, check it, then choose whether to save.")
-        endpoint = endpoint or click.prompt("Model server URL")
+        endpoint = endpoint or prompt(
+            "Model server URL", suggestions=[p.api_base for p in connect.PROVIDERS.values()]
+        )
         endpoint = connect.normalize_endpoint(endpoint)
         if not api_style:
             click.echo(
                 "API format: chat = OpenAI-compatible; responses = OpenAI Responses; anthropic = Anthropic Messages."
             )
-            api_style = click.prompt(
-                "API format", type=click.Choice(["chat", "responses", "anthropic"]), default="chat"
+            api_style = prompt(
+                "API format", choices=["chat", "responses", "anthropic"], default="chat"
             )
         if api_key_env is None:
             default_env = "ANTHROPIC_API_KEY" if api_style == "anthropic" else "OPENAI_API_KEY"
             api_key_env = (
                 default_env
                 if yes
-                else click.prompt(
-                    "Key environment variable (enter - for no authentication)", default=default_env
+                else prompt(
+                    "Key environment variable (enter - for no authentication)",
+                    default=default_env,
+                    suggestions=environment_names(
+                        [p.api_key_env for p in connect.PROVIDERS.values()] + ["-"]
+                    ),
                 )
             )
             if api_key_env == "-":
@@ -110,7 +141,7 @@ def command(
         connect.plan(alias or "candidate", model or "candidate", api_style, endpoint, api_key_env)
         needs_key = not yes and not no_probe and api_key_env and not os.environ.get(api_key_env)
         api_key = (
-            click.prompt("API key (used only for this setup)", hide_input=True)
+            prompt("API key (used only for this setup)", hide_input=True)
             if prompt_key or needs_key
             else os.environ.get(api_key_env)
             if api_key_env
@@ -128,23 +159,31 @@ def command(
                     raise click.ClickException(
                         "Authentication failed. Check the key and try again."
                     ) from None
-                model = click.prompt("Exact model ID (if known; Ctrl-C to cancel)")
+                model = prompt("Exact model ID (if known; Ctrl-C to cancel)")
             else:
                 endpoint = found.api_base
                 names = [item["id"] for item in found.models]
-                click.echo(f"Connected. Found {len(names)} model(s):\n" + "\n".join(names))
-                model = click.prompt("Model", type=click.Choice(names))
-        alias = alias or click.prompt("Save this model as", default=model.rsplit("/", 1)[-1])
+                click.echo(
+                    f"Connected. Found {len(names)} model(s). Type part of a name to search, then Tab to select."
+                )
+                model = prompt("Model", choices=names)
         existing = None
+        data = {}
         if path.exists():
             text = path.read_text()
             data = yaml.safe_load(text) or {}
             if not isinstance(data, dict) or not isinstance(data.get("models", {}), dict):
                 raise click.ClickException("Registry must contain a models mapping.")
+        alias = alias or prompt(
+            "Save this model as",
+            default=model.rsplit("/", 1)[-1],
+            suggestions=list(data.get("models", {})) + [model.rsplit("/", 1)[-1]],
+        )
+        if path.exists():
             existing = data.get("models", {}).get(alias)
             if alias in data.get("models", {}):
                 click.echo(f"Warning: saving will overwrite model {alias!r} in {path}.", err=True)
-                if not yes and not click.confirm("Replace this model?", default=False):
+                if not yes and not confirm("Replace this model?", default=False):
                     return
         candidate = None
         if no_catalogue and catalogue_model:
@@ -173,7 +212,7 @@ def command(
                 click.echo(
                     f"Catalogue candidate: {matches[0]['id']} (not proof of the endpoint's capabilities)"
                 )
-                if yes or click.confirm("Use this candidate's metadata?", default=True):
+                if yes or confirm("Use this candidate's metadata?", default=True):
                     candidate = matches[0]
             elif matches:
                 click.echo(
@@ -183,8 +222,11 @@ def command(
                     raise click.ClickException(
                         "Ambiguous match: choose --catalogue-model or --no-catalogue."
                     )
-                selected = click.prompt(
-                    "Catalogue model (blank leaves it unknown)", default="", show_default=False
+                selected = prompt(
+                    "Catalogue model (blank leaves it unknown)",
+                    default="",
+                    show_default=False,
+                    choices=[""] + [item["id"] for item in matches],
                 )
                 if selected:
                     candidate = next((item for item in matches if item["id"] == selected), None)
@@ -251,11 +293,7 @@ def command(
         click.echo(
             "No retries or capacity probes. Estimates are not billing limits: endpoints can ignore output caps."
         )
-        if (
-            approval != "none"
-            and not yes
-            and not click.confirm("Run these paid probes?", default=False)
-        ):
+        if approval != "none" and not yes and not confirm("Run these paid probes?", default=False):
             approval = "none"
 
         async def check():
@@ -283,7 +321,7 @@ def command(
             raise click.ClickException("Checks ended without a result.")
 
         result = asyncio.run(check())
-        if yes or click.confirm(f"Write model entry to {path}?", default=True):
+        if yes or confirm(f"Write model entry to {path}?", default=True):
             connect.write(result.entry, path, alias=alias)
             click.echo(f"Saved {alias} to {path}.")
             if api_key and not os.environ.get(api_key_env):
