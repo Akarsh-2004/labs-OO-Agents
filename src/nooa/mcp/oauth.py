@@ -594,9 +594,16 @@ class OAuthHandler:
         logger.info(f"OAuth callback server listening on {actual_redirect_uri}")
 
         def serve() -> None:
-            while not done.is_set():
-                server.handle_request()
-            server.server_close()
+            try:
+                while not done.is_set():
+                    server.handle_request()
+            except (OSError, ValueError):
+                # Cleanup can close the socket between the done check and
+                # handle_request's selector registration. Suppress only shutdown.
+                if not done.is_set():
+                    raise
+            finally:
+                server.server_close()
 
         # Run the blocking server loop in a thread (asyncio.to_thread is for one-shot
         # functions, but this is a long-running loop that needs to run until done)

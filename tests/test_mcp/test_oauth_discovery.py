@@ -1119,3 +1119,57 @@ async def test_handle_mcp_oauth_prefers_client_credentials(monkeypatch, tmp_path
 
     assert token.access_token == "cc-token"
     assert called.get("cc") is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [OSError, ValueError])
+@pytest.mark.parametrize("ending", ["timeout", "cancel"])
+async def test_callback_worker_ignores_only_shutdown_socket_races(monkeypatch, error_type, ending):
+    """Closing the listener between the done check and select must not leak a traceback."""
+    entered = threading.Event()
+    closed = threading.Event()
+    thread_errors = []
+    servers = []
+    server_type = oauth.HTTPServer
+
+    class RacingServer(server_type):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            servers.append(self)
+
+        def handle_request(self):
+            entered.set()
+            assert closed.wait(2), "cleanup did not close the callback listener"
+            raise error_type("listener closed before selector registration")
+
+        def server_close(self):
+            super().server_close()
+            closed.set()
+
+    monkeypatch.setattr(oauth, "HTTPServer", RacingServer)
+    monkeypatch.setattr(threading, "excepthook", thread_errors.append)
+    config = oauth.OAuthConfig(
+        authorization_endpoint="https://maas.example/authorize",
+        token_endpoint="https://maas.example/token",
+        client_id="client-id",
+        redirect_uri="http://localhost:0/callback",
+        timeout=0.05 if ending == "timeout" else 30,
+    )
+    task = asyncio.create_task(
+        oauth.OAuthHandler(config)._capture_code_via_local_server(open_browser=False)
+    )
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        if ending == "cancel":
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            with pytest.raises(RuntimeError, match="timed out"):
+                await task
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+    assert not thread_errors
+    assert len(servers) == 1 and servers[0].fileno() == -1
