@@ -114,6 +114,18 @@ def command(
 
     path = Path(output) if output else get_user_dir("llm_config.yaml")
     try:
+        data = yaml.safe_load(path.read_text()) or {} if path.exists() else {}
+        if not isinstance(data, dict) or not isinstance(data.get("models", {}), dict):
+            raise click.ClickException("Registry must contain a models mapping.")
+        server_urls = [p.api_base for p in connect.PROVIDERS.values()]
+        for entry in data.get("models", {}).values():
+            address = entry.get("api_base") if isinstance(entry, dict) else None
+            if isinstance(address, str):
+                try:
+                    server_urls.append(connect.normalize_endpoint(address))
+                except ValueError:
+                    pass  # Do not offer malformed URLs or embedded credentials.
+        server_urls = list(dict.fromkeys(server_urls))
         default_style = "chat"
         approval = "none" if no_probe else probe
         interfaces = None
@@ -145,9 +157,7 @@ def command(
             api_style = api_style or default_style
         if yes and not all((model, alias, endpoint, api_style)):
             raise click.UsageError("With --yes supply MODEL, --endpoint, --api-style and --as.")
-        endpoint = endpoint or prompt(
-            "Model server URL", suggestions=[p.api_base for p in connect.PROVIDERS.values()]
-        )
+        endpoint = endpoint or prompt("Model server URL", suggestions=server_urls)
         endpoint = connect.normalize_endpoint(endpoint)
         # Listing/authentication conventions do not choose the selected model's
         # generation interface. A mixed server can list all models via /models.
@@ -246,12 +256,6 @@ def command(
                     default=default_style if default_style in available else available[0],
                 )
         existing = None
-        data = {}
-        if path.exists():
-            text = path.read_text()
-            data = yaml.safe_load(text) or {}
-            if not isinstance(data, dict) or not isinstance(data.get("models", {}), dict):
-                raise click.ClickException("Registry must contain a models mapping.")
         alias = alias or prompt(
             "Save this model as",
             default=model.rsplit("/", 1)[-1],

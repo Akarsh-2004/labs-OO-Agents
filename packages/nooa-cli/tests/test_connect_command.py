@@ -597,3 +597,56 @@ def test_large_model_list_and_invalid_choice_do_not_flood_terminal(tmp_path, mon
     assert "vendor/model-999" not in result.output
     assert "vendor/model-998" not in result.output
     assert len(result.output) < 6000
+
+
+@pytest.mark.parametrize("custom_path", [False, True])
+def test_server_url_suggestions_include_existing_file_without_credentials(
+    tmp_path, monkeypatch, custom_path
+):
+    import click
+    from nooa_cli.commands import _connect_prompts
+
+    from nooa import paths
+
+    path = tmp_path / "models.yaml"
+    original = yaml.safe_dump(
+        {
+            "models": {
+                "one": {"api_base": "https://first.example/v1", "api_key": "do-not-complete"},
+                "two": {"api_base": "https://second.example/v1"},
+                "duplicate": {"api_base": "https://first.example/v1/"},
+                "preset": {"api_base": "https://api.openai.com/v1"},
+                "no-url": {"model_name": "some-model"},
+                "bad": {"api_base": None},
+                "secret-url": {"api_base": "https://user:secret@private.example/v1"},
+            }
+        }
+    )
+    path.write_text(original)
+    monkeypatch.setattr(paths, "get_user_dir", lambda name: path)
+    seen = []
+
+    def prompt(text, **kwargs):
+        assert text == "Model server URL"
+        seen.extend(kwargs["suggestions"])
+        raise click.Abort()
+
+    monkeypatch.setattr(_connect_prompts, "prompt", prompt)
+    result = CliRunner().invoke(
+        command,
+        [
+            "--provider",
+            "custom",
+            "--no-probe",
+            "--no-catalogue",
+            *(["--output", str(path)] if custom_path else []),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "https://first.example/v1" in seen
+    assert "https://second.example/v1" in seen
+    assert "https://api.openai.com/v1" in seen
+    assert len(seen) == len(set(seen))
+    assert "https://first.example/v1/" not in seen
+    assert "secret" not in str(seen) and "do-not-complete" not in str(seen)
+    assert path.read_text() == original
