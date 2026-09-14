@@ -39,3 +39,56 @@ def test_no_color_keeps_readable_titles_and_warning(monkeypatch):
     assert "\x1b[" not in result.output
     assert "Connection" in result.output
     assert "may incur charges" in result.output
+
+
+def test_model_details_show_published_limits_separately_from_setup_cap():
+    @click.command()
+    def command():
+        view.model_details(
+            {
+                "id": "vendor/example",
+                "context_length": 128000,
+                "top_provider": {"max_completion_tokens": 16384},
+                "reasoning": {
+                    "supported_efforts": ["low", "medium", "high"],
+                    "default_effort": "medium",
+                },
+                "default_parameters": {"max_tokens": 4096},
+            },
+            output_tokens=200,
+        )
+
+    result = CliRunner().invoke(command)
+    assert result.exit_code == 0, result.output
+    for text in (
+        "vendor/example",
+        "128,000",
+        "16,384",
+        "low, medium, high",
+        "medium",
+        "4,096",
+        "200",
+    ):
+        assert text in result.output
+    assert "Published output default" in result.output
+    assert "Setup check limit" in result.output
+    assert "Source: OpenRouter" in result.output
+    assert "not proof" not in result.output
+
+
+def test_missing_model_details_stay_unknown_instead_of_becoming_recommendations():
+    @click.command()
+    def command():
+        view.model_details(
+            {
+                "id": "vendor/example",
+                "context_length": None,
+                "top_provider": {"max_completion_tokens": False},
+            },
+            output_tokens=200,
+        )
+
+    result = CliRunner().invoke(command)
+    assert result.exit_code == 0, result.output
+    assert result.output.count("Not listed") == 5
+    assert "0 tokens" not in result.output.replace("200 tokens", "")

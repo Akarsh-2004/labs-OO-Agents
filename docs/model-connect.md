@@ -25,8 +25,12 @@ stops with guidance to fix the connection or use explicit manual settings.
 A server listing models is not evidence that every model on it uses the same
 interface. `--api-style` supplies an explicit choice and skips interface detection;
 scripted `--yes --provider ...` setup uses the preset default if none is supplied.
-The wizard asks what to call the model locally. It looks up model information and
-shows the remaining checks and budget. The initial warning explains that setup
+The wizard asks what to call the model locally. It shows published model details
+before asking to use them: context window, maximum output, reasoning levels,
+reasoning default and output default when listed. Missing values say “Not listed.”
+These come from OpenRouter's model listing; server limits may differ. The setup
+check's output cap is shown separately and does not become the model's default.
+It then shows the remaining checks and budget. The initial warning explains that setup
 makes paid API calls; there are no repeated approval prompts for these checks.
 Each check shows progress and its result as it runs. Saving is a separate
 confirmation; Ctrl-C cancels setup. A pasted key is used only for this session;

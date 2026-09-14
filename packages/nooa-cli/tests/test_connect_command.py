@@ -326,6 +326,35 @@ def test_script_mode_requires_missing_options_without_prompting():
     assert "--endpoint" in result.output
 
 
+@pytest.mark.parametrize("ambiguous", [False, True])
+def test_model_details_appear_before_accepting_published_settings(tmp_path, monkeypatch, ambiguous):
+    from nooa import connect
+
+    model_info = {
+        "id": "wire/model",
+        "context_length": 128000,
+        "top_provider": {"max_completion_tokens": 8192},
+        "reasoning": {"supported_efforts": ["low", "high"], "default_effort": "low"},
+    }
+
+    async def catalogue():
+        return [model_info, {"id": "other/model"}] if ambiguous else [model_info]
+
+    monkeypatch.setattr(connect, "catalogue", catalogue)
+    path = tmp_path / "models.yaml"
+    options = [arg for arg in args(path) if arg != "--no-catalogue"]
+    result = CliRunner().invoke(
+        command, options, input=("wire/model\n" if ambiguous else "") + "y\ny\n"
+    )
+    assert result.exit_code == 0, result.output
+    for text in ("128,000", "8,192", "low, high", "Source: OpenRouter"):
+        assert result.output.index(text) < result.output.index("Use these model details?")
+    assert "not proof" not in result.output
+    entry = yaml.safe_load(path.read_text())["models"]["local"]
+    assert entry["context_window"] == 128000
+    assert entry["reasoning_default"] == "low"
+
+
 def test_default_budget_covers_interfaces_tools_and_every_level(tmp_path, monkeypatch):
     import json
 

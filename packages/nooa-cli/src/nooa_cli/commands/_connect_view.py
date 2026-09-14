@@ -45,3 +45,34 @@ def step(number, title):
     click.echo()
     line(f"{number} / 4  ·  {title}", fg="bright_cyan", bold=True)
     click.echo()
+
+
+def model_details(model, *, output_tokens):
+    """Show published model information without changing any request settings."""
+
+    def tokens(value):
+        return (
+            f"{value:,} tokens"
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0
+            else "Not listed"
+        )
+
+    reasoning = model.get("reasoning") or {}
+    levels = reasoning.get("supported_efforts") or []
+    click.echo()
+    line(f"Model details · {model['id']}", fg="bright_cyan", bold=True)
+    for label, value in (
+        ("Context window", tokens(model.get("context_length"))),
+        ("Maximum output", tokens((model.get("top_provider") or {}).get("max_completion_tokens"))),
+        ("Reasoning levels", ", ".join(levels) if levels else "Not listed"),
+        ("Default reasoning", reasoning.get("default_effort") or "Not listed"),
+        (
+            "Published output default",
+            tokens((model.get("default_parameters") or {}).get("max_tokens")),
+        ),
+        ("Setup check limit", f"{output_tokens:,} tokens per reply (checks only)"),
+    ):
+        line(f"{label:<25} {value}")
+    line("Source: OpenRouter model listing. Your server may use different limits.", dim=True)
+    line("Setup checks do not measure maximum limits.", dim=True)
+    click.echo()

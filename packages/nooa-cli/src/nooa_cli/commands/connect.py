@@ -290,10 +290,8 @@ def command(
             if catalogue_model and not matches:
                 raise click.ClickException("Requested catalogue model was not found.")
             if len(matches) == 1:
-                click.echo(
-                    f"Catalogue candidate: {matches[0]['id']} (not proof of the endpoint's capabilities)"
-                )
-                if yes or confirm("Use this candidate's metadata?", default=True):
+                view.model_details(matches[0], output_tokens=output_tokens)
+                if yes or confirm("Use these model details?", default=True):
                     candidate = matches[0]
             elif matches:
                 click.echo(
@@ -313,6 +311,9 @@ def command(
                     candidate = next((item for item in matches if item["id"] == selected), None)
                     if candidate is None:
                         raise click.ClickException("Choose one of the displayed model IDs.")
+                    view.model_details(candidate, output_tokens=output_tokens)
+                    if not confirm("Use these model details?", default=True):
+                        candidate = None
             else:
                 click.echo("No catalogue match; model limits and reasoning levels remain unknown.")
         if levels_file and (levels or reasoning_template):
