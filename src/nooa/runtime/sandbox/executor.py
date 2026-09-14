@@ -399,6 +399,8 @@ class SandboxedExecutor:
         did not declare) or a malformed request.
         """
         kind, path = msg.get("kind"), msg.get("path") or []
+        if kind not in ("call", "attr", "setattr", "iter"):
+            raise CellSerializationError(f"malformed sandbox broker request: kind {kind!r}")
         if not isinstance(path, list) or not all(isinstance(p, str) for p in path):
             raise CellSerializationError("malformed sandbox broker request: bad path")
         call: dict[str, Any] = {"kind": kind, "path": path}

@@ -343,8 +343,9 @@ def test_refused_payload_is_answered_as_tool_error_without_dispatch():
         {"kind": "call", "path": [1], "payload": b""},
         {"kind": "call", "path": ["add_one"], "payload": CODEC.dumps([1])},
         {"kind": "call", "path": ["add_one"], "payload": CODEC.dumps((1, {}))},
+        {"kind": "bogus", "path": ["add_one"]},
     ],
-    ids=["payload-missing", "path-not-str", "not-args-kwargs", "args-not-tuple"],
+    ids=["payload-missing", "path-not-str", "not-args-kwargs", "args-not-tuple", "unknown-kind"],
 )
 def test_malformed_broker_requests_are_answered_as_tool_errors(msg):
     conn = _FakeConn()
