@@ -36,6 +36,7 @@ from nooa.unifiedllm.cache_policy import (
 from . import replay_state, response_parts
 from .errors import EmptyContentError
 from .http_config import HttpConfig
+from .reasoning import ReasoningConfig, apply_reasoning_level
 from .retry import sync_retry, with_retry
 from .retry_config import RetryConfig
 
@@ -1151,8 +1152,24 @@ class UnifiedLLM(ABC):
     _registry_config: dict[str, Any] | None
     cache_breakpoint: Literal["auto", "openai", "anthropic"] | None
 
-    def __init__(self, model: str, **config):
+    def __init__(
+        self,
+        model: str,
+        *,
+        reasoning_levels: dict[str, dict[str, Any]] | None = None,
+        reasoning_default: str | None = None,
+        reasoning_level: str | None = None,
+        **config,
+    ):
         reject_legacy_cache_config(config)
+        # Freeze prevents field assignment, not mutations inside nested Any
+        # settings. Detach this small configuration once, never the history.
+        self._reasoning_config = ReasoningConfig(
+            levels=reasoning_levels, default=reasoning_default
+        ).model_copy(deep=True)
+        if reasoning_level is not None:
+            self._reasoning_config.settings(reasoning_level)
+        self.reasoning_level = reasoning_level
         self.model = model
         self.config = config
         self._registry_config = None
@@ -1160,6 +1177,22 @@ class UnifiedLLM(ABC):
         # Per-client HTTP transport (httpx clients + litellm wrappers). Set by
         # concrete subclasses; guarded here so base helpers stay safe.
         self._http: _ClientHttp | None = None
+
+    @property
+    def reasoning_levels(self) -> tuple[str, ...] | None:
+        """Selectable levels; None means unknown, () means unsupported."""
+        levels = self._reasoning_config.levels
+        return None if levels is None else tuple(levels)
+
+    @property
+    def reasoning_default(self) -> str | None:
+        """Documented route default; not a request override."""
+        return self._reasoning_config.default
+
+    def _prepare_call_config(self, overrides: dict[str, Any]) -> dict[str, Any]:
+        return apply_reasoning_level(
+            self._reasoning_config, self.model, self.config, overrides, self.reasoning_level
+        )
 
     def _effective_model(self, call_config: dict[str, Any]) -> str:
         """Return the model this individual request will actually dispatch."""
@@ -1758,7 +1791,7 @@ class CompletionClient(UnifiedLLM):
         If retry_config.retry_on_empty_content is True, will retry when the model
         returns empty content but has reasoning_content (common with some reasoning models).
         """
-        call_config = {**self.config, **kwargs}
+        call_config = self._prepare_call_config(kwargs)
         self._validate_request_config("messages", call_config)
         effective_model = self._effective_model(call_config)
         self._validate_cache_breakpoint_model(effective_model)
@@ -1772,8 +1805,7 @@ class CompletionClient(UnifiedLLM):
 
         api_params = {
             "model": self.model,
-            **self.config,
-            **kwargs,
+            **call_config,
             "messages": prepared_messages,
         }
 
@@ -1847,7 +1879,7 @@ class CompletionClient(UnifiedLLM):
         If retry_config.retry_on_empty_content is True, will retry when the model
         returns empty content but has reasoning_content (common with some reasoning models).
         """
-        call_config = {**self.config, **kwargs}
+        call_config = self._prepare_call_config(kwargs)
         self._validate_request_config("messages", call_config)
         effective_model = self._effective_model(call_config)
         self._validate_cache_breakpoint_model(effective_model)
@@ -1861,8 +1893,7 @@ class CompletionClient(UnifiedLLM):
 
         api_params = {
             "model": self.model,
-            **self.config,
-            **kwargs,
+            **call_config,
             "messages": prepared_messages,
         }
 
@@ -2111,7 +2142,7 @@ class ResponsesClient(UnifiedLLM):
         Accepts public message dictionaries and LLMResponse objects. Stored turns
         are projected here; only leading system messages become `instructions`.
         """
-        call_config = {**self.config, **kwargs}
+        call_config = self._prepare_call_config(kwargs)
         self._validate_request_config("input", call_config)
         effective_model = self._effective_model(call_config)
         self._validate_cache_breakpoint_model(effective_model)
@@ -2123,8 +2154,7 @@ class ResponsesClient(UnifiedLLM):
         api_params = {
             "model": self.model,
             "truncation": "disabled",
-            **self.config,
-            **kwargs,
+            **call_config,
             "input": input_messages,
         }
         if openai_explicit:
@@ -2187,7 +2217,7 @@ class ResponsesClient(UnifiedLLM):
         Accepts public message dictionaries and LLMResponse objects. Stored turns
         are projected here; only leading system messages become `instructions`.
         """
-        call_config = {**self.config, **kwargs}
+        call_config = self._prepare_call_config(kwargs)
         self._validate_request_config("input", call_config)
         effective_model = self._effective_model(call_config)
         self._validate_cache_breakpoint_model(effective_model)
@@ -2199,8 +2229,7 @@ class ResponsesClient(UnifiedLLM):
         api_params = {
             "model": self.model,
             "truncation": "disabled",
-            **self.config,
-            **kwargs,
+            **call_config,
             "input": input_messages,
         }
         if openai_explicit:
