@@ -354,15 +354,71 @@ def test_model_details_appear_before_accepting_published_settings(tmp_path, monk
     path = tmp_path / "models.yaml"
     options = [arg for arg in args(path) if arg != "--no-catalogue"]
     result = CliRunner().invoke(
-        command, options, input=("wire/model\n" if ambiguous else "") + "y\ny\n"
+        command, options, input=("wire/model\n" if ambiguous else "") + "use\ny\n"
     )
     assert result.exit_code == 0, result.output
     for text in ("128,000", "8,192", "low, high", "Source: OpenRouter"):
-        assert result.output.index(text) < result.output.index("Use these model details?")
+        assert result.output.index(text) < result.output.index("Model settings")
     assert "not proof" not in result.output
     entry = yaml.safe_load(path.read_text())["models"]["local"]
     assert entry["context_window"] == 128000
     assert entry["reasoning_default"] == "low"
+
+
+@pytest.mark.parametrize("action", ["edit", "keep_context", "skip", "cancel"])
+def test_model_settings_can_be_edited_skipped_or_cancelled(tmp_path, monkeypatch, action):
+    from nooa import connect
+
+    published = {
+        "id": "wire/model",
+        "context_length": 128000,
+        "top_provider": {"max_completion_tokens": 8192},
+        "reasoning": {"supported_efforts": ["low", "high"], "default_effort": "low"},
+    }
+
+    async def catalogue():
+        return [published]
+
+    monkeypatch.setattr(connect, "catalogue", catalogue)
+    path = tmp_path / "models.yaml"
+    options = [arg for arg in args(path) if arg != "--no-catalogue"]
+    answers = {
+        "edit": "edit\n0\n64000\n2048\nlow,medium\nmedium\nuse\ny\n",
+        "keep_context": "edit\n\n2048\nlow,medium\nmedium\nuse\ny\n",
+        "skip": "skip\ny\n",
+        "cancel": "cancel\n",
+    }
+    result = CliRunner().invoke(command, options, input=answers[action])
+    assert result.exit_code == 0, result.output
+    assert published["context_length"] == 128000
+    if action == "cancel":
+        assert not path.exists()
+        assert "Plan:" not in result.output
+        return
+    entry = yaml.safe_load(path.read_text())["models"]["local"]
+    if action == "skip":
+        assert "context_window" not in entry
+        assert "reasoning_levels" not in entry
+        assert "Continuing without the published model settings" in result.output
+    else:
+        if action == "edit":
+            assert "Enter a positive whole number" in result.output
+        assert entry["context_window"] == (128000 if action == "keep_context" else 64000)
+        assert entry["max_output_tokens"] == 2048
+        assert entry["reasoning_levels"] == {
+            "low": {"reasoning_effort": "low"},
+            "medium": {"reasoning_effort": "medium"},
+        }
+        assert entry["reasoning_default"] == "medium"
+        for field in (
+            "context_window",
+            "max_output_tokens",
+            "reasoning_levels",
+            "reasoning_default",
+        ):
+            assert entry["provenance"][field]["source"] == "user"
+        probes = entry["provenance"]["probes"]
+        assert set(probes) == {"routing", "tools", "level:low", "level:medium"}
 
 
 def test_default_budget_covers_interfaces_tools_and_every_level(tmp_path, monkeypatch):

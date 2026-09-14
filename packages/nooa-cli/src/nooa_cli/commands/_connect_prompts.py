@@ -184,3 +184,50 @@ def confirm(text, *, default):
         choices=("yes", "no", "y", "n", ""),
     )
     return default if not value else value in {"yes", "y"}
+
+
+def edit_model_details(model):
+    """Edit a detached copy of published settings; no request or file writes."""
+    from copy import deepcopy
+
+    edited = deepcopy(model)
+    click.echo(
+        "Edit the settings below. Enter keeps a suggestion; - leaves it unknown. Ctrl-C cancels setup."
+    )
+
+    def count(label, current):
+        while True:
+            value = prompt(label, default=str(current) if current else "-").strip()
+            if value == "-":
+                return None
+            if value.isascii() and value.isdecimal() and int(value) > 0:
+                return int(value)
+            click.echo("Enter a positive whole number, or - for unknown.", err=True)
+
+    edited["context_length"] = count("Context window (tokens)", model.get("context_length"))
+    edited["top_provider"] = dict(model.get("top_provider") or {})
+    edited["top_provider"]["max_completion_tokens"] = count(
+        "Maximum output (tokens; not the setup check cap)",
+        edited["top_provider"].get("max_completion_tokens"),
+    )
+    reasoning = edited["reasoning"] = dict(model.get("reasoning") or {})
+    while True:
+        value = prompt(
+            "Reasoning levels (comma-separated)",
+            default=", ".join(reasoning.get("supported_efforts") or []) or "-",
+        )
+        levels = [] if value.strip() == "-" else [v.strip() for v in value.split(",")]
+        if all(levels) and len(set(levels)) == len(levels):
+            break
+        click.echo("Enter distinct level names separated by commas, or - for unknown.", err=True)
+    reasoning["supported_efforts"] = levels
+    reasoning["default_effort"] = None
+    if levels:
+        previous = (model.get("reasoning") or {}).get("default_effort")
+        value = prompt(
+            "Default reasoning level",
+            choices=(*levels, "-"),
+            default=previous if previous in levels else "-",
+        )
+        reasoning["default_effort"] = None if value == "-" else value
+    return edited

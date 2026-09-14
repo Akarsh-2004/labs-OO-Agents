@@ -47,7 +47,7 @@ def step(number, title):
     click.echo()
 
 
-def model_details(model, *, output_tokens):
+def model_details(model, *, output_tokens, edited=False):
     """Show published model information without changing any request settings."""
 
     def tokens(value):
@@ -73,6 +73,11 @@ def model_details(model, *, output_tokens):
         ("Setup check limit", f"{output_tokens:,} tokens per reply (checks only)"),
     ):
         line(f"{label:<25} {value}")
-    line("Source: OpenRouter model listing. Your server may use different limits.", dim=True)
+    line(
+        "Your edited settings."
+        if edited
+        else "Source: OpenRouter model listing. Your server may use different limits.",
+        dim=True,
+    )
     line("Setup checks do not measure maximum limits.", dim=True)
     click.echo()

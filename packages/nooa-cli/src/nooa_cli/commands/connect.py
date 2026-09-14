@@ -93,7 +93,7 @@ def command(
     from nooa.paths import get_user_dir
 
     from . import _connect_view as view
-    from ._connect_prompts import confirm, environment_names, prompt
+    from ._connect_prompts import confirm, edit_model_details, environment_names, prompt
 
     async def show_checks(events):
         async with aclosing(events) as steps:
@@ -265,6 +265,7 @@ def command(
                 if not yes and not confirm("Replace this model?", default=False):
                     return
         candidate = None
+        edited_settings = False
         if no_catalogue and catalogue_model:
             raise click.UsageError("--catalogue-model cannot be used with --no-catalogue")
         if not no_catalogue:
@@ -288,9 +289,7 @@ def command(
             if catalogue_model and not matches:
                 raise click.ClickException("Requested catalogue model was not found.")
             if len(matches) == 1:
-                view.model_details(matches[0], output_tokens=output_tokens)
-                if yes or confirm("Use these model details?", default=True):
-                    candidate = matches[0]
+                candidate = matches[0]
             elif matches:
                 click.echo(
                     "Possible catalogue models: " + ", ".join(item["id"] for item in matches)
@@ -309,11 +308,45 @@ def command(
                     candidate = next((item for item in matches if item["id"] == selected), None)
                     if candidate is None:
                         raise click.ClickException("Choose one of the displayed model IDs.")
-                    view.model_details(candidate, output_tokens=output_tokens)
-                    if not confirm("Use these model details?", default=True):
-                        candidate = None
             else:
                 click.echo("No catalogue match; model limits and reasoning levels remain unknown.")
+        if candidate is not None:
+            while True:
+                view.model_details(candidate, output_tokens=output_tokens, edited=edited_settings)
+                action = (
+                    "use"
+                    if yes
+                    else prompt(
+                        "Model settings",
+                        default="use",
+                        choices=("use", "edit", "skip", "cancel"),
+                        labels={
+                            "use": "Use these settings",
+                            "edit": "Edit settings",
+                            "skip": "Continue without these settings",
+                            "cancel": "Cancel setup",
+                        },
+                        open_menu=True,
+                    )
+                )
+                if action == "cancel":
+                    click.echo("Setup cancelled. Nothing saved.")
+                    return
+                if action == "skip":
+                    candidate = None
+                    edited_settings = False
+                    click.echo(
+                        "Continuing without the published model settings. Explicit command-line settings still apply."
+                    )
+                    break
+                if action == "use":
+                    break
+                candidate = edit_model_details(candidate)
+                edited_settings = True
+            if edited_settings:
+                # Apply edits only after confirmation, not if the user skips them.
+                context_window = None
+                levels_file = levels = reasoning_template = None
         if levels_file and (levels or reasoning_template):
             raise click.UsageError(
                 "Use either --levels-file or --reasoning-template with --levels."
@@ -342,6 +375,17 @@ def command(
             output_tokens=output_tokens,
             existing_entry=interfaces.results[api_style].entry if interfaces else existing,
         )
+        if edited_settings:
+            for field in (
+                "context_window",
+                "max_output_tokens",
+                "reasoning_levels",
+                "reasoning_default",
+            ):
+                proposal.entry["provenance"][field] = {
+                    "source": "user",
+                    "value": proposal.entry.get(field),
+                }
         interface_spent = interfaces.tokens_charged_to_budget if interfaces else 0
         # Once the model is selected we know how many levels need checking.
         # An explicit user limit stays shared and is never increased.
@@ -378,7 +422,7 @@ def command(
             }
         if "context_window" not in proposal.entry:
             click.echo(
-                "Context window unknown: the runtime's existing fallback applies; set --context-window if known."
+                "No context window selected. The runtime will use its fallback; set --context-window to supply a limit."
             )
         click.echo(yaml.safe_dump({"models": {alias: proposal.entry}}, sort_keys=False))
         price = (

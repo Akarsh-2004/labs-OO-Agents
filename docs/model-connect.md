@@ -30,6 +30,13 @@ before asking to use them: context window, maximum output, reasoning levels,
 reasoning default and output default when listed. Missing values say “Not listed.”
 These come from OpenRouter's model listing; server limits may differ. The setup
 check's output cap is shown separately and does not become the model's default.
+Choose **use**, **edit**, **skip**, or **cancel**. Editing lets you change the
+context window, maximum output, reasoning levels and default reasoning level;
+Enter keeps each suggestion and `-` leaves a field unknown. The revised details
+are shown again before you accept them, and saved edits are attributed to you.
+Confirmed edits replace command-line limit/level settings; skipping the details
+keeps any explicit command-line settings. Skip means continue without these
+published details, not cancel. Cancel stops setup without saving.
 It then shows the remaining checks and budget. The initial warning explains that setup
 makes paid API calls; there are no repeated approval prompts for these checks.
 Each check shows progress and its result as it runs. Saving is a separate
