@@ -6,6 +6,12 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Security: the sandbox parent no longer unpickles worker bytes. Brokered `self.*`
+  arguments, `self.x = value` assignments, cell return values and `return_result`
+  payloads now cross as msgpack; rich values are rebuilt only from a fixed set of
+  value types, numpy arrays, and the agent's declared pydantic models / dataclasses
+  / enums (validated on the way in). Anything else is a `CellSerializationError`
+  instead of code running in the parent. Adds the `msgpack` dependency.
 - Breaking: custom CodeAct error formatters must implement
   `format(error, code=None, *, line_offset=0, max_error=None, tail_chars=None)`.
   Reduced legacy signatures are no longer supported.
