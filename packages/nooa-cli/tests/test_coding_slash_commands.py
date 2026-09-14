@@ -175,3 +175,21 @@ async def test_commands_are_sorted_deduplicated_and_case_insensitive(tmp_path):
     finally:
         registry.close()
         await agent.close()
+
+
+@pytest.mark.parametrize("raw_args", ["", 'add "two words"'])
+async def test_string_args_annotation_preserves_raw_input(tmp_path, raw_args):
+    class StringArgsSkill(Skill):
+        @slash_command("raw-input", output_to_agent=False)
+        def raw_input(self, args: "str"):
+            return args
+
+    agent = CodingAgent(llm=FakeLLMClient(), cwd=tmp_path, libs_dir=tmp_path / "libs")
+    agent.skills.register("test.raw", StringArgsSkill())
+    registry = CodingSlashCommandRegistry(agent)
+    try:
+        result = await registry.invoke("raw-input", raw_args)
+        assert result.text == raw_args
+    finally:
+        registry.close()
+        await agent.close()
