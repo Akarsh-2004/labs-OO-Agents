@@ -14,7 +14,7 @@ import pathlib
 import threading
 import types
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, NamedTuple
 
 import msgpack
@@ -59,6 +59,12 @@ class Line(BaseModel):
 class Point:
     x: int
     y: int
+
+
+@dataclass
+class Tally:
+    n: int
+    total: int = field(init=False, default=0)
 
 
 with hidden:
@@ -180,6 +186,9 @@ def test_declared_types_round_trip_and_are_validated():
     assert codec.loads(codec.dumps(report)) == report
     assert codec.loads(codec.dumps(Pair(1, "b"))) == Pair(1, "b")
     assert codec.loads(codec.dumps([Kind.WARN, Point(0, 0)])) == [Kind.WARN, Point(0, 0)]
+    tally = Tally(n=2)
+    tally.total = 5  # init=False state survives the round trip
+    assert codec.loads(codec.dumps(tally)) == tally
     # A forged model payload still goes through pydantic validation.
     with pytest.raises(CellSerializationError, match="malformed"):
         codec.loads(_forged(wire._MODEL, [wire.type_key(Detail), {"n": "not an int"}]))
@@ -208,11 +217,9 @@ def test_corrupt_or_unknown_streams_are_refused(data):
 
 # --- ResultDTO ------------------------------------------------------------------
 def test_result_dto_round_trips_through_the_pipe_encoding():
-    dto = ResultDTO(
+    returned = ResultDTO(
         stdout="out",
         stderr="err",
-        error=ErrorDTO("ValueError", "msg", "diag"),
-        signal=SignalDTO(result=b"sig"),
         returned_value=b"ret",
         has_return=True,
         explicit_return=True,
@@ -220,13 +227,32 @@ def test_result_dto_round_trips_through_the_pipe_encoding():
         wrapper_line_offset=3,
         defined_method_names=["helper"],
     )
-    assert dto_from_wire(CODEC.loads(CODEC.dumps(dto_to_wire(dto)))) == dto
+    failed = ResultDTO(error=ErrorDTO("ValueError", "msg", "diag"))
+    signaled = ResultDTO(signal=SignalDTO(result=b"sig"))
+    for dto in (returned, failed, signaled):
+        assert dto_from_wire(CODEC.loads(CODEC.dumps(dto_to_wire(dto)))) == dto
 
 
 @pytest.mark.parametrize(
     "data",
-    ["nope", {"stdout": 1}, {"returned_value": "text"}, {"error": {"type_name": 1}}, {"bogus": 1}],
-    ids=["not-a-dict", "stdout-not-str", "returned_value-not-bytes", "error-field", "unknown"],
+    [
+        "nope",
+        {"stdout": 1},
+        {"returned_value": "text"},
+        {"error": {"type_name": 1}},
+        {"bogus": 1},
+        {"error": {"type_name": "E", "message": "m"}, "has_return": True},
+        {"explicit_return": True},
+    ],
+    ids=[
+        "not-a-dict",
+        "stdout-not-str",
+        "returned_value-not-bytes",
+        "error-field",
+        "unknown",
+        "error-and-return",
+        "explicit-without-return",
+    ],
 )
 def test_result_dto_rejects_malformed_shapes(data):
     with pytest.raises(CellSerializationError, match="malformed result"):
@@ -316,8 +342,9 @@ def test_refused_payload_is_answered_as_tool_error_without_dispatch():
         {"kind": "call", "path": ["add_one"]},
         {"kind": "call", "path": [1], "payload": b""},
         {"kind": "call", "path": ["add_one"], "payload": CODEC.dumps([1])},
+        {"kind": "call", "path": ["add_one"], "payload": CODEC.dumps((1, {}))},
     ],
-    ids=["payload-missing", "path-not-str", "not-args-kwargs"],
+    ids=["payload-missing", "path-not-str", "not-args-kwargs", "args-not-tuple"],
 )
 def test_malformed_broker_requests_are_answered_as_tool_errors(msg):
     conn = _FakeConn()

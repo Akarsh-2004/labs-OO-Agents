@@ -93,7 +93,7 @@ class Codec:
         if isinstance(obj, BaseModel):
             return self._ext(_MODEL, [type_key(type(obj)), obj.model_dump()])
         if dataclasses.is_dataclass(obj) and not isinstance(obj, type):
-            fields = {f.name: getattr(obj, f.name) for f in dataclasses.fields(obj) if f.init}
+            fields = {f.name: getattr(obj, f.name) for f in dataclasses.fields(obj)}
             return self._ext(_DATACLASS, [type_key(type(obj)), fields])
         if isinstance(obj, datetime.datetime):
             return self._ext(_DATETIME, obj.isoformat())
@@ -147,7 +147,12 @@ class Codec:
         if code == _MODEL:
             return cls.model_validate(body)
         if code == _DATACLASS:
-            return cls(**body)
+            fields = dataclasses.fields(cls)
+            inst = cls(**{f.name: body[f.name] for f in fields if f.init and f.name in body})
+            for f in fields:  # init=False fields carry post-construction state
+                if not f.init and f.name in body:
+                    object.__setattr__(inst, f.name, body[f.name])
+            return inst
         if code == _NAMEDTUPLE:
             return cls(*body)
         raise CellSerializationError(f"unknown sandbox message tag {code}")

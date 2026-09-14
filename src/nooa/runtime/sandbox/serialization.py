@@ -159,6 +159,9 @@ def dto_from_wire(data: Any) -> ResultDTO:
         ok = ok and all(isinstance(n, str) for n in dto.defined_method_names)
         ok = ok and (dto.error is None or all(isinstance(v, str) for v in vars(dto.error).values()))
         ok = ok and (dto.signal is None or isinstance(dto.signal.result, bytes))
+        # Exactly one outcome, as result_to_dto produces.
+        ok = ok and (dto.error is not None) + (dto.signal is not None) + dto.has_return <= 1
+        ok = ok and (dto.has_return or not dto.explicit_return)
     except Exception as exc:  # noqa: BLE001 - any shape error is a protocol violation
         raise CellSerializationError(f"sandbox worker sent a malformed result ({exc})") from exc
     if not ok:

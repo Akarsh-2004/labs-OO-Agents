@@ -416,8 +416,13 @@ class SandboxedExecutor:
             ) from exc
         if kind == "setattr":
             call["value"] = value
-        elif isinstance(value, tuple) and len(value) == 2 and isinstance(value[1], dict):
-            call["args"], call["kwargs"] = tuple(value[0]), value[1]
+        elif (
+            isinstance(value, tuple)
+            and len(value) == 2
+            and isinstance(value[0], tuple)
+            and isinstance(value[1], dict)
+        ):
+            call["args"], call["kwargs"] = value
         else:
             raise CellSerializationError(f"malformed sandbox broker request for {what}")
         return call
