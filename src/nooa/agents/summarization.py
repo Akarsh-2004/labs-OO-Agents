@@ -620,6 +620,8 @@ class TokenBudgetSummarizer(SummarizationAgent):
     @hidden
     @no_trace
     def _install(self) -> None:
+        if self.target_event_manager is None:
+            raise ValueError("Cannot install: target_event_manager is None")
         self._unsub_before = self.target_event_manager.on("BeforeTurn", self._handle_before_turn)
         self._unsub_llm = self.target_event_manager.intercept("llm_call", self._fork_after_call)
         if (

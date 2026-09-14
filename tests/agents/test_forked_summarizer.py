@@ -15,6 +15,14 @@ from nooa.runtime.middleware import LLMCallContext
 from nooa.unifiedllm import CacheBoundary, FakeLLMClient, LLMResponse, LLMUsage, ToolCall
 
 
+def test_install_requires_target_event_manager():
+    _, summarizer, _ = setup()
+    summarizer._uninstall()
+    summarizer.target_event_manager = None
+    with pytest.raises(ValueError, match="target_event_manager is None"):
+        summarizer._install()
+
+
 def response(text="summary", **kwargs):
     return LLMResponse(content=text, usage=LLMUsage(input_tokens=1000, output_tokens=5), **kwargs)
 
