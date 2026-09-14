@@ -157,7 +157,7 @@ def command(
             api_style = api_style or default_style
         if yes and not all((model, alias, endpoint, api_style)):
             raise click.UsageError("With --yes supply MODEL, --endpoint, --api-style and --as.")
-        endpoint = endpoint or prompt("Model server URL", suggestions=server_urls)
+        endpoint = endpoint or prompt("Model server URL", suggestions=server_urls, open_menu=True)
         endpoint = connect.normalize_endpoint(endpoint)
         # Listing/authentication conventions do not choose the selected model's
         # generation interface. A mixed server can list all models via /models.

@@ -628,6 +628,7 @@ def test_server_url_suggestions_include_existing_file_without_credentials(
 
     def prompt(text, **kwargs):
         assert text == "Model server URL"
+        assert kwargs.get("open_menu") is True
         seen.extend(kwargs["suggestions"])
         raise click.Abort()
 

@@ -52,7 +52,9 @@ Tab selects a match. Large catalogues do not print every model into the prompt.
 Provider, endpoint, API-format, alias, catalogue and confirmation prompts also
 complete their available choices. Server URL suggestions include every valid
 `api_base` in the existing target configuration file, as well as provider presets;
-duplicates and URLs with embedded credentials are excluded. Key-variable completion uses environment
+duplicates and URLs with embedded credentials are excluded. The URL menu opens
+immediately: use arrow keys and Enter to pick a server, or type to filter or enter
+a different URL. Key-variable completion uses environment
 variable **names only**, never their values. Secret entry is masked and has no
 completion or history. Defaults appear as faint suggestions: Enter accepts one,
 typing replaces it, and Right Arrow brings it into the editor. Arrow keys,

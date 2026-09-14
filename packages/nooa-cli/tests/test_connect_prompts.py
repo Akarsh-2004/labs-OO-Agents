@@ -144,7 +144,8 @@ def test_cancel_uses_click_abort(monkeypatch):
         answer(monkeypatch, "\x03")
 
 
-def test_provider_menu_opens_and_arrow_enter_selects_without_typing(monkeypatch):
+@pytest.mark.parametrize("urls", [False, True])
+def test_menu_opens_and_arrow_enter_selects_without_typing(monkeypatch, urls):
     import prompt_toolkit
     from prompt_toolkit.application import get_app
 
@@ -169,13 +170,20 @@ def test_provider_menu_opens_and_arrow_enter_selects_without_typing(monkeypatch)
             return original(*args, pre_run=ready, **kwargs)
 
         monkeypatch.setattr(prompt_toolkit, "prompt", run)
+        options = (
+            {"suggestions": ("https://first.example/v1", "https://second.example/v1")}
+            if urls
+            else {
+                "choices": ("nvidia", "custom"),
+                "labels": {"nvidia": "NVIDIA · build.nvidia.com", "custom": "Custom endpoint"},
+            }
+        )
         value = prompts.prompt(
-            "Provider",
-            choices=("nvidia", "custom"),
-            labels={"nvidia": "NVIDIA · build.nvidia.com", "custom": "Custom endpoint"},
+            "Model server URL" if urls else "Provider",
+            **options,
             open_menu=True,
         )
-    assert value == "nvidia"
+    assert value == ("https://first.example/v1" if urls else "nvidia")
 
 
 def test_help_can_be_toggled_without_losing_edited_text(monkeypatch):
