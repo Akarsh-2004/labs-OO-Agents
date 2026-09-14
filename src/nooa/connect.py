@@ -16,6 +16,7 @@ import math
 import os
 import re
 import tempfile
+from collections.abc import AsyncIterator
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -67,6 +68,14 @@ class ConnectPlan:
 class ConnectResult:
     alias: str
     entry: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class ProbeUpdate:
+    """A request starting or finishing, for frontend progress display."""
+
+    name: str
+    outcome: dict[str, Any]
 
 
 @dataclass(frozen=True)
@@ -212,7 +221,8 @@ async def catalogue() -> list[dict]:
     async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
         response = await client.get(CATALOGUE_URL)
         response.raise_for_status()
-        data = response.json()["data"]
+        payload = response.json()
+        data = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(data, list) or any(not isinstance(item, dict) for item in data):
             raise ValueError("Catalogue response must contain a list of model objects")
         return data
@@ -318,6 +328,7 @@ def plan(
             "context_window",
             "max_output_tokens",
             "reasoning_default",
+            "cache_breakpoint",
         ],
     }
     if catalogue is not None:
@@ -372,7 +383,6 @@ def plan(
             store=False,
             include=["reasoning.encrypted_content"],
             encrypted_reasoning=True,
-            cache_breakpoint="openai",
         )
     elif api_style == "anthropic":
         entry["cache_breakpoint"] = "anthropic"
@@ -466,11 +476,28 @@ async def run(
     approved: Literal["all", "minimal", "none"],
     api_key: str | None = None,
 ) -> ConnectResult:
+    """Run an approved plan to completion without displaying progress."""
+    async for event in run_steps(proposal, approved=approved, api_key=api_key):
+        if isinstance(event, ConnectResult):
+            return event
+    raise RuntimeError("Probe run ended without a result")
+
+
+async def run_steps(
+    proposal: ConnectPlan,
+    *,
+    approved: Literal["all", "minimal", "none"],
+    api_key: str | None = None,
+) -> AsyncIterator[ProbeUpdate | ConnectResult]:
     """Execute approved probes without redirects, retries or provider fallback.
 
     Minimal approval sends only the routing probe. Its failure stops all probes.
     HTTP 400 means rejected, not unsupported; auth and transient failures stay
     untested. Errors record status codes, not server bodies or credentials.
+    Each probe yields progress before and after sending; the final event is
+    the result to save. Frontends display these events; the library never prints.
+    Consume the iterator completely, or close it with contextlib.aclosing when
+    stopping early, so the HTTP client closes too.
     """
     if approved not in {"all", "minimal", "none"}:
         raise ValueError("approved must be all, minimal or none")
@@ -484,19 +511,25 @@ async def run(
         for probe in proposal.probes:
             previous = records.get(probe.name, {})
             if previous.get("outcome") == "accepted" and previous.get("request") == probe.body:
+                yield ProbeUpdate(
+                    probe.name, {**deepcopy(previous), "reason": "previous result reused"}
+                )
                 continue
             record: dict[str, Any] = {"outcome": "not_probed"}
             records[probe.name] = record
             if approved == "none" or approved == "minimal" and probe.name != "routing":
                 record["reason"] = "not approved"
+                yield ProbeUpdate(probe.name, deepcopy(record))
                 continue
             if stopped or spent + probe.token_estimate > proposal.budget_tokens:
                 record["reason"] = "previous failure or budget exhausted"
+                yield ProbeUpdate(probe.name, deepcopy(record))
                 continue
             if probe.body.get("stream") or any(
                 probe.body.get(name, 1) != 1 for name in ("n", "best_of")
             ):
                 record["reason"] = "probes require one non-streaming generation"
+                yield ProbeUpdate(probe.name, deepcopy(record))
                 continue
             style = entry["api_style"]
             caps = [
@@ -513,6 +546,7 @@ async def run(
                 for cap in caps
             ):
                 record["reason"] = "declared output cap exceeds the approved probe cap"
+                yield ProbeUpdate(probe.name, deepcopy(record))
                 continue
             if key is None and entry["api_key_env"]:
                 key = os.environ.get(entry["api_key_env"])
@@ -520,6 +554,7 @@ async def run(
                     raise ValueError(f"Set {entry['api_key_env']} before probing, or approve none")
             headers = _headers(style, key)
             spent += probe.token_estimate
+            yield ProbeUpdate(probe.name, {"outcome": "running"})
             try:
                 async with asyncio.timeout(30):
                     response = await client.post(
@@ -528,6 +563,7 @@ async def run(
             except (httpx.RequestError, TimeoutError) as exc:
                 record["error"] = type(exc).__name__
                 stopped = probe.name == "routing"
+                yield ProbeUpdate(probe.name, deepcopy(record))
                 continue
             record["fields_reached_wire"] = True
             record["status_code"] = response.status_code
@@ -537,12 +573,14 @@ async def run(
                     f"HTTP {response.status_code}; server body omitted to protect credentials"
                 )
                 stopped = probe.name == "routing" or response.status_code in {401, 403}
+                yield ProbeUpdate(probe.name, deepcopy(record))
                 continue
             try:
                 reasoning, tool, tokens = _observations(response.json())
             except (ValueError, TypeError, AttributeError):
                 record["error"] = "Response did not match the selected API style"
                 stopped = probe.name == "routing"
+                yield ProbeUpdate(probe.name, deepcopy(record))
                 continue
             record.update(
                 outcome="accepted",
@@ -553,6 +591,7 @@ async def run(
                 checked_at=datetime.now(UTC).isoformat(),
             )
             spent += max(0, tokens - probe.token_estimate)
+            yield ProbeUpdate(probe.name, deepcopy(record))
     if records.get("tools", {}).get("tool_observed"):
         entry["tools"] = True  # No call is not evidence that tools are unsupported.
     provenance["requests_accepted"] = [
@@ -562,7 +601,7 @@ async def run(
         name for name, item in records.items() if item.get("reasoning_observed")
     ]
     provenance["tokens_charged_to_budget"] = spent
-    return ConnectResult(proposal.alias, entry)
+    yield ConnectResult(proposal.alias, entry)
 
 
 def write(entry: dict, path: Path, *, alias: str) -> None:

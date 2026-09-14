@@ -544,3 +544,67 @@ async def test_modified_plan_cannot_remove_the_required_output_cap(monkeypatch):
     proposal.probes[0].body.pop("max_tokens")
     result = await connect.run(proposal, approved="minimal", api_key="test-key")
     assert result.entry["provenance"]["probes"]["routing"]["outcome"] == "not_probed"
+
+
+@pytest.mark.asyncio
+async def test_progress_events_arrive_before_and_after_each_request(monkeypatch):
+    events, calls = [], []
+
+    async def post(self, url, **kwargs):
+        assert events[-1].outcome["outcome"] == "running"
+        calls.append(kwargs)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    async for event in connect.run_steps(make_plan(), approved="all", api_key="test-key"):
+        events.append(event)
+    assert [(e.name, e.outcome["outcome"]) for e in events[:-1]] == [
+        ("routing", "running"),
+        ("routing", "accepted"),
+        ("tools", "running"),
+        ("tools", "accepted"),
+    ]
+    assert isinstance(events[-1], connect.ConnectResult)
+    assert len(calls) == 2
+
+
+def test_responses_style_does_not_enable_unprobed_explicit_caching():
+    entry = connect.plan("local", "model", "responses", "https://api.test/v1", "").entry
+    assert "cache_breakpoint" not in entry
+    assert "cache_breakpoint" in entry["provenance"]["not_probed"]
+
+
+@pytest.mark.asyncio
+async def test_catalogue_missing_data_is_a_contract_error(monkeypatch):
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kw: real_client(
+            transport=httpx.MockTransport(lambda req: httpx.Response(200, json={})), **kw
+        ),
+    )
+    with pytest.raises(ValueError, match="model"):
+        await connect.catalogue()
+
+
+@pytest.mark.asyncio
+async def test_closing_progress_iterator_before_send_closes_client(monkeypatch):
+    from contextlib import aclosing
+
+    closed = []
+    real_client = httpx.AsyncClient
+
+    class Client(real_client):
+        async def __aexit__(self, *args):
+            closed.append(True)
+            return await super().__aexit__(*args)
+
+        async def post(self, *args, **kwargs):
+            raise AssertionError("Cancelled before dispatch")
+
+    monkeypatch.setattr(httpx, "AsyncClient", Client)
+    async with aclosing(connect.run_steps(make_plan(), approved="minimal", api_key="key")) as steps:
+        event = await anext(steps)
+        assert event.outcome["outcome"] == "running"
+    assert closed == [True]

@@ -7,8 +7,23 @@ HTTP probes and registry updates.
 
 ## CLI
 
+Start the guided setup with no arguments:
+
 ```sh
-nooa connect gateway/model --as work-model \
+uv run nooa connect
+```
+
+It asks for the server URL, API format and key, lists models to choose from,
+and asks what to call the model locally. It looks up model information, shows
+the proposed checks and their budget, then asks before sending paid requests.
+Each check shows progress and its result as it runs. Saving is a separate
+confirmation; Ctrl-C cancels setup. A pasted key is used only for this session;
+the saved entry names its environment variable, not its value.
+
+Flags can prefill answers or support scripted setup:
+
+```sh
+uv run nooa connect gateway/model --as work-model \
   --endpoint https://gateway.example/v1 --api-style chat \
   --api-key-env MY_MODEL_KEY
 ```
@@ -20,6 +35,7 @@ and then `/v1/models` if a root endpoint returns 404. For Anthropic, explicitly
 name the appropriate key environment variable. `--prompt-key` reads a masked key
 for this setup only; Connect never saves it or changes environment variables.
 An empty `--api-key-env ''` supports local servers without authentication.
+In the wizard, enter `-` at the key-variable prompt for no authentication.
 
 OpenRouter metadata supplies candidate model names, context and output limits,
 prices and reasoning levels where present. Confirm the candidate; a matching
@@ -94,6 +110,10 @@ connect.write(result.entry, destination, alias=result.alias)
 ```
 
 `run` accepts `all`, `minimal` or `none`. Cancelling its task cancels the HTTP call.
+For inline feedback, consume `run_steps()` instead: it yields `ProbeUpdate`
+objects before and after each check, followed by the final `ConnectResult`.
+Use `contextlib.aclosing` if the frontend may stop reading early. `run()` uses
+the same iterator internally, so CLI and TUI checks cannot diverge.
 There are no callbacks, terminal imports, prompts, agent instances or tool
 execution. Probes use HTTPX directly, not an SDK or LiteLLM. Importing the package
 still triggers NOOA's existing eager imports; changing that is separate work.
@@ -110,6 +130,8 @@ not being visible can be normal, especially at a disabled level. Returned tool
 calls are inspected as data and never executed. Raw model responses, server error
 bodies and credential headers are not retained. Limits and defaults keep their
 catalogue source and are explicitly marked as not probed.
+An endpoint speaking Responses does not imply it accepts explicit cache fields;
+Connect leaves OpenAI explicit caching unset until that is established separately.
 
 ## Code walkthrough: what and why
 

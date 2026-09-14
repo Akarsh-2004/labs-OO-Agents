@@ -7,14 +7,12 @@ import click
 
 @click.command()
 @click.argument("model", required=False)
-@click.option("--as", "alias", required=True, help="Local model alias to save.")
-@click.option("--endpoint", required=True, help="API base URL, including /v1 if required.")
-@click.option("--api-style", type=click.Choice(["chat", "responses", "anthropic"]), required=True)
+@click.option("--as", "alias", help="Local model alias to save (otherwise prompted).")
+@click.option("--endpoint", help="API base URL (otherwise prompted).")
+@click.option("--api-style", type=click.Choice(["chat", "responses", "anthropic"]))
 @click.option(
     "--api-key-env",
-    default="OPENAI_API_KEY",
-    show_default=True,
-    help="Environment variable name, never the key itself.",
+    help="Environment variable name, never the key itself (otherwise prompted).",
 )
 @click.option("--catalogue-model", help="Explicit OpenRouter model ID to use as metadata.")
 @click.option("--prompt-key", is_flag=True, help="Read a masked, temporary key; never save it.")
@@ -66,14 +64,15 @@ def command(
     output,
     yes,
 ):
-    """Configure MODEL using a reviewed plan and optional bounded probes.
+    """Walk through model setup, check the connection, and save an alias.
 
-    MODEL is the exact endpoint model ID, without the extra LiteLLM routing
-    prefix. Catalogue data suggests settings; only the selected endpoint is
-    probed. The same library supports interactive TUI onboarding.
+    Run `uv run nooa connect` with no arguments for guided setup. Flags prefill
+    the answers; --yes requires MODEL, --endpoint, --api-style and --as.
+    MODEL is the exact endpoint model ID, without a LiteLLM routing prefix.
     """
     import asyncio
     import os
+    from contextlib import aclosing
     from pathlib import Path
 
     import httpx
@@ -84,21 +83,58 @@ def command(
 
     path = Path(output) if output else get_user_dir("llm_config.yaml")
     try:
-        if not model and yes:
-            raise click.UsageError("Supply MODEL with --yes; endpoint discovery needs a selection.")
+        if yes and not all((model, alias, endpoint, api_style)):
+            raise click.UsageError("With --yes supply MODEL, --endpoint, --api-style and --as.")
+        click.echo("NOOA Connect — set up a model, check it, then choose whether to save.")
+        endpoint = endpoint or click.prompt("Model server URL")
+        endpoint = connect.normalize_endpoint(endpoint)
+        if not api_style:
+            click.echo(
+                "API format: chat = OpenAI-compatible; responses = OpenAI Responses; anthropic = Anthropic Messages."
+            )
+            api_style = click.prompt(
+                "API format", type=click.Choice(["chat", "responses", "anthropic"]), default="chat"
+            )
+        if api_key_env is None:
+            default_env = "ANTHROPIC_API_KEY" if api_style == "anthropic" else "OPENAI_API_KEY"
+            api_key_env = (
+                default_env
+                if yes
+                else click.prompt(
+                    "Key environment variable (enter - for no authentication)", default=default_env
+                )
+            )
+            if api_key_env == "-":
+                api_key_env = ""
+        # Validate before using an endpoint or collecting a credential.
+        connect.plan(alias or "candidate", model or "candidate", api_style, endpoint, api_key_env)
+        needs_key = not yes and not no_probe and api_key_env and not os.environ.get(api_key_env)
         api_key = (
             click.prompt("API key (used only for this setup)", hide_input=True)
-            if prompt_key
+            if prompt_key or needs_key
             else os.environ.get(api_key_env)
             if api_key_env
             else None
         )
         if not model:
-            found = asyncio.run(connect.discover(endpoint, api_style=api_style, api_key=api_key))
-            endpoint = found.api_base
-            names = [item["id"] for item in found.models]
-            click.echo("Endpoint models:\n" + "\n".join(names))
-            model = click.prompt("Model", type=click.Choice(names))
+            click.echo("Connecting to the server and listing models...")
+            try:
+                found = asyncio.run(
+                    connect.discover(endpoint, api_style=api_style, api_key=api_key)
+                )
+            except connect.DiscoveryError as exc:
+                click.echo(f"Could not list models: {exc}", err=True)
+                if exc.status_code in {401, 403}:
+                    raise click.ClickException(
+                        "Authentication failed. Check the key and try again."
+                    ) from None
+                model = click.prompt("Exact model ID (if known; Ctrl-C to cancel)")
+            else:
+                endpoint = found.api_base
+                names = [item["id"] for item in found.models]
+                click.echo(f"Connected. Found {len(names)} model(s):\n" + "\n".join(names))
+                model = click.prompt("Model", type=click.Choice(names))
+        alias = alias or click.prompt("Save this model as", default=model.rsplit("/", 1)[-1])
         existing = None
         if path.exists():
             text = path.read_text()
@@ -114,7 +150,18 @@ def command(
         if no_catalogue and catalogue_model:
             raise click.UsageError("--catalogue-model cannot be used with --no-catalogue")
         if not no_catalogue:
-            models = asyncio.run(connect.catalogue())
+            click.echo("Looking up public model information...")
+            try:
+                models = asyncio.run(connect.catalogue())
+            except (httpx.HTTPError, ValueError, KeyError):
+                if catalogue_model:
+                    raise click.ClickException(
+                        "Could not load the requested catalogue entry."
+                    ) from None
+                click.echo(
+                    "Public catalogue unavailable; continuing with unknown limits.", err=True
+                )
+                models = []
             matches = (
                 [item for item in models if item.get("id") == catalogue_model]
                 if catalogue_model
@@ -210,15 +257,40 @@ def command(
             and not click.confirm("Run these paid probes?", default=False)
         ):
             approval = "none"
-        result = asyncio.run(connect.run(proposal, approved=approval, api_key=api_key))
-        for name, outcome in result.entry["provenance"]["probes"].items():
-            click.echo(
-                f"{name}: {outcome['outcome']}"
-                + (f" ({outcome['reason']})" if "reason" in outcome else "")
-            )
+
+        async def check():
+            async with aclosing(
+                connect.run_steps(proposal, approved=approval, api_key=api_key)
+            ) as steps:
+                async for event in steps:
+                    if isinstance(event, connect.ConnectResult):
+                        return event
+                    outcome = event.outcome
+                    if outcome["outcome"] == "running":
+                        click.echo(f"Checking {event.name}...")
+                    else:
+                        detail = outcome.get("error") or outcome.get("reason")
+                        click.echo(
+                            f"{event.name}: {outcome['outcome']}"
+                            + (f" ({detail})" if detail else "")
+                        )
+                        if outcome["outcome"] == "accepted":
+                            click.echo(
+                                "  Reasoning observed."
+                                if outcome.get("reasoning_observed")
+                                else "  No reasoning observed; acceptance alone does not prove the setting was obeyed."
+                            )
+            raise click.ClickException("Checks ended without a result.")
+
+        result = asyncio.run(check())
         if yes or click.confirm(f"Write model entry to {path}?", default=True):
             connect.write(result.entry, path, alias=alias)
             click.echo(f"Saved {alias} to {path}.")
+            if api_key and not os.environ.get(api_key_env):
+                click.echo(
+                    f"The key was not saved. Set {api_key_env} (or add it to your NOOA secrets file) before using this alias."
+                )
+            click.echo(f'Use it in Python: get_llm_client("{alias}")')
             if output:
                 click.echo(
                     "For a custom path, include it in NEMO_OO_LLM_CONFIG or reload_registry(path)."
