@@ -175,6 +175,7 @@ def _extract_authorization_code(pasted: str) -> str:
         code_values = params.get("code")
         if code_values and code_values[0]:
             return code_values[0]
+        raise RuntimeError("OAuth callback URL did not include an authorization code")
 
     return value
 
@@ -526,7 +527,7 @@ class OAuthHandler:
                 params = parse_qs(req_parsed.query)
                 callback_state = (params.get("state") or [None])[0]
                 expected_state = authorization_state
-                if (
+                valid_state = not (
                     expected_state is None
                     or callback_state is None
                     # Byte-compare: non-ASCII states (possible after percent
@@ -535,10 +536,9 @@ class OAuthHandler:
                     or not secrets.compare_digest(
                         callback_state.encode("utf-8"), expected_state.encode("utf-8")
                     )
-                ):
-                    error_info.append(
-                        "OAuth callback state did not match the authorization request"
-                    )
+                )
+                if not valid_state:
+                    # A stray callback must not terminate the pending login.
                     body = _html_page(
                         "Authorization Failed",
                         "<p style='color:red'>Invalid authorization state.</p>"
@@ -559,6 +559,7 @@ class OAuthHandler:
                         "<p>You can close this tab and return to the application.</p>",
                     )
                 else:
+                    error_info.append("callback did not include an authorization code")
                     body = _html_page(
                         "Unexpected Response", "<p>No code received. You can close this tab.</p>"
                     )
@@ -571,7 +572,7 @@ class OAuthHandler:
                 self.wfile.write(encoded)
                 # The event loop may have been cancelled and closed while the
                 # callback thread was handling a late browser request.
-                if not loop.is_closed():
+                if valid_state and not loop.is_closed():
                     loop.call_soon_threadsafe(done.set)
 
         # Bind to requested port (0 means OS picks a free port, RFC 8252 §7.3)
@@ -630,10 +631,12 @@ class OAuthHandler:
                                 logger.info("Opened authorization URL via browser_open hook")
                         if not opened:
                             try:
-                                webbrowser.open(auth_url)
-                                logger.info("Opened browser for authorization")
+                                opened = webbrowser.open(auth_url)
+                                if opened:
+                                    logger.info("Opened browser for authorization")
                             except Exception as e:
                                 logger.warning(f"Failed to open browser: {e}")
+                            if not opened:
                                 logger.info(f"Please visit: {auth_url}")
                     else:
                         logger.info(f"Please visit: {auth_url}")

@@ -701,8 +701,8 @@ def test_raw_authorization_code_remains_supported_with_state_validation(monkeypa
 
 
 @pytest.mark.asyncio
-async def test_loopback_rejects_mismatched_state_without_hanging(monkeypatch):
-    """A real callback with a wrong/non-ASCII state reports failure, not a hang."""
+async def test_loopback_ignores_invalid_state_then_accepts_real_callback(monkeypatch):
+    """Stray requests must not terminate an unrelated authorization attempt."""
     monkeypatch.setattr(oauth.secrets, "token_urlsafe", lambda _size: "expected-state")
     config = oauth.OAuthConfig(
         authorization_endpoint="https://maas.example/authorize",
@@ -723,10 +723,88 @@ async def test_loopback_rejects_mismatched_state_without_hanging(monkeypatch):
 
     parsed = oauth.urlparse(handler._actual_redirect_uri)
     base = f"http://{parsed.hostname}:{parsed.port}{parsed.path}"
-    for state in ("wrong-state", "%C3%A9v"):
-        urllib.request.urlopen(f"{base}?code=x&state={state}", timeout=5).read()
-    with pytest.raises(RuntimeError, match="state did not match"):
-        await asyncio.wait_for(task, timeout=5)
+    try:
+        for query in ("code=x", "code=x&state=wrong-state", "code=x&state=%C3%A9v"):
+            body = await asyncio.to_thread(
+                lambda query=query: urllib.request.urlopen(f"{base}?{query}", timeout=5).read()
+            )
+            assert b"Invalid authorization state" in body
+            assert not task.done()
+        await asyncio.to_thread(
+            lambda: urllib.request.urlopen(
+                f"{base}?code=real-code&state=expected-state", timeout=5
+            ).read()
+        )
+        assert await asyncio.wait_for(task, timeout=5) == "real-code"
+    finally:
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("query", ["", "&code="])
+async def test_loopback_missing_code_reports_invalid_response(query):
+    """A completed callback without a code is not a timeout."""
+    config = oauth.OAuthConfig(
+        authorization_endpoint="https://maas.example/authorize",
+        token_endpoint="https://maas.example/token",
+        client_id="client-id",
+        redirect_uri="http://127.0.0.1:0/callback",
+        timeout=5,
+    )
+
+    async def browser_open(url):
+        params = parse_qs(urlparse(url).query)
+        async with httpx.AsyncClient(trust_env=False) as client:
+            response = await client.get(
+                f"{params['redirect_uri'][0]}?state={params['state'][0]}{query}"
+            )
+        assert "No code received" in response.text
+        return True
+
+    handler = oauth.OAuthHandler(config, browser_open=browser_open)
+    with pytest.raises(RuntimeError, match="callback did not include an authorization code"):
+        await handler._capture_code_via_local_server(open_browser=True)
+
+
+@pytest.mark.parametrize(
+    "pasted",
+    [
+        "http://localhost/callback?state=expected-state",
+        "urn:ietf:wg:oauth:2.0:oob?state=expected-state&code=",
+        "curl 'urn:ietf:wg:oauth:2.0:oob?state=expected-state'",
+    ],
+)
+def test_pasted_callback_without_code_is_rejected(pasted):
+    with pytest.raises(RuntimeError, match="callback URL did not include an authorization code"):
+        oauth._extract_authorization_code(pasted)
+
+
+@pytest.mark.asyncio
+async def test_browser_open_false_displays_authorization_url(monkeypatch, caplog):
+    """A launcher declining the URL must leave the user a manual recovery path."""
+    caplog.set_level("INFO", logger=oauth.logger.name)
+    opened = []
+
+    def browser_open(url):
+        opened.append(url)
+        return False
+
+    monkeypatch.setattr(oauth.webbrowser, "open", browser_open)
+    config = oauth.OAuthConfig(
+        authorization_endpoint="https://maas.example/authorize",
+        token_endpoint="https://maas.example/token",
+        client_id="client-id",
+        redirect_uri="http://127.0.0.1:0/callback",
+        timeout=0.05,
+    )
+    with pytest.raises(RuntimeError, match="timed out"):
+        await oauth.OAuthHandler(config)._capture_code_via_local_server(open_browser=True)
+    assert len(opened) == 1
+    assert f"Please visit: {opened[0]}" in caplog.text
+    assert "Opened browser for authorization" not in caplog.text
 
 
 @pytest.mark.asyncio
