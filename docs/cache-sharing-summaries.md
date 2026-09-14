@@ -51,8 +51,7 @@ rendered input; it is not used as a token-budget fallback.
   prefix equality, background execution, ownership, safe output handling and
   collapse timing. These are permanent offline tests, not an experiment.
 
-Earlier controlled Hub probes of this request shape measured 99.0% cached input
-for OpenAI and 98.5% for Sonnet with the installed summarizer. Those measurements
-predate the fork-only cleanup; they are not a new live run or a summary-quality
-benchmark. Cache lifetime, routing, changed suffixes and structured-output
-settings can lower reuse.
+Offline tests verify that the fork preserves the parent request's prefix.
+They do not measure provider cache hits or summary quality. Cache lifetime,
+routing, changed suffixes and structured-output settings can lower reuse.
+Keep deployment-specific measurements with the configuration used to run them.
