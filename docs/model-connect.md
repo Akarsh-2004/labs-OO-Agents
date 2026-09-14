@@ -43,6 +43,16 @@ Each check shows progress and its result as it runs. Saving is a separate
 confirmation; Ctrl-C cancels setup. A pasted key is used only for this session;
 the saved entry names its environment variable, not its value.
 
+If enabled reasoning-level checks succeed but return neither reasoning fields
+nor reported reasoning tokens, Connect warns once before saving and lists the
+affected levels. It suggests another API format or checking the server settings.
+Disabled reasoning settings are exempt, as are rejected or skipped checks. A
+server may hide reasoning information, so this warning does not claim that
+reasoning is off. The saved results keep acceptance and reasoning observation
+separate. The TUI can use `connect.unobserved_reasoning_levels(entry)` for the
+same warning. This does not add calls or prove reasoning quality; the setup
+question remains a small connection check.
+
 If you do not want paid checks, use `--no-probe` or follow
 [manual model configuration](model-configuration.md), optionally with the
 `nooa-agent-authoring` skill. With `--no-probe`, interface selection is manual.

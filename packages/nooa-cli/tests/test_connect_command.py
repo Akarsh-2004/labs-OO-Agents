@@ -24,6 +24,88 @@ def args(path):
     ]
 
 
+@pytest.mark.parametrize("style", ["chat", "responses", "anthropic"])
+@pytest.mark.parametrize("mode", ["missing", "observed", "usage", "rejected", "unprobed"])
+def test_enabled_reasoning_without_evidence_warns_once_before_save(
+    tmp_path, monkeypatch, style, mode
+):
+    import json
+
+    import httpx
+
+    client = httpx.AsyncClient
+    sent = []
+
+    def handle(request):
+        body = json.loads(request.content)
+        sent.append(body)
+        enabled = (
+            body.get("reasoning_effort") == "high"
+            or body.get("reasoning", {}).get("effort") == "high"
+            or body.get("thinking", {}).get("type") == "adaptive"
+        )
+        if enabled and mode == "rejected":
+            return httpx.Response(400)
+        data = {
+            "chat": {"choices": [{"message": {"content": "323"}}]},
+            "responses": {"output": []},
+            "anthropic": {"content": [{"type": "text", "text": "323"}]},
+        }[style]
+        if enabled and mode == "observed":
+            if style == "chat":
+                data["choices"][0]["message"]["reasoning_content"] = "private reasoning"
+            else:
+                data["output" if style == "responses" else "content"].append(
+                    {
+                        "type": "reasoning" if style == "responses" else "thinking",
+                        "text": "private reasoning",
+                    }
+                )
+        if enabled and mode == "usage":
+            data["usage"] = {"output_tokens_details": {"reasoning_tokens": 8}}
+        return httpx.Response(200, json=data)
+
+    monkeypatch.setattr(
+        httpx, "AsyncClient", lambda **kw: client(transport=httpx.MockTransport(handle), **kw)
+    )
+    path = tmp_path / "models.yaml"
+    result = CliRunner().invoke(
+        command,
+        [
+            "model",
+            "--as",
+            "local",
+            "--endpoint",
+            "https://api.test/v1",
+            "--api-style",
+            style,
+            "--api-key-env",
+            "",
+            "--no-catalogue",
+            "--reasoning-template",
+            "adaptive" if style == "anthropic" else "effort",
+            "--levels",
+            "high,none",
+            "--output",
+            str(path),
+            *(["--no-probe"] if mode == "unprobed" else []),
+        ],
+        input="y\n",
+    )
+    assert result.exit_code == 0, result.output
+    warning = "Warning: no reasoning information was returned for: high."
+    assert result.output.count(warning) == (1 if mode == "missing" else 0)
+    assert "returned for: none" not in result.output
+    assert "private reasoning" not in result.output
+    assert len(sent) == (0 if mode == "unprobed" else 4)
+    if mode == "missing":
+        assert result.output.index(warning) < result.output.index("Write model entry")
+        assert "Try another API format or review the server's reasoning settings" in result.output
+        probes = yaml.safe_load(path.read_text())["models"]["local"]["provenance"]["probes"]
+        assert probes["level:high"]["outcome"] == "accepted"
+        assert probes["level:high"]["reasoning_observed"] is False
+
+
 def test_offline_cli_needs_no_key_and_writes_generated_registry(tmp_path, monkeypatch):
     monkeypatch.delenv("CONNECT_TEST_KEY", raising=False)
     path = tmp_path / "connected.yaml"

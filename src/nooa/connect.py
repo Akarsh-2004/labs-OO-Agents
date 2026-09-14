@@ -323,6 +323,39 @@ def reasoning_settings(template: str, style: str, level: str, *, budget: int = 4
     raise ValueError(f"Unknown reasoning template: {template}")
 
 
+def unobserved_reasoning_levels(entry: dict) -> list[str]:
+    """List accepted reasoning-on checks that returned no reasoning information.
+
+    Read the request settings, not label or provider names. This recognizes the
+    onboarding templates; arbitrary custom settings with unknown meaning are
+    left alone. Absence of evidence is not evidence that reasoning was disabled.
+    Frontends can show one warning without changing the saved probe outcomes.
+    """
+    missing = []
+    records = entry.get("provenance", {}).get("probes", {})
+    for label, params in entry.get("reasoning_levels", {}).items():
+        record = records.get(f"level:{label}", {})
+        if record.get("outcome") != "accepted" or record.get("reasoning_observed"):
+            continue
+        reasoning = params.get("reasoning")
+        thinking = params.get("thinking")
+        template = params.get("chat_template_kwargs")
+        efforts = (
+            params.get("reasoning_effort"),
+            reasoning.get("effort") if isinstance(reasoning, dict) else None,
+        )
+        enabled = any(
+            isinstance(effort, str)
+            and effort.strip().lower() not in {"", "none", "off", "disabled"}
+            for effort in efforts
+        )
+        enabled |= isinstance(thinking, dict) and thinking.get("type") in ("enabled", "adaptive")
+        enabled |= isinstance(template, dict) and template.get("enable_thinking") is True
+        if enabled:
+            missing.append(label)
+    return missing
+
+
 def plan(
     alias: str,
     model: str,

@@ -18,6 +18,36 @@ def make_plan(**kwargs):
     )
 
 
+@pytest.mark.parametrize(
+    "params,expected",
+    [
+        ({"reasoning_effort": "high"}, True),
+        ({"reasoning": {"effort": "high"}}, True),
+        ({"thinking": {"type": "adaptive"}, "output_config": {"effort": "high"}}, True),
+        ({"thinking": {"type": "enabled", "budget_tokens": 1024}}, True),
+        ({"chat_template_kwargs": {"enable_thinking": True}}, True),
+        ({"reasoning_effort": "none"}, False),
+        ({"reasoning": {"effort": "off"}}, False),
+        ({"thinking": {"type": "disabled"}}, False),
+        ({"chat_template_kwargs": {"enable_thinking": False}}, False),
+        ({"temperature": 0.5}, False),
+    ],
+)
+def test_unobserved_reasoning_checks_use_settings_not_label_names(params, expected):
+    entry = make_plan(reasoning_levels={"custom": params}).entry
+    record = {"outcome": "accepted", "reasoning_observed": False}
+    entry["provenance"]["probes"]["level:custom"] = record
+    original = deepcopy(entry)
+    assert connect.unobserved_reasoning_levels(entry) == (["custom"] if expected else [])
+    assert entry == original
+    record["reasoning_observed"] = True
+    assert connect.unobserved_reasoning_levels(entry) == []
+    record["reasoning_observed"] = False
+    for outcome in ("rejected", "not_probed"):
+        record["outcome"] = outcome
+        assert connect.unobserved_reasoning_levels(entry) == []
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("style", ["chat", "responses", "anthropic"])
 async def test_discover_normalizes_root_and_uses_temporary_key(monkeypatch, style):

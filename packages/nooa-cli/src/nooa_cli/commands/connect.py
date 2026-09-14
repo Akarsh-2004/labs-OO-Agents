@@ -466,6 +466,16 @@ def command(
                 + ". These settings have not been checked.",
                 err=True,
             )
+        unobserved = connect.unobserved_reasoning_levels(result.entry)
+        if unobserved:
+            click.echo(
+                "Warning: no reasoning information was returned for: "
+                + ", ".join(unobserved)
+                + ". These checks have not confirmed reasoning for those levels. "
+                "Try another API format or review the server's reasoning settings. "
+                "Some servers do not expose reasoning information.",
+                err=True,
+            )
         view.step(4, "Save model")
         if yes or confirm(f"Write model entry to {path}?", default=True):
             connect.write(result.entry, path, alias=alias)
