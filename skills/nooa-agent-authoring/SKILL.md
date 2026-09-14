@@ -61,6 +61,17 @@ Inspect or refresh entries with
 `from nooa.unifiedllm.registry import reload_registry; configs = reload_registry()`.
 To load a specific file instead of discovery, pass its `Path` to `reload_registry`.
 
+For a new endpoint, use `nooa connect --help` to prepare a registry entry and
+approve bounded probes before saving. Omit the model argument to select from
+the endpoint's model list. It writes the user `llm_config.yaml`, warning before
+replacing an existing alias; `--output` selects another file. Supply an environment
+variable name for the key; never put credentials in the entry. Probe acceptance
+does not prove the model obeyed a reasoning setting. TUI integrations use the
+same `nooa.connect.discover` / `plan` / `run` / `write` library; see
+[model onboarding](../../docs/model-connect.md). `--no-probe` makes no generation
+calls. Do not use `--yes` to approve paid probes or overwriting an alias without
+the user's authorization.
+
 Keys come from `.env` (library use) or `~/.config/nooa/secrets.yaml`.
 
 **Caching:** the cached renderer inserts a `CacheBoundary()` block before live

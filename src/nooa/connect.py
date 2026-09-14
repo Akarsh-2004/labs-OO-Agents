@@ -1,0 +1,629 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""Model onboarding shared by the CLI and TUI; no prompts or terminal output.
+
+``plan`` prepares data for approval. ``run`` sends only approved, capped requests
+without retries. ``write`` updates one alias in a registry file. Catalogue limits
+are estimates with sources; acceptance does not prove a reasoning setting was
+obeyed. The runtime reads the result, never these onboarding templates.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import math
+import os
+import re
+import tempfile
+from copy import deepcopy
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Literal
+from urllib.parse import urlsplit, urlunsplit
+
+import httpx
+import yaml
+
+CATALOGUE_URL = "https://openrouter.ai/api/v1/models"
+TEMPLATES = ("effort", "adaptive", "budget", "toggle", "thinking")
+_RESERVED = {
+    "model",
+    "messages",
+    "input",
+    "api_base",
+    "base_url",
+    "api_key",
+    "custom_llm_provider",
+    "extra_body",
+    "client",
+}
+_PATHS = {"chat": "chat/completions", "responses": "responses", "anthropic": "messages"}
+
+
+@dataclass(frozen=True)
+class Probe:
+    """One proposed POST, with no credentials in its body."""
+
+    name: str
+    body: dict[str, Any]
+    token_estimate: int
+
+
+@dataclass(frozen=True)
+class ConnectPlan:
+    """Reviewable input to run; token and price estimates are not billing caps."""
+
+    alias: str
+    entry: dict[str, Any]
+    probes: tuple[Probe, ...]
+    budget_tokens: int
+    token_estimate: int
+    price_estimate: float | None
+
+
+@dataclass(frozen=True)
+class ConnectResult:
+    alias: str
+    entry: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class Discovery:
+    """Models advertised by the selected endpoint, not a public catalogue."""
+
+    api_base: str
+    models: tuple[dict[str, Any], ...]
+
+
+class DiscoveryError(ValueError):
+    """Safe discovery failure; frontends can offer a new key on 401 or 403."""
+
+    def __init__(self, message: str, *, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def normalize_endpoint(endpoint: str) -> str:
+    """Accept an API base or /models URL without embedded credentials."""
+    address = urlsplit(endpoint.strip().rstrip("/"))
+    if (
+        address.scheme not in {"http", "https"}
+        or not address.netloc
+        or address.username
+        or address.password
+        or address.query
+        or address.fragment
+    ):
+        raise ValueError("Endpoint must be an HTTP(S) URL without credentials, query or fragment")
+    if address.scheme == "http" and address.hostname not in {"localhost", "127.0.0.1", "::1"}:
+        raise ValueError("Use HTTPS for a remote endpoint")
+    path = address.path.removesuffix("/models")
+    return urlunsplit((address.scheme, address.netloc, path, "", ""))
+
+
+def _headers(style: str, key: str | None) -> dict[str, str]:
+    if style == "anthropic":
+        return {"anthropic-version": "2023-06-01", **({"x-api-key": key} if key else {})}
+    return {"Authorization": f"Bearer {key}"} if key else {}
+
+
+async def discover(
+    endpoint: str, *, api_style: str = "chat", api_key: str | None = None
+) -> Discovery:
+    """List endpoint models without saving credentials or making generation calls.
+
+    Root URLs try /models, then /v1/models only on 404. Anthropic pagination
+    uses the same fetcher. Limits apply to the whole discovery: 30 seconds,
+    5 MiB and 5,000 entries. Redirects and automatic retries are disabled.
+    """
+    if api_style not in _PATHS:
+        raise ValueError("api_style must be chat, responses or anthropic")
+    base = normalize_endpoint(endpoint)
+    root = not urlsplit(base).path
+    models: dict[str, dict] = {}
+    cursors: set[str] = set()
+    params = {"limit": "100"} if api_style == "anthropic" else {}
+    size = 0
+    count = 0
+    try:
+        async with (
+            asyncio.timeout(30),
+            httpx.AsyncClient(timeout=15, follow_redirects=False) as client,
+        ):
+            while True:
+                async with client.stream(
+                    "GET", base + "/models", headers=_headers(api_style, api_key), params=params
+                ) as response:
+                    if response.status_code == 404 and root:
+                        base += "/v1"
+                        root = False
+                        continue
+                    if not response.is_success:
+                        raise DiscoveryError(
+                            f"Model discovery returned HTTP {response.status_code}",
+                            status_code=response.status_code,
+                        )
+                    chunks = []
+                    async for chunk in response.aiter_bytes():
+                        size += len(chunk)
+                        if size > 5 * 1024 * 1024:
+                            raise DiscoveryError("Model discovery exceeds 5 MiB")
+                        chunks.append(chunk)
+                payload = json.loads(b"".join(chunks))
+                data = payload.get("data") if isinstance(payload, dict) else None
+                if not isinstance(data, list):
+                    raise DiscoveryError("Model discovery must contain a data list")
+                count += len(data)
+                if count > 5000:
+                    raise DiscoveryError("Model discovery exceeds 5,000 entries")
+                for item in data:
+                    name = item.get("id") if isinstance(item, dict) else None
+                    if (
+                        not isinstance(name, str)
+                        or not name.strip()
+                        or len(name) > 500
+                        or any(ord(c) < 32 for c in name)
+                    ):
+                        continue
+                    model = {"id": name}
+                    for field, candidates in (
+                        (
+                            "context_window",
+                            (
+                                "context_window",
+                                "context_length",
+                                "max_model_len",
+                                "max_input_tokens",
+                            ),
+                        ),
+                        ("max_output_tokens", ("max_output_tokens", "max_completion_tokens")),
+                    ):
+                        for candidate in candidates:
+                            value = item.get(candidate)
+                            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                                model[field] = value
+                                break
+                    models[name] = model
+                if api_style != "anthropic" or not payload.get("has_more"):
+                    break
+                cursor = payload.get("last_id")
+                if (
+                    not isinstance(cursor, str)
+                    or not cursor
+                    or cursor in cursors
+                    or len(cursors) >= 50
+                ):
+                    raise DiscoveryError("Invalid or excessive model discovery pagination")
+                cursors.add(cursor)
+                params["after_id"] = cursor
+    except (httpx.HTTPError, TimeoutError):
+        raise DiscoveryError("Model discovery connection failed or timed out") from None
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        raise DiscoveryError("Model discovery did not return valid JSON") from None
+    if not models:
+        raise DiscoveryError("Endpoint advertised no usable model IDs; supply a model explicitly")
+    return Discovery(base, tuple(models[name] for name in sorted(models)))
+
+
+async def catalogue() -> list[dict]:
+    """Fetch public metadata without sending the endpoint's credentials."""
+    async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
+        response = await client.get(CATALOGUE_URL)
+        response.raise_for_status()
+        data = response.json()["data"]
+        if not isinstance(data, list) or any(not isinstance(item, dict) for item in data):
+            raise ValueError("Catalogue response must contain a list of model objects")
+        return data
+
+
+def match_models(model: str, models: list[dict]) -> list[dict]:
+    """Suggest up to three matches. The frontend must confirm a candidate."""
+
+    def normalized(value):
+        return re.sub(r"[-_.]", "", value.lower())
+
+    target = normalized(model)
+    matches = []
+    for item in models:
+        name = item.get("id")
+        if not isinstance(name, str):
+            continue
+        candidate = normalized(name)
+        if target == candidate or target.endswith("/" + candidate):
+            matches.append((0, name, item))
+        elif target.rsplit("/", 1)[-1] == candidate.rsplit("/", 1)[-1]:
+            matches.append((1, name, item))
+    return [item for _, _, item in sorted(matches, key=lambda item: item[:2])[:3]]
+
+
+def reasoning_settings(template: str, style: str, level: str, *, budget: int = 4096) -> dict:
+    """Build an onboarding candidate, not a claim about a model's support."""
+    if template == "effort":
+        return (
+            {"reasoning": {"effort": level}}
+            if style == "responses"
+            else {"reasoning_effort": level}
+        )
+    enabled = level not in {"none", "off", "disabled"}
+    if template == "adaptive":
+        return (
+            {"thinking": {"type": "adaptive"}, "output_config": {"effort": level}}
+            if enabled
+            else {"thinking": {"type": "disabled"}}
+        )
+    if template == "budget":
+        return (
+            {"thinking": {"type": "enabled", "budget_tokens": budget}, "max_tokens": budget + 1024}
+            if enabled
+            else {"thinking": {"type": "disabled"}}
+        )
+    if template == "toggle":
+        return {"chat_template_kwargs": {"enable_thinking": enabled}}
+    if template == "thinking":
+        return {"thinking": {"type": "enabled" if enabled else "disabled"}}
+    raise ValueError(f"Unknown reasoning template: {template}")
+
+
+def plan(
+    alias: str,
+    model: str,
+    api_style: str,
+    api_base: str,
+    api_key_env: str,
+    *,
+    catalogue: dict | None = None,
+    reasoning_levels: dict | None = None,
+    budget_tokens: int = 4096,
+    output_tokens: int = 200,
+    existing_entry: dict | None = None,
+) -> ConnectPlan:
+    """Prepare requests without reading credentials, files or network resources.
+
+    ``model`` is the exact endpoint model ID, without a LiteLLM prefix. The
+    returned entry adds the prefix needed by today's runtime. Each request reserves
+    its output cap plus 512 estimated input tokens. Reported usage can increase
+    that charge. Servers can ignore caps, so this is not a billing limit.
+    """
+    if api_style not in _PATHS:
+        raise ValueError("api_style must be chat, responses or anthropic")
+    api_base = normalize_endpoint(api_base)
+    if (
+        not alias.strip()
+        or not model.strip()
+        or api_key_env
+        and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", api_key_env)
+    ):
+        raise ValueError(
+            "An alias and model ID are required; api_key_env must be empty or a variable name"
+        )
+    if not 1 <= output_tokens <= 4096 or budget_tokens < 1:
+        raise ValueError("output_tokens must be 1..4096 and budget_tokens must be positive")
+    vendor = "anthropic" if api_style == "anthropic" else "openai"
+    entry: dict[str, Any] = {
+        "model_name": f"{vendor}/{model}",
+        "client_type": "responses" if api_style == "responses" else "completion",
+        "api_style": api_style,
+        "api_base": api_base.rstrip("/"),
+        "api_key_env": api_key_env,
+        "replay_vendor": vendor,
+    }
+    provenance: dict[str, Any] = {
+        "probes": {},
+        "requests_accepted": [],
+        "reasoning_observed": [],
+        "not_probed": [
+            "underlying_model",
+            "context_window",
+            "max_output_tokens",
+            "reasoning_default",
+        ],
+    }
+    if catalogue is not None:
+        entry["underlying_model"] = catalogue["id"]
+        provenance["catalogue"] = {"url": CATALOGUE_URL, "id": catalogue["id"]}
+        for field, value in (
+            ("context_window", catalogue.get("context_length")),
+            (
+                "max_output_tokens",
+                (catalogue.get("top_provider") or {}).get("max_completion_tokens"),
+            ),
+        ):
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                entry[field] = value
+    reasoning = (catalogue or {}).get("reasoning") or {}
+    if reasoning_levels is None and reasoning.get("supported_efforts"):
+        template = "adaptive" if api_style == "anthropic" else "effort"
+        reasoning_levels = {
+            label: reasoning_settings(template, api_style, label)
+            for label in reasoning["supported_efforts"]
+        }
+        provenance["reasoning_levels"] = {"source": "catalogue", "template": template}
+    if reasoning_levels is not None and not isinstance(reasoning_levels, dict):
+        raise ValueError("reasoning_levels must be a mapping of labels to request settings")
+    levels = deepcopy(reasoning_levels or {})
+    for label, params in levels.items():
+        if (
+            not isinstance(label, str)
+            or not label.strip()
+            or not isinstance(params, dict)
+            or not params
+        ):
+            raise ValueError(
+                "Reasoning levels must map string labels to request dictionaries; quote YAML boolean labels"
+            )
+        if any(
+            not isinstance(key, str)
+            or key in _RESERVED
+            or key.startswith("reasoning_")
+            and key != "reasoning_effort"
+            for key in params
+        ):
+            raise ValueError(
+                "Reasoning levels cannot set routing, credentials or framework declarations"
+            )
+    if reasoning_levels is not None:
+        entry["reasoning_levels"] = levels
+    if (default := reasoning.get("default_effort")) in levels:
+        entry["reasoning_default"] = default
+    if api_style == "responses":
+        entry.update(
+            store=False,
+            include=["reasoning.encrypted_content"],
+            encrypted_reasoning=True,
+            cache_breakpoint="openai",
+        )
+    elif api_style == "anthropic":
+        entry["cache_breakpoint"] = "anthropic"
+    token_key = "max_output_tokens" if api_style == "responses" else "max_tokens"
+    body = {
+        "model": model,
+        token_key: output_tokens,
+        "input" if api_style == "responses" else "messages": [
+            {"role": "user", "content": "Compute 17 * 19. Reply with the number."}
+        ],
+    }
+    if api_style == "responses":
+        body.update(store=False, include=["reasoning.encrypted_content"])
+    probes = [Probe("routing", body, output_tokens + 512)]
+    tool_body = deepcopy(body)
+    tool_body["input" if api_style == "responses" else "messages"][0]["content"] = (
+        "Call probe_tool with value 'ok'."
+    )
+    schema = {
+        "type": "object",
+        "properties": {"value": {"type": "string"}},
+        "required": ["value"],
+        "additionalProperties": False,
+    }
+    function = {"name": "probe_tool", "description": "Echo a value", "parameters": schema}
+    tool_body["tools"] = (
+        [{"name": "probe_tool", "description": "Echo a value", "input_schema": schema}]
+        if api_style == "anthropic"
+        else [{"type": "function", **function}]
+        if api_style == "responses"
+        else [{"type": "function", "function": function}]
+    )
+    probes.append(Probe("tools", tool_body, output_tokens + 512))
+    for label, params in levels.items():
+        level_body = deepcopy(body)
+        level_body.update(params)
+        probes.append(Probe(f"level:{label}", level_body, output_tokens + 512))
+    entry["provenance"] = provenance
+    if existing_entry:
+        keys = ("model_name", "api_base", "api_key_env", "api_style", "reasoning_levels")
+        if all(existing_entry.get(key) == entry.get(key) for key in keys):
+            provenance["probes"] = deepcopy(existing_entry.get("provenance", {}).get("probes", {}))
+    estimate = sum(probe.token_estimate for probe in probes)
+    price = None
+    if catalogue and catalogue.get("pricing"):
+        try:
+            rates = [float(catalogue["pricing"][key]) for key in ("prompt", "completion")]
+            if all(math.isfinite(rate) and rate >= 0 for rate in rates):
+                price = len(probes) * (512 * rates[0] + output_tokens * rates[1])
+        except (ValueError, TypeError, KeyError):
+            pass  # Missing catalogue prices are unknown, never zero.
+    return ConnectPlan(alias, entry, tuple(probes), budget_tokens, estimate, price)
+
+
+def _observations(data: dict) -> tuple[bool, bool, int]:
+    """Inspect response fields; never execute tools or retain raw responses."""
+    usage = data.get("usage") or {}
+    tokens = sum(
+        value
+        for key in ("input_tokens", "output_tokens", "prompt_tokens", "completion_tokens")
+        if isinstance(value := usage.get(key), int) and value > 0
+    )
+    details = usage.get("completion_tokens_details") or usage.get("output_tokens_details") or {}
+    reasoning = bool(details.get("reasoning_tokens"))
+    tool = False
+    for choice in data.get("choices") or []:
+        message = choice.get("message") or {}
+        reasoning |= bool(
+            message.get("reasoning_content")
+            or message.get("thinking_blocks")
+            or message.get("reasoning_items")
+            or (message.get("provider_specific_fields") or {}).get("thought_signatures")
+        )
+        tool |= any(
+            call.get("function", {}).get("name") == "probe_tool"
+            for call in message.get("tool_calls") or []
+        )
+    for item in [*(data.get("content") or []), *(data.get("output") or [])]:
+        if isinstance(item, dict):
+            reasoning |= item.get("type") in {"reasoning", "thinking", "redacted_thinking"}
+            tool |= (
+                item.get("type") in {"function_call", "tool_use"}
+                and item.get("name") == "probe_tool"
+            )
+    return reasoning, tool, tokens
+
+
+async def run(
+    proposal: ConnectPlan,
+    *,
+    approved: Literal["all", "minimal", "none"],
+    api_key: str | None = None,
+) -> ConnectResult:
+    """Execute approved probes without redirects, retries or provider fallback.
+
+    Minimal approval sends only the routing probe. Its failure stops all probes.
+    HTTP 400 means rejected, not unsupported; auth and transient failures stay
+    untested. Errors record status codes, not server bodies or credentials.
+    """
+    if approved not in {"all", "minimal", "none"}:
+        raise ValueError("approved must be all, minimal or none")
+    entry = deepcopy(proposal.entry)
+    provenance = entry["provenance"]
+    records = provenance["probes"]
+    spent = 0
+    stopped = False
+    key = api_key
+    async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
+        for probe in proposal.probes:
+            previous = records.get(probe.name, {})
+            if previous.get("outcome") == "accepted" and previous.get("request") == probe.body:
+                continue
+            record: dict[str, Any] = {"outcome": "not_probed"}
+            records[probe.name] = record
+            if approved == "none" or approved == "minimal" and probe.name != "routing":
+                record["reason"] = "not approved"
+                continue
+            if stopped or spent + probe.token_estimate > proposal.budget_tokens:
+                record["reason"] = "previous failure or budget exhausted"
+                continue
+            if probe.body.get("stream") or any(
+                probe.body.get(name, 1) != 1 for name in ("n", "best_of")
+            ):
+                record["reason"] = "probes require one non-streaming generation"
+                continue
+            style = entry["api_style"]
+            caps = [
+                probe.body[name]
+                for name in ("max_tokens", "max_output_tokens", "max_completion_tokens")
+                if name in probe.body
+            ]
+            required_cap = "max_output_tokens" if style == "responses" else "max_tokens"
+            if required_cap not in probe.body or any(
+                not isinstance(cap, int)
+                or isinstance(cap, bool)
+                or cap < 1
+                or cap > probe.token_estimate - 512
+                for cap in caps
+            ):
+                record["reason"] = "declared output cap exceeds the approved probe cap"
+                continue
+            if key is None and entry["api_key_env"]:
+                key = os.environ.get(entry["api_key_env"])
+                if not key:
+                    raise ValueError(f"Set {entry['api_key_env']} before probing, or approve none")
+            headers = _headers(style, key)
+            spent += probe.token_estimate
+            try:
+                async with asyncio.timeout(30):
+                    response = await client.post(
+                        f"{entry['api_base']}/{_PATHS[style]}", json=probe.body, headers=headers
+                    )
+            except (httpx.RequestError, TimeoutError) as exc:
+                record["error"] = type(exc).__name__
+                stopped = probe.name == "routing"
+                continue
+            record["fields_reached_wire"] = True
+            record["status_code"] = response.status_code
+            if not response.is_success:
+                record["outcome"] = "rejected" if response.status_code == 400 else "not_probed"
+                record["error"] = (
+                    f"HTTP {response.status_code}; server body omitted to protect credentials"
+                )
+                stopped = probe.name == "routing" or response.status_code in {401, 403}
+                continue
+            try:
+                reasoning, tool, tokens = _observations(response.json())
+            except (ValueError, TypeError, AttributeError):
+                record["error"] = "Response did not match the selected API style"
+                stopped = probe.name == "routing"
+                continue
+            record.update(
+                outcome="accepted",
+                request=deepcopy(probe.body),
+                reasoning_observed=reasoning,
+                tool_observed=tool,
+                reported_tokens=tokens,
+                checked_at=datetime.now(UTC).isoformat(),
+            )
+            spent += max(0, tokens - probe.token_estimate)
+    if records.get("tools", {}).get("tool_observed"):
+        entry["tools"] = True  # No call is not evidence that tools are unsupported.
+    provenance["requests_accepted"] = [
+        name for name, item in records.items() if item["outcome"] == "accepted"
+    ]
+    provenance["reasoning_observed"] = [
+        name for name, item in records.items() if item.get("reasoning_observed")
+    ]
+    provenance["tokens_charged_to_budget"] = spent
+    return ConnectResult(proposal.alias, entry)
+
+
+def write(entry: dict, path: Path, *, alias: str) -> None:
+    """Replace one model; frontends warn before calling this for an existing alias.
+
+    Splice the selected YAML entry instead of reformatting the whole file, so
+    unrelated entries and comments remain intact. The final replace is atomic.
+    """
+    original = path.read_text() if path.exists() else None
+    source = original or ""
+    data = yaml.safe_load(source)
+    if data is None:
+        data = {}
+    if not isinstance(data, dict) or not isinstance(data.get("models", {}), dict):
+        raise ValueError("Registry must be a mapping with a models mapping")
+    dumped = yaml.safe_dump({alias: entry}, sort_keys=False, allow_unicode=True).rstrip()
+    indented = "\n".join("  " + line for line in dumped.splitlines()) + "\n"
+    document = yaml.compose(source)
+    models_node = (
+        next((value for key, value in document.value if key.value == "models"), None)
+        if document
+        else None
+    )
+    if models_node is None:
+        separator = "" if not source or source.endswith("\n") else "\n"
+        text = source + separator + "models:\n" + indented
+    elif models_node.flow_style:
+        models = {**data["models"], alias: entry}
+        # An inline mapping must be replaced as a unit, not patched by lines.
+        replacement = yaml.safe_dump(models, default_flow_style=True, sort_keys=False).strip()
+        text = (
+            source[: models_node.start_mark.index]
+            + replacement
+            + source[models_node.end_mark.index :]
+        )
+    elif alias in data["models"]:
+        key, value = next((key, value) for key, value in models_node.value if key.value == alias)
+        lines = dumped.splitlines()
+        replacement = "\n".join([lines[0], *("  " + line for line in lines[1:])])
+        suffix = source[value.end_mark.index :]
+        if suffix and not suffix.startswith("\n"):
+            replacement += "\n" + " " * value.end_mark.column
+        text = source[: key.start_mark.index] + replacement + suffix
+    else:
+        insertion = models_node.end_mark.index
+        prefix = "" if insertion == 0 or source[insertion - 1] == "\n" else "\n"
+        text = source[:insertion] + prefix + indented + source[insertion:]
+    expected = {**data, "models": {**data.get("models", {}), alias: entry}}
+    if yaml.safe_load(text) != expected:
+        raise ValueError("Could not construct the registry update without changing other entries")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=path.parent, prefix=path.name + ".", delete=False
+    ) as temporary:
+        temporary.write(text)
+        temporary.flush()
+        os.fsync(temporary.fileno())
+        temporary_path = Path(temporary.name)
+    try:
+        if (path.read_text() if path.exists() else None) != original:
+            raise ValueError("Registry changed during write; reload before retrying")
+        os.replace(temporary_path, path)
+    finally:
+        temporary_path.unlink(missing_ok=True)
