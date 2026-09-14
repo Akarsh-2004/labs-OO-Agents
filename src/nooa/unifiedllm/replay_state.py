@@ -55,6 +55,10 @@ def unsupported_responses_parts(output: list[Any]) -> list[str]:
             if not isinstance(content, list):
                 raise ReasoningReplayError("Responses message content must be a list of blocks.")
             for block in content:
+                if not isinstance(block, dict) and not callable(
+                    getattr(type(block), "model_dump", None)
+                ):
+                    raise ReasoningReplayError("Responses text blocks must be mappings.")
                 block_type = response_item_type(block)
                 if block_type != "output_text":
                     unsupported.append(f"message.{block_type}")

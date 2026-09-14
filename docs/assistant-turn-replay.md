@@ -100,6 +100,13 @@ state raises; it is not silently treated as a successful
 capture. Empty public tool IDs are accepted where no retained native state needs
 binding; nonempty duplicate IDs and ambiguous native bindings raise.
 
+Valid Responses outputs outside our replay format, such as built-in search
+actions and refusal blocks, do not discard an otherwise usable answer. Capture
+keeps readable text (including the refusal), warns about the unsupported shape,
+and removes native state from the whole turn. The original SDK response remains
+available on the live result; it is not saved in the session. Malformed recognized
+fields still raise, as does unsupported output with no readable outcome.
+
 Provider strings remain immutable in storage. Container detachment happens at
 capture and final projection, without repeatedly copying large immutable string
 leaves. Live SDK responses and parsed Python results are excluded from archives.
@@ -119,6 +126,13 @@ each route rejects an omitted field or guarantees a cache hit. Run with
 ```bash
 uv run pytest -m integration -s tests/integration/test_open_model_tool_reasoning_live.py
 ```
+
+Set `NOOA_TEST_OMITTED_REASONING=1` to add one continuation per model with
+`reasoning_content` removed from the final HTTP body, after LiteLLM serialization.
+The test checks that this is the only changed field and reports the HTTP outcome.
+A successful omitted-field request does not prove that reasoning was retained or
+used: gateways differ in how they enforce the field. Rate limits, authentication
+failures and transport failures are inconclusive, not evidence of a required field.
 
 ## Archives and collapse
 

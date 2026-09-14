@@ -85,24 +85,36 @@ def capture_parts(output: list[Any], scope: str | None) -> tuple[AssistantPart, 
     opaque_item detaches mutable provider containers; frozen native data then
     survives storage and repeated requests without copying its string payloads.
     Unrecognized routes retain portable parts only. A summary-only reasoning
-    item makes the entire turn portable, since mixing a rewritten public turn
-    with retained native state would violate replay consistency. Missing or
-    malformed supported fields raise the terminal ReasoningReplayError.
+    item or an unsupported output shape makes the entire turn readable-only:
+    keep the answer/refusal, warn, and discard native state rather than replay
+    an incomplete provider turn. Missing or malformed supported fields raise
+    the terminal ReasoningReplayError.
     """
     unsupported = unsupported_responses_parts(output)
     if unsupported:
-        raise ReasoningReplayError("Unsupported Responses output parts: " + ", ".join(unsupported))
+        logger.warning(
+            "Unsupported Responses output parts (%s); keeping readable output without native state.",
+            ", ".join(unsupported),
+        )
     supported = _scope_provider(scope) in {"openai", "azure"}
     parts: list[AssistantPart] = []
     ids: set[str] = set()
-    portable_only = False
+    portable_only = bool(unsupported)
     for item in output:
         native = opaque_item(item)
+        if not isinstance(native, dict) or not isinstance(native.get("type"), str):
+            raise ReasoningReplayError("Responses output items require a string type.")
         kind = native["type"]
         if kind == "message":
             content = native.get("content")
             if not isinstance(content, list):
                 raise ReasoningReplayError("Responses message content must be a list of blocks.")
+            if unsupported:
+                content = [
+                    {"text": block.get("refusal")} if block.get("type") == "refusal" else block
+                    for block in content
+                    if block.get("type") in {"output_text", "refusal"}
+                ]
             text = _capture_text(content, "")
             part = AssistantText(text=text)
         elif kind == "function_call":
@@ -119,7 +131,7 @@ def capture_parts(output: list[Any], scope: str | None) -> tuple[AssistantPart, 
                     "Responses tool call name and arguments must be strings."
                 )
             part = ToolCall(id=call_id, name=name, arguments=arguments)
-        else:
+        elif kind == "reasoning":
             encrypted = native.get("encrypted_content")
             if encrypted is not None:
                 _require_encrypted_reasoning(native)
@@ -133,19 +145,27 @@ def capture_parts(output: list[Any], scope: str | None) -> tuple[AssistantPart, 
                 portable_only = True
                 parts.append(part)
                 continue
-        if supported:
+        else:
+            continue
+        if supported and not portable_only:
             part = part.model_copy(update={"native": freeze(native)})
         parts.append(part)
+    if portable_only:
+        if unsupported and not any(isinstance(part, ToolCall) or part.text for part in parts):
+            raise ReasoningReplayError(
+                "Unsupported Responses output has no readable outcome: " + ", ".join(unsupported)
+            )
+        # A summary-only reasoning item cannot be replayed natively. Its text
+        # demotion edits the turn, so no other part may keep native authority.
+        if any(part.native is not None for part in parts):
+            logger.warning(
+                "Incomplete native reasoning sequence; replaying the turn as readable text."
+            )
+        return tuple(part.model_copy(update={"native": None}) for part in parts)
     if any(isinstance(part, ToolCall) and not part.id for part in parts) and any(
         isinstance(part, AssistantReasoning) and part.native for part in parts
     ):
         raise ReasoningReplayError("Native reasoning requires nonempty tool call ids.")
-    if portable_only:
-        # A summary-only reasoning item cannot be replayed natively. Its text
-        # demotion edits the turn, so no other part may keep native authority.
-        if any(part.native is not None for part in parts):
-            logger.warning("Incomplete native reasoning sequence; replaying the turn portably.")
-        return tuple(part.model_copy(update={"native": None}) for part in parts)
     return tuple(parts)
 
 

@@ -341,7 +341,9 @@ def test_malformed_ciphertext_is_not_hidden_by_a_summary_only_item(encrypted) ->
         },
     ],
 )
-def test_opaque_reasoning_cannot_be_retained_beside_unprojectable_output(unsupported) -> None:
+def test_opaque_reasoning_cannot_be_retained_beside_unprojectable_output(
+    unsupported, caplog
+) -> None:
     raw = ResponsesAPIResponse.model_validate(
         {
             "id": "resp",
@@ -353,8 +355,13 @@ def test_opaque_reasoning_cannot_be_retained_beside_unprojectable_output(unsuppo
     )
     with ResponsesClient(model="openai/gpt-5.6", api_key="test") as client:
         with patch("litellm.responses", return_value=raw):
-            with pytest.raises(ReasoningReplayError, match="Unsupported Responses output"):
-                client.call([{"role": "user", "content": "request"}])
+            result = client.call([{"role": "user", "content": "request"}])
+    assert result.reasoning
+    assert result.replay_scope is None
+    assert all(part.native is None for part in result.parts)
+    if unsupported["type"] == "message":
+        assert result.content == "Cannot comply."
+    assert "Unsupported Responses output" in caplog.text
 
 
 def test_reasoning_only_responses_turn_demotes_without_an_empty_message() -> None:

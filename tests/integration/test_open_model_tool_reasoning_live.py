@@ -7,6 +7,9 @@ NOOA_RUN_OPEN_MODEL_REPLAY=1 uv run --env-file ../.env pytest -m integration -s
 
 Tests raw reasoning_content on the next HTTP request after SQLite close/reopen,
 not merely its visibility somewhere in answer text. No opaque state is printed.
+Set NOOA_TEST_OMITTED_REASONING=1 for one additional continuation per model,
+removing reasoning_content after SDK serialization. It reports whether the route
+rejects the omitted field; it does not assume every gateway enforces it.
 """
 
 import json
@@ -47,12 +50,36 @@ def lookup(key: str) -> int:
 async def test_open_model_tool_reasoning_after_sqlite_resume(family, tmp_path, monkeypatch):
     monkeypatch.setenv("DISABLE_AIOHTTP_TRANSPORT", "True")
     sent = []
+    omitted_status = []
+    omit_reasoning = False
     original_send = httpx.AsyncClient.send
 
     async def capture(client, request, *args, **kwargs):
         if request.method == "POST" and request.url.host == "inference-api.nvidia.com":
-            sent.append(json.loads(request.content))
-        return await original_send(client, request, *args, **kwargs)
+            body = json.loads(request.content)
+            if omit_reasoning:
+                assistant = next(m for m in body["messages"] if m.get("role") == "assistant")
+                assert assistant.pop("reasoning_content"), "expected a nonempty source field"
+                # Modify only the final wire body, after LiteLLM's repair path.
+                request = httpx.Request(
+                    request.method,
+                    request.url,
+                    headers={k: v for k, v in request.headers.items() if k != "content-length"},
+                    content=json.dumps(body).encode(),
+                    extensions=request.extensions,
+                )
+            sent.append(body)
+        response = await original_send(client, request, *args, **kwargs)
+        if omit_reasoning:
+            await response.aread()
+            omitted_status.append(
+                {
+                    "http_status": response.status_code,
+                    "error_names_reasoning_content": response.is_error
+                    and "reasoning_content" in response.text,
+                }
+            )
+        return response
 
     monkeypatch.setattr(httpx.AsyncClient, "send", capture)
     messages = [
@@ -129,3 +156,35 @@ async def test_open_model_tool_reasoning_after_sqlite_resume(family, tmp_path, m
         ),
         flush=True,
     )
+    if os.getenv("NOOA_TEST_OMITTED_REASONING") == "1":
+        omit_reasoning = True
+        error_type = None
+        omitted_result = None
+        try:
+            async with CompletionClient(**options) as client:
+                omitted_result = await client.acall(history, tools=tools)
+        except Exception as exc:
+            # This is an observational negative probe: record rejection, never
+            # relabel auth/rate-limit/transport failures as required reasoning.
+            error_type = type(exc).__name__
+        assert len(sent) == 3, "probe must not retry"
+        assert len(omitted_status) == 1, "no provider result; negative probe inconclusive"
+        expected = json.loads(json.dumps(sent[1]))
+        assistant = next(m for m in expected["messages"] if m.get("role") == "assistant")
+        del assistant["reasoning_content"]
+        assert sent[2] == expected, "A/B request changed more than the reasoning field"
+        print(
+            json.dumps(
+                {
+                    "family": family,
+                    "phase": "omitted_reasoning",
+                    **omitted_status[0],
+                    "only_reasoning_field_changed": True,
+                    "error_type": error_type,
+                    "finish_reason": omitted_result.finish_reason if omitted_result else None,
+                    "usage": omitted_result.usage.model_dump() if omitted_result else None,
+                }
+            ),
+            flush=True,
+        )
+        assert omitted_status[0]["http_status"] in {200, 400, 422}, "inconclusive route failure"

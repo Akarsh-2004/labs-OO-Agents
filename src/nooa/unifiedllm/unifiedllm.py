@@ -1075,6 +1075,8 @@ def _update_token_calibration(
     messages: list[dict[str, Any] | LLMResponse],
     usage: LLMUsage,
     tools: list[dict[str, Any]] | None = None,
+    *,
+    instructions: str | None = None,
 ) -> None:
     """Update token calibration from an API response's usage data.
 
@@ -1095,6 +1097,10 @@ def _update_token_calibration(
     actual = usage.input_tokens
     if actual <= 0:
         return
+    # Responses lifts the leading system prompt out of input. It is still
+    # billed input, so include it in the estimate without copying history.
+    if instructions:
+        messages = [{"role": "system", "content": instructions}, *messages]
     # Calibration is best-effort: it must NEVER raise out of the (already paid)
     # response path. The whole estimate — primary AND fallback — is guarded.
     try:
@@ -2098,6 +2104,7 @@ class ReasoningCompletionClient(CompletionClient):
                     else think_reasoning
                 )
 
+                parsed = response.parsed
                 response = response.replace_parts(
                     (
                         AssistantReasoning(text=combined_reasoning),
@@ -2105,6 +2112,8 @@ class ReasoningCompletionClient(CompletionClient):
                         *response.tool_calls,
                     )
                 )
+                # Separating think tags does not change the validated answer.
+                response.parsed = parsed
 
         return response
 
@@ -2134,6 +2143,7 @@ class ReasoningCompletionClient(CompletionClient):
                     else think_reasoning
                 )
 
+                parsed = response.parsed
                 response = response.replace_parts(
                     (
                         AssistantReasoning(text=combined_reasoning),
@@ -2141,6 +2151,8 @@ class ReasoningCompletionClient(CompletionClient):
                         *response.tool_calls,
                     )
                 )
+                # Separating think tags does not change the validated answer.
+                response.parsed = parsed
 
         return response
 
@@ -2288,7 +2300,11 @@ class ResponsesClient(UnifiedLLM):
         usage = _extract_usage(raw_response)
         if usage:
             _update_token_calibration(
-                effective_model, input_messages, usage, tools=api_params.get("tools")
+                effective_model,
+                input_messages,
+                usage,
+                tools=api_params.get("tools"),
+                instructions=api_params.get("instructions"),
             )
 
         return self._response_from_output(raw_response, state_scope, usage, output_model)
@@ -2360,7 +2376,11 @@ class ResponsesClient(UnifiedLLM):
         usage = _extract_usage(raw_response)
         if usage:
             _update_token_calibration(
-                effective_model, input_messages, usage, tools=api_params.get("tools")
+                effective_model,
+                input_messages,
+                usage,
+                tools=api_params.get("tools"),
+                instructions=api_params.get("instructions"),
             )
 
         return self._response_from_output(raw_response, state_scope, usage, output_model)
