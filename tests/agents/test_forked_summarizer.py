@@ -437,9 +437,10 @@ def test_separate_summary_client_is_rejected_before_install():
 
 
 @pytest.mark.asyncio
-async def test_repeated_failures_stop_spending_without_collapsing(caplog):
+@pytest.mark.parametrize("finish_reason", ["length", "error"])
+async def test_repeated_failures_stop_spending_without_collapsing(caplog, finish_reason):
     agent, summarizer, ctx = setup()
-    agent.llm.acall = AsyncMock(return_value=response("partial", finish_reason="length"))
+    agent.llm.acall = AsyncMock(return_value=response("partial", finish_reason=finish_reason))
 
     async def core(request):
         request.response = response("parent")
@@ -554,9 +555,42 @@ async def test_aclose_awaits_cancelled_background_task():
     await agent.event_manager.run_middleware("llm_call", ctx, core)
     await asyncio.wait_for(entered.wait(), 1)
     try:
-        await summarizer.aclose()
+        await agent.aclose()
         assert cancelled.is_set()
         assert summarizer._pending_task is None
         assert agent.event_manager._middleware["llm_call"] == []
     finally:
         summarizer._uninstall()
+
+
+@pytest.mark.asyncio
+async def test_uninstall_removes_close_subscription():
+    agent, summarizer, _ = setup()
+    summarizer._uninstall()
+    assert agent.event_manager._close_callbacks == []
+
+
+@pytest.mark.asyncio
+async def test_close_callbacks_are_awaited_once_in_reverse_order(caplog):
+    agent = Agent(llm=FakeLLMClient())
+    calls = []
+
+    async def first():
+        await asyncio.sleep(0)
+        calls.append("first")
+
+    async def broken():
+        calls.append("broken")
+        raise ValueError("cleanup failed")
+
+    removed = AsyncMock()
+    agent.event_manager.on_close(first)
+    unsubscribe = agent.event_manager.on_close(removed)
+    agent.event_manager.on_close(broken)
+    unsubscribe()
+    unsubscribe()
+    await agent.aclose()
+    await agent.aclose()
+    assert calls == ["broken", "first"]
+    removed.assert_not_awaited()
+    assert "cleanup failed" in caplog.text

@@ -94,6 +94,7 @@ class SummarizationAgent(Agent):
     _pending_summary: Annotated[str | None, hidden]
     _unsub_before: Annotated[Callable[[], None] | None, hidden]
     _unsub_after: Annotated[Callable[[], None] | None, hidden]
+    _unsub_close: Annotated[Callable[[], None] | None, hidden] = None
 
     @classmethod
     def install(cls, agent: Agent, **kwargs: Any) -> "SummarizationAgent":
@@ -178,11 +179,15 @@ class SummarizationAgent(Agent):
 
         self._unsub_before = self.target_event_manager.on("BeforeTurn", self._handle_before_turn)
         self._unsub_after = self.target_event_manager.on("AfterTurn", self._handle_after_turn)
+        self._unsub_close = self.target_event_manager.on_close(self.aclose)
 
     @hidden
     @no_trace
     def _uninstall(self) -> None:
         """Unsubscribe from target event manager and cancel pending tasks."""
+        if self._unsub_close:
+            self._unsub_close()
+            self._unsub_close = None
         if self._unsub_before:
             self._unsub_before()
             self._unsub_before = None
@@ -624,6 +629,7 @@ class TokenBudgetSummarizer(SummarizationAgent):
             raise ValueError("Cannot install: target_event_manager is None")
         self._unsub_before = self.target_event_manager.on("BeforeTurn", self._handle_before_turn)
         self._unsub_llm = self.target_event_manager.intercept("llm_call", self._fork_after_call)
+        self._unsub_close = self.target_event_manager.on_close(self.aclose)
         if (
             self._target_agent.event_query is not None
             or self.target_event_manager.get_event_query() is not None
@@ -741,8 +747,8 @@ class TokenBudgetSummarizer(SummarizationAgent):
                 text = json.loads(response.tool_calls[0].arguments).get("result")
             if not isinstance(text, str) or not text.strip():
                 raise ValueError("Summary fork must return nonempty text")
-            if response.finish_reason in {"length", "max_tokens"}:
-                raise ValueError("Summary fork exhausted its output budget")
+            if response.finish_reason in {"length", "error"}:
+                raise ValueError(f"Summary fork did not complete: {response.finish_reason}")
             self._pending_summary = text
             self._failed_forks = 0
         except Exception:
