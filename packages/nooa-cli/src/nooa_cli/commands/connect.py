@@ -109,9 +109,7 @@ def command(
                         f"{event.name}: {outcome['outcome']}" + (f" ({detail})" if detail else "")
                     )
                     if outcome.get("reasoning_observed"):
-                        click.echo(
-                            "  Reasoning observed; acceptance alone does not prove a setting was obeyed."
-                        )
+                        click.echo("  Reasoning included in the response.")
         raise click.ClickException("Checks ended without a result.")
 
     path = Path(output) if output else get_user_dir("llm_config.yaml")

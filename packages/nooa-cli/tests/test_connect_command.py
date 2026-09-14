@@ -173,7 +173,14 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
         assert any("may incur charges" in line for line in output)
         if request.url.path != "/v1/chat/completions":
             return httpx.Response(404)
-        return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {"message": {"content": "323", "reasoning_content": "private test reasoning"}}
+                ]
+            },
+        )
 
     async def catalogue():
         return []
@@ -196,6 +203,9 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
     entry = yaml.safe_load((tmp_path / "llm_config.yaml").read_text())["models"]["my-model"]
     assert entry["model_name"] == "openai/example-model"
     assert "temporary-secret" not in result.output + yaml.safe_dump(entry)
+    assert "Reasoning included in the response." in result.output
+    assert "acceptance alone" not in result.output
+    assert "private test reasoning" not in result.output
     assert result.output.index("Checking chat") < result.output.index("chat: accepted")
     assert result.output.index("chat: accepted") < result.output.index("Checking tools")
     assert "API format [" not in result.output  # One success is selected automatically.
