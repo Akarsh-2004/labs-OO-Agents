@@ -1034,6 +1034,7 @@ async def test_client_credentials_token_success(monkeypatch):
         client_secret="secret",
         redirect_uri="http://localhost:0/callback",
         scope="a b",
+        resource="https://maas.example/confluence/mcp",
     )
     token = await oauth.OAuthHandler(config).client_credentials_token()
 
@@ -1042,6 +1043,7 @@ async def test_client_credentials_token_success(monkeypatch):
     assert captured["data"]["client_id"] == "cid"
     assert captured["data"]["client_secret"] == "secret"
     assert captured["data"]["scope"] == "a b"
+    assert captured["data"]["resource"] == "https://maas.example/confluence/mcp"
 
 
 @pytest.mark.asyncio
