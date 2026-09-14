@@ -47,9 +47,10 @@ class OAuthConfig:
         client_id: OAuth client ID, or None until dynamic registration completes
         redirect_uri: Redirect URI for OAuth callback
         scope: Optional OAuth scopes
-        resource: Optional RFC 8707 protected-resource identifier
         client_secret: Optional client secret (for dynamic registration)
         registration_endpoint: Optional OAuth dynamic client registration endpoint
+        timeout: Time limit for registration, browser opening, and callback receipt
+        resource: Optional RFC 8707 protected-resource identifier
     """
 
     authorization_endpoint: str
@@ -57,10 +58,10 @@ class OAuthConfig:
     client_id: str | None
     redirect_uri: str
     scope: str | None = None
-    resource: str | None = None
     client_secret: str | None = None
     registration_endpoint: str | None = None
     timeout: float = 300.0  # 5 minutes
+    resource: str | None = None  # Appended to preserve the existing positional signature.
 
 
 @dataclass
@@ -575,23 +576,7 @@ class OAuthHandler:
 
         # Bind to requested port (0 means OS picks a free port, RFC 8252 §7.3)
         server = HTTPServer((host, requested_port), CallbackHandler)
-        actual_port = server.server_address[1]
-        server.timeout = 1.0  # Wake up every second to check for cancellation
-
-        # Build the redirect URI now that HTTPServer has bound the actual port.
-        # Dynamic registration happens while this server still owns the port, so
-        # no other process can claim it between port selection and callback bind.
-        actual_redirect_uri = f"{scheme}://{host}:{actual_port}{callback_path}"
-        self._actual_redirect_uri = actual_redirect_uri
-        try:
-            await self._register_dynamic_client(actual_redirect_uri)
-            auth_url = self._build_authorization_url(redirect_uri=actual_redirect_uri)
-            authorization_state = self._authorization_state
-        except Exception:
-            server.server_close()
-            raise
-
-        logger.info(f"OAuth callback server listening on {actual_redirect_uri}")
+        thread: Thread | None = None
 
         def serve() -> None:
             try:
@@ -610,40 +595,57 @@ class OAuthHandler:
             finally:
                 server.server_close()
 
-        # Run the blocking server loop in a thread (asyncio.to_thread is for one-shot
-        # functions, but this is a long-running loop that needs to run until done)
-        thread = Thread(target=serve, daemon=True, name="nooa-oauth-callback")
-        thread.start()
-
-        if open_browser:
-            opened = False
-            if self._browser_open is not None:
-                try:
-                    opened = await self._browser_open(auth_url)
-                except Exception as e:
-                    logger.warning(f"browser_open hook failed: {e}")
-                if opened:
-                    logger.info("Opened authorization URL via browser_open hook")
-            if not opened:
-                try:
-                    webbrowser.open(auth_url)
-                    logger.info("Opened browser for authorization")
-                except Exception as e:
-                    logger.warning(f"Failed to open browser: {e}")
-                    logger.info(f"Please visit: {auth_url}")
-        else:
-            logger.info(f"Please visit: {auth_url}")
-
         try:
             with contextlib.suppress(TimeoutError):
-                # Timeout is handled below by checking if received_code is empty.
-                await asyncio.wait_for(done.wait(), timeout=self.config.timeout)
+                # One deadline covers the entire asynchronous flow after binding,
+                # including registration and application-provided browser hooks.
+                async with asyncio.timeout(self.config.timeout):
+                    actual_port = server.server_address[1]
+                    server.timeout = 1.0  # Wake up every second to check for cancellation
+
+                    # Build the redirect URI now that HTTPServer has bound the actual port.
+                    # Dynamic registration happens while this server still owns the port, so
+                    # no other process can claim it between port selection and callback bind.
+                    actual_redirect_uri = f"{scheme}://{host}:{actual_port}{callback_path}"
+                    self._actual_redirect_uri = actual_redirect_uri
+                    await self._register_dynamic_client(actual_redirect_uri)
+                    auth_url = self._build_authorization_url(redirect_uri=actual_redirect_uri)
+                    authorization_state = self._authorization_state
+
+                    logger.info(f"OAuth callback server listening on {actual_redirect_uri}")
+
+                    # Run the blocking server loop in a thread (asyncio.to_thread is for one-shot
+                    # functions, but this is a long-running loop that needs to run until done)
+                    thread = Thread(target=serve, daemon=True, name="nooa-oauth-callback")
+                    thread.start()
+
+                    if open_browser:
+                        opened = False
+                        if self._browser_open is not None:
+                            try:
+                                opened = await self._browser_open(auth_url)
+                            except Exception as e:
+                                logger.warning(f"browser_open hook failed: {e}")
+                            if opened:
+                                logger.info("Opened authorization URL via browser_open hook")
+                        if not opened:
+                            try:
+                                webbrowser.open(auth_url)
+                                logger.info("Opened browser for authorization")
+                            except Exception as e:
+                                logger.warning(f"Failed to open browser: {e}")
+                                logger.info(f"Please visit: {auth_url}")
+                    else:
+                        logger.info(f"Please visit: {auth_url}")
+
+                    await done.wait()
         finally:
-            # Unblock handle_request and retire the callback server even when the
-            # OAuth task is cancelled or times out.
+            # Cover every exit after binding, including cancellation before the
+            # worker starts and cancellation while the browser hook is pending.
             done.set()
             server.server_close()
-            await asyncio.to_thread(thread.join, 2)
+            if thread is not None and thread.ident is not None:
+                await asyncio.to_thread(thread.join, 2)
 
         if error_info:
             raise RuntimeError(f"OAuth authorization error: {error_info[0]}")

@@ -12,6 +12,92 @@ import pytest
 from nooa.mcp import oauth
 
 
+@pytest.mark.parametrize("include_trailing_options", [False, True])
+def test_oauth_config_preserves_existing_positional_arguments(include_trailing_options):
+    """Adding resource must not reinterpret a positional client secret as a URL parameter."""
+    args = [
+        "https://maas.example/authorize",
+        "https://maas.example/token",
+        "client-id",
+        "http://localhost:0/callback",
+        "read",
+        "positional-secret-sentinel",
+    ]
+    if include_trailing_options:
+        args.extend(["https://maas.example/register", 42.0])
+    config = oauth.OAuthConfig(*args)
+    assert config.client_secret == "positional-secret-sentinel"
+    assert config.resource is None
+    assert config.registration_endpoint == (
+        "https://maas.example/register" if include_trailing_options else None
+    )
+    assert config.timeout == (42.0 if include_trailing_options else 300.0)
+    url = oauth.OAuthHandler(config)._build_authorization_url()
+    assert "positional-secret-sentinel" not in url
+    assert "resource" not in parse_qs(urlparse(url).query)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["registration", "browser"])
+@pytest.mark.parametrize("ending", ["cancel", "timeout"])
+async def test_loopback_setup_cancellation_and_timeout_release_resources(
+    monkeypatch, phase, ending
+):
+    """The bound listener and any worker are retired even before callback waiting starts."""
+    servers = []
+    threads = []
+    entered = asyncio.Event()
+    original_server = oauth.HTTPServer
+
+    class TrackedServer(original_server):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            servers.append(self)
+
+    def tracked_thread(*args, **kwargs):
+        thread = threading.Thread(*args, **kwargs)
+        threads.append(thread)
+        return thread
+
+    async def pending(*args):
+        entered.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(oauth, "HTTPServer", TrackedServer)
+    monkeypatch.setattr(oauth, "Thread", tracked_thread)
+    config = oauth.OAuthConfig(
+        "https://maas.example/authorize",
+        "https://maas.example/token",
+        "client-id",
+        "http://localhost:0/callback",
+        timeout=0.1 if ending == "timeout" else 30,
+    )
+    handler = oauth.OAuthHandler(config, browser_open=pending)
+    if phase == "registration":
+        monkeypatch.setattr(handler, "_register_dynamic_client", pending)
+    task = asyncio.create_task(handler._capture_code_via_local_server(open_browser=True))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        if ending == "cancel":
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        else:
+            with pytest.raises(RuntimeError, match="timed out"):
+                await asyncio.wait_for(task, 2)
+        assert len(servers) == 1 and servers[0].fileno() == -1
+        assert len(threads) == (1 if phase == "browser" else 0)
+        assert all(not thread.is_alive() for thread in threads)
+    finally:
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        for server in servers:
+            server.server_close()
+        for thread in threads:
+            await asyncio.to_thread(thread.join, 2)
+
+
 def _client(handler):
     transport = httpx.MockTransport(handler)
     return httpx.AsyncClient(transport=transport, follow_redirects=True)
