@@ -40,7 +40,11 @@ import click
     "--probe", type=click.Choice(["all", "minimal", "none"]), default="all", show_default=True
 )
 @click.option("--no-probe", is_flag=True, help="Save an untested entry without model calls.")
-@click.option("--budget-tokens", type=click.IntRange(min=1), default=4096, show_default=True)
+@click.option(
+    "--budget-tokens",
+    type=click.IntRange(min=1),
+    help="Shared token budget; by default reserve enough for all selected checks.",
+)
 @click.option("--output-tokens", type=click.IntRange(1, 4096), default=200, show_default=True)
 @click.option(
     "--output",
@@ -88,6 +92,7 @@ def command(
     from nooa import connect
     from nooa.paths import get_user_dir
 
+    from . import _connect_view as view
     from ._connect_prompts import confirm, environment_names, prompt
 
     async def show_checks(events):
@@ -114,31 +119,24 @@ def command(
         default_style = "chat"
         approval = "none" if no_probe else probe
         interfaces = None
-        click.echo("NOOA Connect — set up a model, check it, then choose whether to save.")
-        if approval != "none":
-            click.echo(
-                f"Warning: setup will make small API calls that may incur charges. "
-                f"Up to three interface checks, then tool/reasoning checks; {output_tokens} output tokens per call, "
-                f"{budget_tokens} estimated tokens shared across all checks, no retries. Servers can ignore caps."
-            )
-        else:
-            click.echo(
-                "Generation checks disabled; model listing and public metadata may still be fetched."
-            )
-        click.echo(
-            "To avoid paid checks: --no-probe. For manual setup, see docs/model-configuration.md and the nooa-agent-authoring skill."
+        view.intro(
+            checks=approval != "none", output_tokens=output_tokens, budget_tokens=budget_tokens
         )
-        click.echo("Type to filter choices; Tab completes. Arrow keys edit; Ctrl-C cancels.")
+        view.step(1, "Connection")
         if provider and provider not in (*connect.PROVIDERS, "custom"):
             raise click.UsageError(
                 "Unknown provider. Choose nvidia, openai, anthropic, google, openrouter, or custom."
             )
         if not provider and not endpoint and not yes:
-            click.echo("Choose a provider (or custom for another server):")
-            for name, preset in connect.PROVIDERS.items():
-                click.echo(f"  {name}: {preset.label}")
-            click.echo("  custom: Custom endpoint")
-            provider = prompt("Provider", choices=(*connect.PROVIDERS, "custom"))
+            provider = prompt(
+                "Choose a provider",
+                choices=(*connect.PROVIDERS, "custom"),
+                labels={
+                    **{name: preset.label for name, preset in connect.PROVIDERS.items()},
+                    "custom": "Custom endpoint",
+                },
+                open_menu=True,
+            )
         if provider and provider != "custom":
             preset = connect.PROVIDERS[provider]
             endpoint = endpoint or preset.api_base
@@ -187,6 +185,7 @@ def command(
             if api_key_env
             else None
         )
+        view.step(2, "Model")
         if not model:
             click.echo("Connecting to the server and listing models...")
             try:
@@ -207,6 +206,7 @@ def command(
                     f"Connected. Found {len(names)} model(s). Type part of a name to search, then Tab to select."
                 )
                 model = prompt("Model", choices=names)
+        view.step(3, "Connection checks")
         if not api_style:
             available = ("chat", "responses", "anthropic")
             if approval != "none":
@@ -217,7 +217,9 @@ def command(
                             model,
                             endpoint,
                             api_key_env,
-                            budget_tokens=budget_tokens,
+                            budget_tokens=budget_tokens
+                            if budget_tokens is not None
+                            else 3 * (output_tokens + 512),
                             output_tokens=output_tokens,
                             api_key=api_key,
                         )
@@ -256,6 +258,7 @@ def command(
             "Save this model as",
             default=model.rsplit("/", 1)[-1],
             suggestions=list(data.get("models", {})) + [model.rsplit("/", 1)[-1]],
+            existing=tuple(data.get("models", {})),
         )
         if path.exists():
             existing = data.get("models", {}).get(alias)
@@ -336,12 +339,28 @@ def command(
             api_key_env,
             catalogue=candidate,
             reasoning_levels=patches,
-            budget_tokens=budget_tokens,
+            budget_tokens=budget_tokens if budget_tokens is not None else 4096,
             output_tokens=output_tokens,
             existing_entry=interfaces.results[api_style].entry if interfaces else existing,
         )
         interface_spent = interfaces.tokens_charged_to_budget if interfaces else 0
-        proposal = replace(proposal, budget_tokens=max(0, budget_tokens - interface_spent))
+        # Once the model is selected we know how many levels need checking.
+        # An explicit user limit stays shared and is never increased.
+        remaining_estimate = sum(
+            p.token_estimate
+            for p in proposal.probes
+            if (approval == "all" or approval == "minimal" and p.name == "routing")
+            and not (
+                proposal.entry["provenance"]["probes"].get(p.name, {}).get("outcome") == "accepted"
+                and proposal.entry["provenance"]["probes"][p.name].get("request") == p.body
+            )
+        )
+        proposal = replace(
+            proposal,
+            budget_tokens=remaining_estimate
+            if budget_tokens is None
+            else max(0, budget_tokens - interface_spent),
+        )
         if interfaces:
             proposal.entry["provenance"]["interfaces"] = {
                 style: result.entry["provenance"]["probes"]["routing"]
@@ -372,8 +391,13 @@ def command(
             f"Plan: {len(proposal.probes)} candidate calls, {output_tokens} output tokens per call; approval: {approval}."
         )
         click.echo(
-            f"Estimated total for this plan: {proposal.token_estimate} tokens; remaining budget: {proposal.budget_tokens}; price: {price}."
+            f"Estimated tokens for remaining checks: {remaining_estimate}; remaining budget: {proposal.budget_tokens}; price for the full plan: {price}."
         )
+        if remaining_estimate > proposal.budget_tokens:
+            click.echo(
+                "Warning: --budget-tokens is too small for all checks. Some will be skipped. Increase it or omit it to check every level.",
+                err=True,
+            )
         click.echo(
             "No retries or capacity probes. Estimates are not billing limits: endpoints can ignore output caps."
         )
@@ -383,6 +407,19 @@ def command(
         result.entry["provenance"]["tokens_charged_to_budget"] = (
             result.entry["provenance"].get("tokens_charged_to_budget", 0) + interface_spent
         )
+        skipped = [
+            name
+            for name, record in result.entry["provenance"]["probes"].items()
+            if record.get("reason") == "budget exhausted"
+        ]
+        if skipped:
+            click.echo(
+                "Warning: setup is incomplete; budget exhausted before "
+                + ", ".join(skipped)
+                + ". These settings have not been checked.",
+                err=True,
+            )
+        view.step(4, "Save model")
         if yes or confirm(f"Write model entry to {path}?", default=True):
             connect.write(result.entry, path, alias=alias)
             click.echo(f"Saved {alias} to {path}.")

@@ -18,10 +18,24 @@ def environment_names(defaults=()):
     return sorted(set(os.environ).union(defaults))
 
 
-def prompt(text, *, default=None, choices=(), suggestions=(), hide_input=False, show_default=True):
+def prompt(
+    text,
+    *,
+    default=None,
+    choices=(),
+    suggestions=(),
+    hide_input=False,
+    show_default=True,
+    labels=None,
+    open_menu=False,
+    existing=(),
+):
     """Read one editable answer with a scrolling, single-column completion menu."""
     choices = tuple(choices)
     if not sys.stdin.isatty():
+        if labels:
+            for value, label in labels.items():
+                click.echo(f"  {value}: {label}")
         while True:
             value = click.prompt(
                 text, default=default, hide_input=hide_input, show_default=show_default
@@ -35,25 +49,99 @@ def prompt(text, *, default=None, choices=(), suggestions=(), hide_input=False, 
             )
 
     from prompt_toolkit import prompt as terminal_prompt
+    from prompt_toolkit.application import get_app
     from prompt_toolkit.completion import WordCompleter
+    from prompt_toolkit.filters import Condition
+    from prompt_toolkit.formatted_text import FormattedText
     from prompt_toolkit.history import DummyHistory
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.output import ColorDepth
+    from prompt_toolkit.styles import Style
     from prompt_toolkit.validation import Validator
 
     words = list(dict.fromkeys(choices or suggestions))
     completer = (
-        WordCompleter(words, ignore_case=True, match_middle=True, sentence=True)
+        WordCompleter(
+            words, ignore_case=True, match_middle=True, sentence=True, display_dict=labels
+        )
         if words and not hide_input
         else None
     )
+    default_text = "" if default is None else str(default)
+
+    def effective(value):
+        return value or default_text
+
     validator = Validator.from_callable(
-        lambda value: value in choices if choices else bool(value) or default == "",
+        lambda value: (
+            effective(value) in choices if choices else bool(effective(value)) or default == ""
+        ),
         error_message="Choose a matching value." if choices else "Enter a value.",
         move_cursor_to_end=False,
     )
+    help_open = False
+    bindings = KeyBindings()
+
+    @bindings.add(
+        "right",
+        filter=Condition(
+            lambda: bool(default_text) and not hide_input and not get_app().current_buffer.text
+        ),
+    )
+    def edit_default(event):
+        event.current_buffer.insert_text(default_text)
+
+    existing = frozenset(existing)
+
+    def collision_hint():
+        if effective(get_app().current_buffer.text) in existing:
+            return FormattedText([("class:warning", "Name already exists · confirmation required")])
+        return ""
+
+    @bindings.add("f1")
+    def help_toggle(event):
+        nonlocal help_open
+        help_open = not help_open
+        event.app.invalidate()
+
+    def toolbar():
+        if help_open:
+            return FormattedText(
+                [
+                    (
+                        "class:help",
+                        " No paid calls: restart with --no-probe\n"
+                        " Manual setup: docs/model-configuration.md\n"
+                        " Agent skill: nooa-agent-authoring\n"
+                        " Enter uses the suggested default. Typing replaces it. Right Arrow edits it.\n"
+                        " Arrow keys / Home / End edit. Ctrl-U clears. F1 closes help.",
+                    )
+                ]
+            )
+        return FormattedText(
+            [
+                (
+                    "class:hint",
+                    " Enter Continue   ←→ Edit   Ctrl-C Cancel   F1 Help"
+                    if hide_input
+                    else " ↑↓ Choose   Tab Complete   Enter Continue   Ctrl-C Cancel   F1 Help",
+                )
+            ]
+        )
+
+    def start_menu():
+        get_app().current_buffer.start_completion(select_first=False)
+
     try:
-        return terminal_prompt(
-            text + ": ",
-            default="" if default is None else str(default),
+        value = terminal_prompt(
+            FormattedText([("class:prompt", text + ": ")]),
+            default="",
+            placeholder=FormattedText(
+                [("class:hint", default_text + "  (Enter to use · → to edit)")]
+            )
+            if default_text and show_default and not hide_input
+            else None,
+            rprompt=collision_hint,
             completer=completer,
             complete_while_typing=True,
             reserve_space_for_menu=8,
@@ -61,7 +149,27 @@ def prompt(text, *, default=None, choices=(), suggestions=(), hide_input=False, 
             is_password=hide_input,
             validator=validator,
             validate_while_typing=False,
+            show_frame=True,
+            bottom_toolbar=toolbar,
+            key_bindings=bindings,
+            style=Style.from_dict(
+                {
+                    "prompt": "ansicyan bold",
+                    "frame.border": "ansibrightblack",
+                    "completion-menu.completion": "bg:ansiblack ansiwhite",
+                    "completion-menu.completion.current": "bg:ansicyan ansiblack bold",
+                    "bottom-toolbar": "noreverse",
+                    "hint": "ansibrightblack",
+                    "help": "ansicyan",
+                    "warning": "ansiyellow",
+                }
+            )
+            if "NO_COLOR" not in os.environ
+            else Style.from_dict({}),
+            color_depth=ColorDepth.DEPTH_1_BIT if "NO_COLOR" in os.environ else None,
+            **({"pre_run": start_menu} if open_menu and not hide_input else {}),
         )
+        return effective(value)
     except (EOFError, KeyboardInterrupt):
         raise click.Abort() from None
 

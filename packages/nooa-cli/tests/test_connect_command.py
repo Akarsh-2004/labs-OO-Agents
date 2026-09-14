@@ -313,12 +313,65 @@ def test_interface_and_later_checks_share_the_cli_budget(tmp_path, monkeypatch):
     assert provenance["tokens_charged_to_budget"] == 2136
     assert provenance["probes"]["routing"]["outcome"] == "accepted"
     assert provenance["probes"]["tools"]["outcome"] == "not_probed"
+    assert "--budget-tokens is too small" in result.output
+    assert "setup is incomplete; budget exhausted before tools" in result.output
+    assert result.output.index("--budget-tokens is too small") < result.output.index(
+        "routing: accepted"
+    )
 
 
 def test_script_mode_requires_missing_options_without_prompting():
     result = CliRunner().invoke(command, ["--yes"])
     assert result.exit_code == 2
     assert "--endpoint" in result.output
+
+
+def test_default_budget_covers_interfaces_tools_and_every_level(tmp_path, monkeypatch):
+    import json
+
+    import httpx
+
+    client = httpx.AsyncClient
+    bodies = []
+
+    def handle(request):
+        bodies.append(json.loads(request.content))
+        if request.url.path.endswith("chat/completions"):
+            return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
+        return httpx.Response(404)
+
+    monkeypatch.setattr(
+        httpx, "AsyncClient", lambda **kw: client(transport=httpx.MockTransport(handle), **kw)
+    )
+    path = tmp_path / "models.yaml"
+    levels = "max,xhigh,high,medium,low,none"
+    result = CliRunner().invoke(
+        command,
+        [
+            "model",
+            "--as",
+            "local",
+            "--endpoint",
+            "https://api.test/v1",
+            "--api-key-env",
+            "",
+            "--no-catalogue",
+            "--reasoning-template",
+            "effort",
+            "--levels",
+            levels,
+            "--output",
+            str(path),
+        ],
+        input="y\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert [
+        body["reasoning_effort"] for body in bodies if "reasoning_effort" in body
+    ] == levels.split(",")
+    assert len(bodies) == 10  # Three interfaces, tools, six levels; routing is reused.
+    probes = yaml.safe_load(path.read_text())["models"]["local"]["provenance"]["probes"]
+    assert all(record["outcome"] == "accepted" for record in probes.values())
 
 
 def test_bare_command_cancel_before_endpoint_does_nothing(tmp_path, monkeypatch):

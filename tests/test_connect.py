@@ -229,6 +229,7 @@ async def test_budget_stops_before_second_call_and_reconnect_skips_accepted(monk
     first = await connect.run(make_plan(budget_tokens=712), approved="all")
     assert len(bodies) == 1
     assert first.entry["provenance"]["probes"]["tools"]["outcome"] == "not_probed"
+    assert first.entry["provenance"]["probes"]["tools"]["reason"] == "budget exhausted"
     await connect.run(make_plan(existing_entry=first.entry), approved="minimal")
     assert len(bodies) == 1
 

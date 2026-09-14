@@ -41,8 +41,12 @@ Tab selects a match. Large catalogues do not print every model into the prompt.
 Provider, endpoint, API-format, alias, catalogue and confirmation prompts also
 complete their available choices. Key-variable completion uses environment
 variable **names only**, never their values. Secret entry is masked and has no
-completion or history. Arrow keys, Home/End, Backspace and Delete edit the
-current answer, including prefilled defaults. Piped input uses plain line prompts.
+completion or history. Defaults appear as faint suggestions: Enter accepts one,
+typing replaces it, and Right Arrow brings it into the editor. Arrow keys,
+Home/End, Backspace and Delete edit the current answer. Existing alias names in
+the target file show a warning while typing; replacement still requires confirmation.
+The terminal groups setup into four steps, with a provider menu and F1 help.
+Piped input uses plain line prompts.
 
 Flags can prefill answers or support scripted setup:
 
@@ -83,10 +87,13 @@ only (up to three interface attempts unless `--api-style` is supplied).
 The default plan also checks tools and each proposed reasoning level. The
 selected interface's successful routing request is reused, not sent twice.
 It uses 200 output tokens per call, no retries, and a 30-second total
-deadline per probe. `--budget-tokens` defaults to 4096. Each request reserves its
-output cap plus 512 estimated input tokens; interface detection and later probes
-share this same budget. Larger reported usage increases the
-charge. The next request is skipped if the budget would be exceeded. These are
+deadline per probe. By default, the CLI reserves enough estimated tokens for
+the interface checks, tools and every proposed level. Each request reserves its
+output cap plus 512 estimated input tokens. An explicit `--budget-tokens` limits
+the entire setup, including interface detection; it is never increased. Connect
+warns before the remaining checks if that limit is too small. Larger reported
+usage increases the charge. The next request is skipped if the budget would be
+exceeded, and a warning lists checks left undone before saving. These are
 estimates, not billing caps: a gateway may ignore an output limit. There are no
 context-window or maximum-output capacity probes.
 

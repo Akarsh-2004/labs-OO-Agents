@@ -586,7 +586,7 @@ async def run_steps(
                 yield ProbeUpdate(probe.name, deepcopy(record))
                 continue
             if stopped or spent + probe.token_estimate > proposal.budget_tokens:
-                record["reason"] = "previous failure or budget exhausted"
+                record["reason"] = "previous check failed" if stopped else "budget exhausted"
                 yield ProbeUpdate(probe.name, deepcopy(record))
                 continue
             if probe.body.get("stream") or any(

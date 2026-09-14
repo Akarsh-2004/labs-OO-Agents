@@ -66,12 +66,44 @@ def test_environment_completion_only_uses_names(monkeypatch):
 @pytest.mark.parametrize(
     "keys,expected",
     [
-        ("\x1b[D\x1b[DZ\r", "abZcd"),  # Left moves within the prefilled value.
-        ("\x1b[H\x1b[C\x1b[3~\x1b[F!\r", "acd!"),  # Home, Right, Delete, End.
+        ("\x1b[C\x1b[D\x1b[DZ\r", "abZcd"),  # Right accepts the default for editing.
+        ("\x1b[C\x1b[H\x1b[C\x1b[3~\x1b[F!\r", "acd!"),  # Home, Right, Delete, End.
     ],
 )
 def test_prefilled_text_is_editable(monkeypatch, keys, expected):
     assert answer(monkeypatch, keys, default="abcd") == expected
+
+
+def test_enter_accepts_default_but_typing_replaces_it(monkeypatch):
+    assert answer(monkeypatch, "\r", default="default-model") == "default-model"
+    assert answer(monkeypatch, "my-model\r", default="default-model") == "my-model"
+
+
+def test_alias_collision_hint_tracks_input_and_default(monkeypatch):
+    import prompt_toolkit
+    from prompt_toolkit.application import get_app
+    from prompt_toolkit.formatted_text import to_plain_text
+
+    monkeypatch.setattr(prompts.sys.stdin, "isatty", lambda: True)
+    original = prompt_toolkit.prompt
+    hints = []
+    with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
+
+        def run(*args, **kwargs):
+            hint = kwargs["rprompt"]
+
+            def ready():
+                hints.append(to_plain_text(hint()))  # The default name already exists.
+                get_app().current_buffer.text = "fresh-alias"
+                hints.append(to_plain_text(hint()))
+                pipe.send_text("\r")
+
+            return original(*args, pre_run=ready, **kwargs)
+
+        monkeypatch.setattr(prompt_toolkit, "prompt", run)
+        assert prompts.prompt("Alias", default="taken", existing=("taken",)) == "fresh-alias"
+    assert "already exists" in hints[0]
+    assert hints[1] == ""
 
 
 def test_completion_does_not_submit_a_confirmation(monkeypatch):
@@ -110,3 +142,42 @@ def test_cancel_uses_click_abort(monkeypatch):
 
     with pytest.raises(click.Abort):
         answer(monkeypatch, "\x03")
+
+
+def test_provider_menu_opens_and_arrow_enter_selects_without_typing(monkeypatch):
+    import prompt_toolkit
+    from prompt_toolkit.application import get_app
+
+    monkeypatch.setattr(prompts.sys.stdin, "isatty", lambda: True)
+    original = prompt_toolkit.prompt
+    with create_pipe_input() as pipe, create_app_session(input=pipe, output=DummyOutput()):
+
+        def run(*args, **kwargs):
+            open_menu = kwargs.pop("pre_run")
+
+            def ready():
+                buffer = get_app().current_buffer
+
+                def menu_opened(_):
+                    if buffer.complete_state:
+                        buffer.on_completions_changed -= menu_opened
+                        pipe.send_text("\x1b[B\r")
+
+                buffer.on_completions_changed += menu_opened
+                open_menu()
+
+            return original(*args, pre_run=ready, **kwargs)
+
+        monkeypatch.setattr(prompt_toolkit, "prompt", run)
+        value = prompts.prompt(
+            "Provider",
+            choices=("nvidia", "custom"),
+            labels={"nvidia": "NVIDIA · build.nvidia.com", "custom": "Custom endpoint"},
+            open_menu=True,
+        )
+    assert value == "nvidia"
+
+
+def test_help_can_be_toggled_without_losing_edited_text(monkeypatch):
+    # F1, F1 closes help; the input buffer survives both transitions.
+    assert answer(monkeypatch, "abc\x1bOP\x1bOPd\r") == "abcd"
