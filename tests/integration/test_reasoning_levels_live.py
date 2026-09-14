@@ -1,47 +1,45 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Opt-in Hub acceptance probes: three requests, capped at 256 output tokens each."""
+"""Opt-in registry acceptance probes, capped at 256 output tokens per alias."""
 
 import json
 import os
-from pathlib import Path
 
 import httpx
 import litellm
 import pytest
-import yaml
 
 from nooa.unifiedllm import RetryConfig, get_llm_client
 
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.skipif(
-        os.getenv("NOOA_RUN_REASONING_LEVELS_LIVE") != "1", reason="opt-in paid Hub test"
+        os.getenv("NOOA_RUN_REASONING_LEVELS_LIVE") != "1", reason="opt-in paid provider test"
     ),
 ]
-MODELS = yaml.safe_load(
-    (Path(__file__).resolve().parents[2] / "examples/reasoning_levels/llm_config.yaml").read_text()
-)["models"]
+ALIASES = [
+    alias.strip()
+    for alias in os.getenv("NOOA_REASONING_TEST_MODELS", "").split(",")
+    if alias.strip()
+]
 
 
-@pytest.mark.parametrize("alias", MODELS)
-async def test_low_effort_on_hub(alias, monkeypatch):
+@pytest.mark.parametrize("alias", ALIASES)
+async def test_low_effort_on_configured_route(alias, monkeypatch):
     from nooa.secrets import load_secrets_into_env
     from nooa.unifiedllm import registry
 
     load_secrets_into_env()
-    key = os.getenv("NVIDIA_INFERENCE_API_KEY") or os.getenv("NVIDIA_INTERNAL_API_KEY")
-    if not key:
-        pytest.fail("Set NVIDIA_INFERENCE_API_KEY to run Hub probes")
-    monkeypatch.setattr(registry, "ensure_loaded", lambda: None)
-    monkeypatch.setattr(registry, "MODELS", MODELS)
+    config = registry.get_registry_config(alias)
+    if not config:
+        pytest.skip(f"Registry alias {alias!r} is not configured")
     monkeypatch.setattr(litellm, "drop_params", False)
-    settings = MODELS[alias]["reasoning_levels"]["low"]
+    settings = config["reasoning_levels"]["low"]
     sent = []
     original_send = httpx.AsyncClient.send
 
     async def send(client, request, **kwargs):
-        if request.method == "POST" and request.url.host == "inference-api.nvidia.com":
+        if request.method == "POST":
             body = json.loads(request.content)
             sent.append({field: body.get(field) for field in settings})
         return await original_send(client, request, **kwargs)
@@ -49,12 +47,11 @@ async def test_low_effort_on_hub(alias, monkeypatch):
     monkeypatch.setattr(httpx.AsyncClient, "send", send)
     cap = (
         {"max_output_tokens": 256}
-        if MODELS[alias].get("client_type") == "responses"
+        if config.get("client_type") == "responses"
         else {"max_tokens": 256}
     )
     async with get_llm_client(
         alias,
-        api_key=key,
         drop_params=False,
         num_retries=0,
         retry_config=RetryConfig(max_retries=0, rate_limit_extra_retries=0),

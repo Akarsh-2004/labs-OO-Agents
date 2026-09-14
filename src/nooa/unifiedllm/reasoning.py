@@ -20,6 +20,7 @@ _RESERVED = _DECLARATIONS | {
     "messages",
     "input",
     "extra_body",
+    "client",
 }
 
 
@@ -99,15 +100,21 @@ def apply_reasoning_level(
             for key in ("api_base", "base_url", "custom_llm_provider")
         )
         or overrides.get("model", model) != model
+        or overrides.get("client") is not None
     ):
         raise ValueError("Reasoning levels are route-specific; create a client for the new route")
+    explicit_extra = overrides.get("extra_body")
     if conflict := patch.keys() & (
-        overrides.keys() | (extra.keys() if isinstance(extra, Mapping) else set())
+        overrides.keys() | (explicit_extra.keys() if isinstance(explicit_extra, Mapping) else set())
     ):
         raise ValueError(
             f"reasoning_level conflicts with explicit request field(s): {sorted(conflict)}"
         )
     # Whole top-level values replace defaults. Authors write complete nested
     # blocks in YAML; no provider-specific merge or inheritance rules live here.
+    # Remove replaced defaults from extra_body too: SDKs otherwise merge those
+    # back over the selected top-level values when assembling the HTTP body.
+    if isinstance(extra, Mapping) and patch.keys() & extra.keys():
+        params["extra_body"] = {key: value for key, value in extra.items() if key not in patch}
     params.update(patch)
     return params

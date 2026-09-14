@@ -3,6 +3,7 @@
 """Exercise the installed SDK, not just parameters passed to LiteLLM."""
 
 import json
+import runpy
 from pathlib import Path
 
 import httpx
@@ -14,6 +15,30 @@ from nooa.unifiedllm import RetryConfig, get_llm_client
 
 CONFIG_PATH = Path(__file__).resolve().parents[2] / "examples/reasoning_levels/llm_config.yaml"
 MODELS = yaml.safe_load(CONFIG_PATH.read_text())["models"]
+
+
+@pytest.mark.parametrize("alias", MODELS)
+async def test_live_probe_uses_registry_configuration_without_route_assumptions(alias, monkeypatch):
+    from nooa import secrets
+    from nooa.unifiedllm import registry
+
+    monkeypatch.setattr(secrets, "load_secrets_into_env", lambda: None)
+    monkeypatch.setenv("MODEL_API_KEY", "test")
+    monkeypatch.setattr(registry, "ensure_loaded", lambda: None)
+    monkeypatch.setattr(registry, "MODELS", MODELS)
+    requests = []
+
+    async def send(http_client, request, **kwargs):
+        requests.append(request)
+        return httpx.Response(200, json=_reply(alias), request=request)
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
+    probe = runpy.run_path(
+        str(Path(__file__).resolve().parents[1] / "integration/test_reasoning_levels_live.py")
+    )
+    await probe["test_low_effort_on_configured_route"](alias, monkeypatch)
+    assert len(requests) == 1
+    assert requests[0].url.host == "gateway.example.com"
 
 
 def _reply(alias):
@@ -93,3 +118,30 @@ async def test_declared_settings_survive_the_sdk(alias, level, monkeypatch):
     for key, value in MODELS[alias]["reasoning_levels"][level].items():
         assert body[key] == value
     assert not {"reasoning_levels", "reasoning_default", "reasoning_level"} & body.keys()
+
+
+async def test_selected_level_replaces_extra_body_default_on_wire(monkeypatch):
+    from nooa.unifiedllm import registry
+
+    monkeypatch.setattr(registry, "ensure_loaded", lambda: None)
+    monkeypatch.setattr(registry, "MODELS", MODELS)
+    monkeypatch.setattr(litellm, "drop_params", False)
+    bodies = []
+
+    async def send(http_client, request, **kwargs):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json=_reply("gpt-5.6-sol"), request=request)
+
+    monkeypatch.setattr(httpx.AsyncClient, "send", send)
+    inherited = {"reasoning": {"effort": "high"}, "metadata": {"test": "kept"}}
+    async with get_llm_client(
+        "gpt-5.6-sol",
+        api_key="test",
+        extra_body=inherited,
+        retry_config=RetryConfig(max_retries=0, rate_limit_extra_retries=0),
+    ) as client:
+        await client.acall([{"role": "user", "content": "hello"}], reasoning_level="low")
+    assert len(bodies) == 1
+    assert bodies[0]["reasoning"] == {"effort": "low"}
+    assert bodies[0]["metadata"] == {"test": "kept"}
+    assert inherited["reasoning"] == {"effort": "high"}

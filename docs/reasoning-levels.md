@@ -42,7 +42,7 @@ inheritance: selecting a level replaces the base value at each key it sets.
 The declarations are trusted configuration, just like the rest of the registry;
 they are not restricted to a list of provider fields maintained by NOOA.
 Client routing and framework controls are reserved: `model`, `api_base`,
-`base_url`, `api_key`, `custom_llm_provider`, `messages`, `input`, `extra_body`,
+`base_url`, `api_key`, `custom_llm_provider`, `client`, `messages`, `input`, `extra_body`,
 and the three `reasoning_*` configuration fields. They cannot appear inside a
 level's settings. A level changes effort, not the endpoint, credentials or history.
 
@@ -53,27 +53,31 @@ Without a managed selection, raw provider parameters continue working as before.
 
 A selected level cannot be combined with a per-call setting of the same key,
 including inside `extra_body`. Choose the label or the raw settings, not both.
+Constructor defaults in `extra_body` are replaced by the selected settings,
+just like top-level defaults. Unrelated defaults are preserved.
 Declarations belong on the constructor, not per-call kwargs or `extra_body`.
 Changing model or endpoint while using a managed level requires a new client:
 one route's declared choices must not be applied to another route.
+Supplying an SDK client per call is also rejected with a managed level because
+that client can choose a different endpoint. When overriding a registry alias's
+route or client type, inherited levels, default and selection are cleared;
+declare replacement levels explicitly, or leave support unknown.
 
 ## Where the data comes from
 
-The [example registry](../examples/reasoning_levels/llm_config.yaml) covers three
-explicit Hub routes, based on the [GPT-5.6 Sol model documentation](https://developers.openai.com/api/docs/models/gpt-5.6-sol),
+The [example registry](../examples/reasoning_levels/llm_config.yaml) illustrates
+three request shapes, based on the [GPT-5.6 Sol model documentation](https://developers.openai.com/api/docs/models/gpt-5.6-sol),
 [Claude effort documentation](https://platform.claude.com/docs/en/build-with-claude/effort)
 and [Gemini's OpenAI-compatible API](https://ai.google.dev/gemini-api/docs/openai).
-It is not auto-loaded. Load it explicitly with `reload_registry(Path(...))`, or
-copy reviewed entries to your own registry. The optional NVIDIA configuration
-package can adopt the same fields without changing NOOA's provider-free defaults.
-
-The Sonnet example omits `xhigh`: LiteLLM 1.97.0 rejects that value for the
-Hub's model ID before sending a request, despite native Sonnet supporting it.
-The advertised choices describe the usable route, including the installed SDK.
+Its endpoints are placeholders. Replace them, the model IDs and the declared
+choices with settings for your own route before making calls. It is not
+auto-loaded. Load your configured file with `reload_registry(Path(...))`.
+Private endpoint settings and credentials belong in private configuration, not
+this public example.
 
 Provider documentation describes provider APIs, not all gateway routes. Mocked
 HTTP tests check that the example's settings survive the installed transport;
-the opt-in live test checks route acceptance, not reasoning quality or every
+the opt-in live test checks your configured route's acceptance, not reasoning quality or every
 level's behavior. Do not infer support merely from a successful HTTP response
 if a gateway silently ignores parameters.
 
@@ -104,25 +108,16 @@ Run `uv run pytest tests/unifiedllm/test_reasoning_levels.py tests/unifiedllm/te
 The tests check configuration ownership, invalid selections, route changes,
 unchanged defaults and the serialized HTTP requests for the example routes.
 
-For paid route probes, supply `NVIDIA_INFERENCE_API_KEY` (or
-`NVIDIA_INTERNAL_API_KEY`) and run:
+For paid probes, configure registry aliases with a `low` level and credentials
+through their normal `api_key_env` settings. Then opt in and name the aliases:
 
 ```sh
-NOOA_RUN_REASONING_LEVELS_LIVE=1 uv run pytest \
+NOOA_RUN_REASONING_LEVELS_LIVE=1 NOOA_REASONING_TEST_MODELS=my-route uv run pytest \
   tests/integration/test_reasoning_levels_live.py -m integration -q -s
 ```
 
-There is one low-effort request per example route, capped at 256 output tokens,
-with retries disabled. All three passed on 2026-09-12 at `3e672ae0`:
-
-| Hub route | Input tokens | Output tokens | Reasoning tokens (included in output) |
-|---|---:|---:|---:|
-| GPT-5.6 Sol | 19 | 5 | 0 |
-| Claude Sonnet 5 | 24 | 3 | 0 |
-| Gemini 3.1 Pro Preview | 15 | 145 | 142 |
-
-The first Gemini probe exposed unsigned thinking that the base capture code
-rejected. That was corrected separately in #318 before this run; unsigned text
-is portable and neighboring signatures remain attached to their own parts.
-These probes verify route acceptance and the outgoing settings, not that every
-effort label changes model behavior.
+The alias list is comma-separated. Missing aliases are skipped. Each configured
+alias gets one request capped at 256 output tokens, with retries disabled.
+The test checks outgoing settings and route acceptance, not that every effort
+label changes model behavior. Provider-specific results belong with the
+configuration used to run them.

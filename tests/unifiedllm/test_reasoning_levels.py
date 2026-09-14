@@ -98,6 +98,7 @@ def test_malformed_declarations_fail_early(declaration):
         "reasoning_levels",
         "reasoning_default",
         "reasoning_level",
+        "client",
     ],
 )
 def test_level_settings_cannot_replace_framework_or_routing_fields(field):
@@ -159,6 +160,34 @@ def test_competing_request_settings_raise(overrides):
             client.call([], reasoning_level="low", **overrides)
 
 
+@pytest.mark.parametrize("client_type", [CompletionClient, ResponsesClient])
+def test_selected_level_replaces_inherited_extra_body_without_mutating_it(client_type):
+    inherited = {"reasoning": {"effort": "high"}, "other": {"enabled": True}}
+    with client_type("openai/test", reasoning_levels=LEVELS, extra_body=inherited) as client:
+        selected = client._prepare_call_config({"reasoning_level": "low"})
+        assert selected["reasoning"] == LEVELS["low"]["reasoning"]
+        assert selected["extra_body"] == {"other": {"enabled": True}}
+        assert inherited["reasoning"] == {"effort": "high"}
+        assert client._prepare_call_config({})["extra_body"] == inherited
+        with pytest.raises(ValueError, match="conflicts.*reasoning"):
+            client._prepare_call_config({"reasoning_level": "low", "extra_body": inherited})
+
+
+@pytest.mark.parametrize("client_type", [CompletionClient, ResponsesClient])
+def test_managed_level_rejects_sdk_client_override(client_type, monkeypatch):
+    from openai import OpenAI
+
+    responses = client_type is ResponsesClient
+    monkeypatch.setattr(
+        litellm, "responses" if responses else "completion", lambda **_: _response(responses)
+    )
+    with OpenAI(api_key="test", base_url="https://different-route.test/v1") as sdk:
+        with client_type("openai/test", reasoning_levels=LEVELS) as client:
+            with pytest.raises(ValueError, match="route-specific"):
+                client.call([], reasoning_level="low", client=sdk)
+            assert client._prepare_call_config({"client": sdk})["client"] is sdk
+
+
 @pytest.mark.parametrize(
     "route",
     [
@@ -208,6 +237,69 @@ def test_registry_declarations_reach_the_client(monkeypatch):
         assert client.reasoning_levels == ("low", "high")
         assert client.reasoning_default == "low"
         assert client._prepare_call_config({})["reasoning"] == LEVELS["high"]["reasoning"]
+
+
+@pytest.mark.parametrize(
+    "route",
+    [
+        {"api_base": "https://different-route.test/v1"},
+        {"base_url": "https://different-route.test/v1"},
+        {"model": "openai/other"},
+        {"custom_llm_provider": "openai"},
+        {"client_type": "responses"},
+        {"client": object()},
+    ],
+)
+def test_registry_route_override_drops_inherited_reasoning(monkeypatch, route):
+    from nooa.unifiedllm import registry
+
+    config = {
+        "model_name": "openai/test",
+        "api_base": "https://original-route.test/v1",
+        "reasoning_levels": LEVELS,
+        "reasoning_default": "high",
+        "reasoning_level": "high",
+    }
+    monkeypatch.setattr(registry, "ensure_loaded", lambda: None)
+    monkeypatch.setattr(registry, "MODELS", {"alias": config})
+    with get_llm_client("alias", api_key="test", **route) as client:
+        assert client.reasoning_levels is None
+        assert client.reasoning_default is None
+        assert client.reasoning_level is None
+        with pytest.raises(ValueError, match="unknown"):
+            client._prepare_call_config({"reasoning_level": "low"})
+    replacement = {"custom": {"reasoning_effort": "medium"}}
+    with get_llm_client("alias", api_key="test", reasoning_levels=replacement, **route) as client:
+        assert client.reasoning_levels == ("custom",)
+        assert client.reasoning_default is None
+        assert client.reasoning_level is None
+        assert (
+            client._prepare_call_config({"reasoning_level": "custom"})["reasoning_effort"]
+            == "medium"
+        )
+    assert config["reasoning_levels"] is LEVELS
+
+
+def test_registry_same_route_override_preserves_reasoning(monkeypatch):
+    from nooa.unifiedllm import registry
+
+    config = {
+        "model_name": "openai/test",
+        "api_base": "https://original-route.test/v1",
+        "reasoning_levels": LEVELS,
+        "reasoning_default": "low",
+    }
+    monkeypatch.setattr(registry, "ensure_loaded", lambda: None)
+    monkeypatch.setattr(registry, "MODELS", {"alias": config})
+    with get_llm_client(
+        "alias",
+        model=config["model_name"],
+        api_base=config["api_base"],
+        client_type="completion",
+        api_key="replacement-key",
+    ) as client:
+        assert client.reasoning_levels == ("low", "high")
+        assert client.reasoning_default == "low"
 
 
 @pytest.mark.parametrize("asynchronous", [False, True])
