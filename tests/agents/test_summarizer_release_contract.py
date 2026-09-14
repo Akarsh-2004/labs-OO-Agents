@@ -21,7 +21,7 @@ async def test_release_scenario_detects_missing_summarization(family, broken, mo
     async def send(http_client, request, **kwargs):
         nonlocal calls
         calls += 1
-        text = "READY" if calls == 1 else "Launch Tuesday, budget 42 units, owner Alex."
+        text = "READY" if calls == 1 else "Launch Tuesday.\nBudget: 42 units.\nOwner: Alex."
         if calls == 2 and broken == "facts":
             text = "A launch was planned."
         if family == "openai":

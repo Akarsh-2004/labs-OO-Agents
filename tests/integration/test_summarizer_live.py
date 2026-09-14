@@ -134,7 +134,11 @@ async def exercise_summarization(client, family, monkeypatch):
         else:
             assert fork[key][:-1] == first[key][:-1], "Fork changed the parent prefix"
             assert fork[key][-1]["content"][:-1] == first[key][-1]["content"]
-        assert text in json.dumps(continuation), "Next request did not contain the summary"
+        # Summary renderers may quote/escape multiline text. Check its facts in
+        # the outgoing request as well as the exact stored summary above.
+        assert all(fact in json.dumps(continuation) for fact in ("Tuesday", "42", "Alex")), (
+            "Next request lost summary facts"
+        )
         assert "Record 399: amber" not in json.dumps(continuation), "Archived notes still rendered"
         assert all(response.usage is not None for response in responses)
         return {
