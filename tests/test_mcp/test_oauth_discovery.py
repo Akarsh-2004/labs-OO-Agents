@@ -1175,3 +1175,42 @@ async def test_callback_worker_ignores_only_shutdown_socket_races(monkeypatch, e
             await asyncio.gather(task, return_exceptions=True)
     assert not thread_errors
     assert len(servers) == 1 and servers[0].fileno() == -1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error_type", [OSError, ValueError, RuntimeError])
+async def test_callback_worker_failure_reaches_oauth_caller(monkeypatch, error_type):
+    """An unexpected worker failure ends OAuth promptly and retires its listener."""
+    servers = []
+    workers = []
+    thread_errors = []
+    server_type = oauth.HTTPServer
+
+    class FailingServer(server_type):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            servers.append(self)
+
+        def handle_request(self):
+            workers.append(threading.current_thread())
+            raise error_type("callback worker failed")
+
+    monkeypatch.setattr(oauth, "HTTPServer", FailingServer)
+    monkeypatch.setattr(threading, "excepthook", thread_errors.append)
+    config = oauth.OAuthConfig(
+        authorization_endpoint="https://maas.example/authorize",
+        token_endpoint="https://maas.example/token",
+        client_id="client-id",
+        redirect_uri="http://localhost:0/callback",
+        timeout=30,
+    )
+
+    with pytest.raises(RuntimeError, match=f"{error_type.__name__}.*callback worker failed"):
+        await asyncio.wait_for(
+            oauth.OAuthHandler(config)._capture_code_via_local_server(open_browser=False),
+            timeout=2,
+        )
+
+    assert not thread_errors
+    assert len(servers) == 1 and servers[0].fileno() == -1
+    assert len(workers) == 1 and not workers[0].is_alive()

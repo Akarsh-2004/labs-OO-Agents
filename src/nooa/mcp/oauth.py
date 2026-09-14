@@ -597,11 +597,16 @@ class OAuthHandler:
             try:
                 while not done.is_set():
                     server.handle_request()
-            except (OSError, ValueError):
+            except Exception as exc:
                 # Cleanup can close the socket between the done check and
                 # handle_request's selector registration. Suppress only shutdown.
-                if not done.is_set():
-                    raise
+                if not (done.is_set() and isinstance(exc, (OSError, ValueError))):
+                    error_info.append(f"callback server failed ({type(exc).__name__}): {exc}")
+                    # Wake the OAuth caller instead of leaving it to report a
+                    # misleading timeout after the worker has already exited.
+                    # A closed loop means its caller has already gone away.
+                    with contextlib.suppress(RuntimeError):
+                        loop.call_soon_threadsafe(done.set)
             finally:
                 server.server_close()
 
