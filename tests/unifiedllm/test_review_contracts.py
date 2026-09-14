@@ -21,6 +21,78 @@ from nooa.unifiedllm.replay_state import prepare_chat_messages
 from nooa.unifiedllm.response_parts import capture_parts
 
 
+@pytest.mark.parametrize("scope", [None, "chat:openai:gateway", "chat:gemini:model"])
+def test_inline_only_signature_is_private_even_without_a_known_route(scope):
+    message = {
+        "content": "checking",
+        "tool_calls": [
+            {
+                "id": "c__thought__SECRET",
+                "type": "function",
+                "function": {"name": "run", "arguments": "{}"},
+            }
+        ],
+    }
+    turn = LLMResponse(parts=capture_chat_parts(message, scope), replay_scope=scope)
+    turn = LLMResponse.model_validate_json(turn.model_dump_json())
+    assert turn.tool_calls[0].id == "c"
+    assert "SECRET" not in json.dumps(dict(turn))
+    assert "SECRET" not in json.dumps(prepare_chat_messages([turn], "chat:openai:other"))
+    same = prepare_chat_messages([turn], scope)
+    assert ("SECRET" in json.dumps(same)) is (scope is not None)
+
+
+@pytest.mark.parametrize("scope", [None, "chat:openai:gateway", "chat:gemini:model"])
+def test_raw_inline_signature_is_rejected_independently_of_destination(scope):
+    with pytest.raises(ReasoningReplayError, match="Inline thought signatures"):
+        prepare_chat_messages(
+            [{"role": "tool", "tool_call_id": "c__thought__SECRET", "content": "done"}], scope
+        )
+
+
+@pytest.mark.parametrize("scope", [None, "chat:openai:gateway", "chat:gemini:model"])
+def test_inline_signature_with_empty_payload_is_malformed_on_every_route(scope):
+    with pytest.raises(ReasoningReplayError, match="Malformed inline"):
+        capture_chat_parts({"tool_calls": [{"id": "c__thought__"}]}, scope)
+
+
+@pytest.mark.parametrize("block_type", ["text", "output_text"])
+def test_responses_public_block_content_and_calls_are_preserved(block_type):
+    message = {
+        "role": "assistant",
+        "content": [{"type": block_type, "text": "Checking now.", "annotations": []}],
+        "tool_calls": [
+            {"id": "c", "type": "function", "function": {"name": "run", "arguments": '{ "x": 1 }'}}
+        ],
+    }
+    original = json.dumps(message)
+    with ResponsesClient("openai/gpt-5.6", api_key="test") as client:
+        wire, _ = client._transform_messages([message])
+    assert wire == [
+        {
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "Checking now.", "annotations": []}],
+        },
+        {"type": "function_call", "call_id": "c", "name": "run", "arguments": '{ "x": 1 }'},
+    ]
+    wire[0]["content"][0]["text"] = "edited wire"
+    assert json.dumps(message) == original
+
+
+def test_reasoning_content_only_length_response_survives_compatible_resume():
+    scope = "chat:deepseek:model"
+    turn = LLMResponse(
+        parts=capture_chat_parts({"content": None, "reasoning_content": "Still thinking"}, scope),
+        replay_scope=scope,
+        finish_reason="length",
+    )
+    restored = LLMResponse.model_validate_json(turn.model_dump_json())
+    assert not restored.is_empty
+    assert prepare_chat_messages([restored], scope) == [
+        {"role": "assistant", "content": "", "reasoning_content": "Still thinking"}
+    ]
+
+
 @pytest.mark.parametrize("api_style", ["chat", "responses"])
 @pytest.mark.parametrize(
     ("location", "empty"),

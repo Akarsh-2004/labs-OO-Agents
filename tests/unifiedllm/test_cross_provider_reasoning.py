@@ -445,8 +445,8 @@ def test_multiple_gemini_signatures_remain_attached_to_owning_calls(model):
     assert GEMINI_SIGNATURE not in json.dumps(resumed.public_message())
 
 
-@pytest.mark.parametrize("call_id", ["business__thought__phase", "business__thought__"])
-def test_non_gemini_literal_call_ids_stay_unchanged(call_id):
+@pytest.mark.parametrize("call_id", ["business_phase", "business__thought_phase"])
+def test_literal_call_ids_without_the_reserved_signature_separator_stay_unchanged(call_id):
     scope = replay_scope("openai/gpt-4o", "chat", {})
     turn = LLMResponse(
         parts=capture_chat_parts(

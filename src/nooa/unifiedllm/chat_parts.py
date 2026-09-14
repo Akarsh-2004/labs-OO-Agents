@@ -142,7 +142,7 @@ def capture_chat_parts(message: Any, scope: str | None) -> tuple[AssistantPart, 
         raise ReasoningReplayError("Malformed tool_calls in provider response.")
     ids: set[str] = set()
     for call in calls:
-        native = _tool_call_state(call, scope)
+        native = _tool_call_state(call)
         if native and provider is not None and provider not in {"openai", "azure", "gemini"}:
             raise ReasoningReplayError("Cannot retain tool signatures for this provider route.")
         call_id = _field(call, "id")

@@ -21,6 +21,76 @@ from nooa.unifiedllm.unifiedllm import _ClientHttp
 MODELS = ["anthropic/claude-sonnet-4", "gemini/gemini-2.5-pro", "openai/gateway-gemini"]
 
 
+@pytest.mark.parametrize("is_async", [False, True])
+@pytest.mark.parametrize("shape", ["inline-only", "reasoning-only"])
+async def test_gateway_replay_after_sqlite_preserves_private_and_reasoning_only_turns(
+    is_async, shape, monkeypatch, tmp_path
+):
+    requests = []
+    source = {"role": "assistant", "content": None, "reasoning_content": "Still thinking"}
+    if shape == "inline-only":
+        source["tool_calls"] = [
+            {
+                "id": "c__thought__SECRET",
+                "type": "function",
+                "function": {"name": "run", "arguments": "{}"},
+            }
+        ]
+
+    def respond(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "id": "chat",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "gateway",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": source,
+                        "finish_reason": "tool_calls" if shape == "inline-only" else "length",
+                    }
+                ],
+            },
+        )
+
+    monkeypatch.setattr(
+        _ClientHttp,
+        "_httpx_hardening",
+        staticmethod(lambda: {"transport": httpx.MockTransport(respond)}),
+    )
+
+    async def send(client, history):
+        return await client.acall(history) if is_async else client.call(history)
+
+    model = "openai/gateway-gemini" if shape == "inline-only" else "openai/gateway"
+    async with CompletionClient(model, api_key="test") as client:
+        turn = await send(client, [{"role": "user", "content": "Check"}])
+    with SQLiteStorageManager(tmp_path / "session.db") as storage:
+        storage.event_backend.store("1", turn)
+    with SQLiteStorageManager(tmp_path / "session.db") as storage:
+        restored = next(storage.event_backend.all_events())
+    assert not restored.is_empty
+    assert "SECRET" not in json.dumps(dict(restored))
+    continuation = {"role": "user", "content": "Continue"}
+    if shape == "inline-only":
+        continuation = {"role": "tool", "tool_call_id": "c", "content": "done"}
+    for destination in (model, "openai/different-model"):
+        async with CompletionClient(destination, api_key="test") as client:
+            await send(client, [restored, continuation])
+    assert len(requests) == 3
+    same = requests[1]["messages"]
+    assert same[0]["role"] == "assistant"
+    assert same[0]["reasoning_content"] == "Still thinking"
+    if shape == "inline-only":
+        assert same[0]["tool_calls"][0]["id"] == "c__thought__SECRET", same
+        assert same[1]["tool_call_id"] == "c__thought__SECRET", same
+    other = json.dumps(requests[2])
+    assert "SECRET" not in other and "Still thinking" in other
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("is_async", [False, True])
 async def test_reasoning_content_http_tool_loop_after_resume(is_async, monkeypatch, tmp_path):

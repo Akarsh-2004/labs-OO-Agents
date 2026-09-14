@@ -2483,11 +2483,43 @@ class ResponsesClient(UnifiedLLM):
             elif msg.get("role") == "assistant" and (
                 msg.get("tool_calls") or msg.get("reasoning_content")
             ):
-                # Public direct-call input has no native replay authority.
-                from .chat_parts import capture_chat_parts
-
-                turn = LLMResponse(parts=capture_chat_parts(msg, None))
-                transformed.extend(response_parts.project_turn(turn, None))
+                # Public input accepts content blocks, unlike normalized Chat
+                # output. Preserve those blocks directly rather than passing
+                # them through the provider-response capture contract.
+                reasoning = msg.get("reasoning_content")
+                if reasoning is not None and not isinstance(reasoning, str):
+                    raise ValueError("Assistant reasoning_content must be a string.")
+                if reasoning:
+                    transformed.append({"role": "assistant", "content": reasoning})
+                content = msg.get("content")
+                if content is not None and not isinstance(content, (str, list)):
+                    raise ValueError("Assistant content must be a string or list of blocks.")
+                if content:
+                    content = copy.deepcopy(content)
+                    if isinstance(content, list):
+                        for block in content:
+                            if block.get("type") == "text":
+                                block["type"] = "output_text"
+                    transformed.append({"role": "assistant", "content": content})
+                for call in msg.get("tool_calls") or []:
+                    function = call["function"]  # Shape checked by reject_native_message.
+                    if not all(
+                        isinstance(value, str)
+                        for value in (
+                            call.get("id"),
+                            function.get("name"),
+                            function.get("arguments"),
+                        )
+                    ):
+                        raise ValueError("Tool call id, name and arguments must be strings.")
+                    transformed.append(
+                        {
+                            "type": "function_call",
+                            "call_id": call["id"],
+                            "name": function["name"],
+                            "arguments": function["arguments"],
+                        }
+                    )
             else:
                 # Raw dictionaries are mutable caller input. We rewrite nested
                 # block types here and the SDK may mutate them again; detach the

@@ -93,6 +93,15 @@ tool turns: moving reasoning into answer content is not equivalent. The marker
 contains no copy of the reasoning text. Changed models or edited turns still
 receive the text as ordinary assistant content, without the source field.
 Unknown capture routes warn and keep portable text while dropping opaque state.
+The `__thought__` tool-call ID separator is reserved for inline signatures on
+every route, including OpenAI-compatible gateways with no separate signature
+field. Capture removes that suffix from public IDs before applying the replay
+gate. Raw input dictionaries containing it are rejected rather than exposed as
+public history. LiteLLM can still strip restored inline signatures on routes it
+does not recognize as Gemini; the HTTP tests use a Gemini-named gateway route,
+while capture/privacy tests also cover generic and unknown routes.
+Reasoning-only replies remain in history, including length-stopped replies;
+an empty visible answer does not mean the turn is empty.
 Nonempty provider fields in input dictionaries raise with instructions to pass
 an `LLMResponse` instead; both clients enforce that rule. Null or empty optional
 fields from SDK message dumps carry no state and are accepted. Malformed recognized

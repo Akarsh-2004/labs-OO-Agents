@@ -160,7 +160,14 @@ def _scope_provider(scope: str | None) -> str | None:
     return parts[1]
 
 
-def _tool_call_state(tool_call: Any, scope: str | None) -> dict[str, Any] | None:
+def _tool_call_state(tool_call: Any) -> dict[str, Any] | None:
+    """Extract signatures before deciding whether their route permits replay.
+
+    OpenAI-compatible gateways may encode the signature only in the call id.
+    That encoding is private state even without a corroborating field or a
+    recognized provider. Capture removes it from the public id; scope gating
+    later decides whether to retain and replay it.
+    """
     dumped = opaque_item(tool_call)
     if not isinstance(dumped, dict):
         raise ReasoningReplayError("Malformed provider tool call: expected a mapping.")
@@ -180,15 +187,11 @@ def _tool_call_state(tool_call: Any, scope: str | None) -> dict[str, Any] | None
     inline_candidate = None
     if isinstance(call_id, str) and _INLINE_THOUGHT_SIGNATURE_SEPARATOR in call_id:
         inline_candidate = call_id.split(_INLINE_THOUGHT_SIGNATURE_SEPARATOR, 1)[1]
-        if not inline_candidate and (_scope_provider(scope) == "gemini" or signature):
+        if not inline_candidate:
             raise ReasoningReplayError("Malformed inline tool-call thought signature.")
     if signature and inline_candidate and signature != inline_candidate:
         raise ReasoningReplayError("Conflicting thought signatures on one provider tool call.")
-    inline_signature = (
-        inline_candidate
-        if _scope_provider(scope) == "gemini" or signature == inline_candidate
-        else None
-    )
+    inline_signature = inline_candidate
     if signature is None and inline_signature is None:
         return None
     state: dict[str, Any] = {}
@@ -250,15 +253,14 @@ def reject_native_message(message: dict[str, Any], scope: str | None) -> None:
             raise ReasoningReplayError(
                 "Opaque provider fields require a canonical LLMResponse, not a wire dict."
             )
-    if _scope_provider(scope) == "gemini":
-        ids = [message.get("tool_call_id")]
-        ids.extend(call.get("id") for call in calls)
-        if any(
-            isinstance(value, str) and _INLINE_THOUGHT_SIGNATURE_SEPARATOR in value for value in ids
-        ):
-            raise ReasoningReplayError(
-                "Inline thought signatures require an LLMResponse, not a wire dict."
-            )
+    ids = [message.get("tool_call_id")]
+    ids.extend(call.get("id") for call in calls)
+    if any(
+        isinstance(value, str) and _INLINE_THOUGHT_SIGNATURE_SEPARATOR in value for value in ids
+    ):
+        raise ReasoningReplayError(
+            "Inline thought signatures require an LLMResponse, not a wire dict."
+        )
 
 
 def responses_reasoning_text(output: list[Any]) -> str | None:
@@ -301,6 +303,7 @@ def prepare_chat_messages(
             private_call_ids.update(ids)
             if (
                 message.get("content")
+                or message.get("reasoning_content")
                 or message.get("tool_calls")
                 or any(
                     key in message
