@@ -168,7 +168,13 @@ async def test_minimal_approval_posts_exact_plan_once(monkeypatch, style, suffix
         return httpx.Response(
             200,
             json={
-                "choices": [{"message": {"content": "323"}}],
+                **(
+                    {"choices": [{"message": {"content": "323"}}]}
+                    if style == "chat"
+                    else {"output": []}
+                    if style == "responses"
+                    else {"content": [{"type": "text", "text": "323"}]}
+                ),
                 "usage": {"prompt_tokens": 20, "completion_tokens": 2},
             },
         )
@@ -211,7 +217,13 @@ async def test_budget_stops_before_second_call_and_reconnect_skips_accepted(monk
 
     async def post(self, url, **kwargs):
         bodies.append(kwargs["json"])
-        return httpx.Response(200, json={"usage": {"prompt_tokens": 100, "completion_tokens": 10}})
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "323"}}],
+                "usage": {"prompt_tokens": 100, "completion_tokens": 10},
+            },
+        )
 
     monkeypatch.setattr(httpx.AsyncClient, "post", post)
     first = await connect.run(make_plan(budget_tokens=712), approved="all")

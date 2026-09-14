@@ -17,8 +17,9 @@ import os
 import re
 import tempfile
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -98,6 +99,22 @@ class ConnectPlan:
 class ConnectResult:
     alias: str
     entry: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class InterfaceResult:
+    """Observed interface results, not a permanent provider-support catalogue."""
+
+    results: dict[str, ConnectResult]
+    tokens_charged_to_budget: int
+
+    @property
+    def accepted(self) -> tuple[str, ...]:
+        return tuple(
+            style
+            for style, result in self.results.items()
+            if result.entry["provenance"]["probes"]["routing"]["outcome"] == "accepted"
+        )
 
 
 @dataclass(frozen=True)
@@ -359,6 +376,7 @@ def plan(
             "max_output_tokens",
             "reasoning_default",
             "cache_breakpoint",
+            "encrypted_reasoning",
         ],
     }
     if catalogue is not None:
@@ -409,11 +427,7 @@ def plan(
     if (default := reasoning.get("default_effort")) in levels:
         entry["reasoning_default"] = default
     if api_style == "responses":
-        entry.update(
-            store=False,
-            include=["reasoning.encrypted_content"],
-            encrypted_reasoning=True,
-        )
+        entry["store"] = False
     elif api_style == "anthropic":
         entry["cache_breakpoint"] = "anthropic"
     token_key = "max_output_tokens" if api_style == "responses" else "max_tokens"
@@ -425,7 +439,9 @@ def plan(
         ],
     }
     if api_style == "responses":
-        body.update(store=False, include=["reasoning.encrypted_content"])
+        # Do not make basic interface detection depend on optional replay
+        # fields. Ask only that the probe not be persisted on the server.
+        body["store"] = False
     probes = [Probe("routing", body, output_tokens + 512)]
     tool_body = deepcopy(body)
     tool_body["input" if api_style == "responses" else "messages"][0]["content"] = (
@@ -452,9 +468,16 @@ def plan(
         probes.append(Probe(f"level:{label}", level_body, output_tokens + 512))
     entry["provenance"] = provenance
     if existing_entry:
-        keys = ("model_name", "api_base", "api_key_env", "api_style", "reasoning_levels")
+        # Each probe is also compared to its exact request in run_steps. Adding
+        # a level must not invalidate an unchanged routing or tool check.
+        keys = ("model_name", "api_base", "api_key_env", "api_style")
         if all(existing_entry.get(key) == entry.get(key) for key in keys):
-            provenance["probes"] = deepcopy(existing_entry.get("provenance", {}).get("probes", {}))
+            previous = existing_entry.get("provenance", {}).get("probes", {})
+            provenance["probes"] = {
+                probe.name: deepcopy(previous[probe.name])
+                for probe in probes
+                if probe.name in previous
+            }
     estimate = sum(probe.token_estimate for probe in probes)
     price = None
     if catalogue and catalogue.get("pricing"):
@@ -467,8 +490,19 @@ def plan(
     return ConnectPlan(alias, entry, tuple(probes), budget_tokens, estimate, price)
 
 
-def _observations(data: dict) -> tuple[bool, bool, int]:
+def _observations(data: dict, style: str) -> tuple[bool, bool, int]:
     """Inspect response fields; never execute tools or retain raw responses."""
+    field = {"chat": "choices", "responses": "output", "anthropic": "content"}[style]
+    if not isinstance(data, dict) or data.get("error") or not isinstance(data.get(field), list):
+        raise ValueError("Response did not match the selected API style")
+    if style == "chat" and (
+        not data[field]
+        or any(
+            not isinstance(choice, dict) or not isinstance(choice.get("message"), dict)
+            for choice in data[field]
+        )
+    ):
+        raise ValueError("Chat response must contain message choices")
     usage = data.get("usage") or {}
     tokens = sum(
         value
@@ -606,7 +640,7 @@ async def run_steps(
                 yield ProbeUpdate(probe.name, deepcopy(record))
                 continue
             try:
-                reasoning, tool, tokens = _observations(response.json())
+                reasoning, tool, tokens = _observations(response.json(), style)
             except (ValueError, TypeError, AttributeError):
                 record["error"] = "Response did not match the selected API style"
                 stopped = probe.name == "routing"
@@ -632,6 +666,50 @@ async def run_steps(
     ]
     provenance["tokens_charged_to_budget"] = spent
     yield ConnectResult(proposal.alias, entry)
+
+
+async def check_interfaces(
+    alias: str,
+    model: str,
+    api_base: str,
+    api_key_env: str,
+    *,
+    budget_tokens: int = 4096,
+    output_tokens: int = 200,
+    api_key: str | None = None,
+) -> AsyncIterator[ProbeUpdate | InterfaceResult]:
+    """Try one routing request per interface, sharing one budget and no retries.
+
+    The frontend warns before calling this paid operation. It can display each
+    progress event and offer only the accepted interfaces. A timeout, auth error
+    or rejection is recorded, never relabelled as unsupported. Different styles
+    have different authentication conventions, so failure on one does not stop
+    the other bounded attempts. Close the iterator when cancelling. The selected
+    result can be passed as plan(existing_entry=...) to reuse its routing check.
+    """
+    results = {}
+    spent = 0
+    for style in _PATHS:
+        proposal = plan(
+            alias,
+            model,
+            style,
+            api_base,
+            api_key_env,
+            budget_tokens=budget_tokens,
+            output_tokens=output_tokens,
+        )
+        proposal = replace(
+            proposal, probes=proposal.probes[:1], budget_tokens=max(0, budget_tokens - spent)
+        )
+        async with aclosing(run_steps(proposal, approved="minimal", api_key=api_key)) as steps:
+            async for event in steps:
+                if isinstance(event, ConnectResult):
+                    results[style] = event
+                    spent += event.entry["provenance"]["tokens_charged_to_budget"]
+                else:
+                    yield ProbeUpdate(style, event.outcome)
+    yield InterfaceResult(results, spent)
 
 
 def write(entry: dict, path: Path, *, alias: str) -> None:

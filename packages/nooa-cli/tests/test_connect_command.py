@@ -162,11 +162,17 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
 
     def handle(request):
         requests.append(request)
-        assert request.headers["authorization"] == "Bearer temporary-secret"
+        assert request.headers.get("authorization", request.headers.get("x-api-key")) in {
+            "Bearer temporary-secret",
+            "temporary-secret",
+        }
         if request.method == "GET":
             return httpx.Response(200, json={"data": [{"id": "example-model"}]})
         # Feedback appears before the HTTP operation, not only at the end.
         assert any("Checking" in line for line in output)
+        assert any("may incur charges" in line for line in output)
+        if request.url.path != "/v1/chat/completions":
+            return httpx.Response(404)
         return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
 
     async def catalogue():
@@ -182,16 +188,131 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
         [],
         input=(
             "custom\nhttps://api.test/v1\nCONNECT_WIZARD_KEY\ntemporary-secret\n"
-            "example-model\nchat\nmy-model\ny\ny\n"
+            "example-model\nmy-model\ny\n"
         ),
     )
     assert result.exit_code == 0, result.output
-    assert [r.method for r in requests] == ["GET", "POST", "POST"]
+    assert [r.method for r in requests] == ["GET", "POST", "POST", "POST", "POST"]
     entry = yaml.safe_load((tmp_path / "llm_config.yaml").read_text())["models"]["my-model"]
     assert entry["model_name"] == "openai/example-model"
     assert "temporary-secret" not in result.output + yaml.safe_dump(entry)
-    assert result.output.index("Checking routing") < result.output.index("routing: accepted")
-    assert result.output.index("routing: accepted") < result.output.index("Checking tools")
+    assert result.output.index("Checking chat") < result.output.index("chat: accepted")
+    assert result.output.index("chat: accepted") < result.output.index("Checking tools")
+    assert "API format [" not in result.output  # One success is selected automatically.
+    assert "Run these paid probes?" not in result.output
+
+
+@pytest.mark.parametrize("responses_ok", [True, False])
+def test_interface_menu_only_offers_successes_or_explicit_manual_escape(
+    tmp_path, monkeypatch, responses_ok
+):
+    import httpx
+    from nooa_cli.commands import _connect_prompts
+
+    client = httpx.AsyncClient
+    choices = []
+    real_prompt = _connect_prompts.prompt
+
+    def prompt(text, **kwargs):
+        if text == "API format":
+            choices.append(tuple(kwargs["choices"]))
+        return real_prompt(text, **kwargs)
+
+    def handle(request):
+        if responses_ok and request.url.path.endswith("responses"):
+            return httpx.Response(200, json={"output": []})
+        if responses_ok and request.url.path.endswith("chat/completions"):
+            return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
+        return httpx.Response(401)
+
+    monkeypatch.setattr(_connect_prompts, "prompt", prompt)
+    monkeypatch.setattr(
+        httpx, "AsyncClient", lambda **kw: client(transport=httpx.MockTransport(handle), **kw)
+    )
+    path = tmp_path / "models.yaml"
+    result = CliRunner().invoke(
+        command,
+        [
+            "model",
+            "--as",
+            "local",
+            "--endpoint",
+            "https://api.test/v1",
+            "--api-key-env",
+            "",
+            "--no-catalogue",
+            "--output",
+            str(path),
+        ],
+        input="responses\ny\n" if responses_ok else "",
+    )
+    if responses_ok:
+        assert result.exit_code == 0, result.output
+        assert choices == [("chat", "responses")]
+        assert yaml.safe_load(path.read_text())["models"]["local"]["api_style"] == "responses"
+    else:
+        assert result.exit_code != 0
+        assert not choices
+        assert not path.exists()
+        assert "--api-style" in result.output
+        assert "could not confirm" in result.output.lower()
+
+
+def test_no_probe_points_to_manual_skill_and_does_no_http(tmp_path, monkeypatch):
+    import httpx
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("Manual setup must not use HTTP")
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", forbidden)
+    monkeypatch.setattr(httpx.AsyncClient, "get", forbidden)
+    path = tmp_path / "models.yaml"
+    result = CliRunner().invoke(command, [*args(path), "--yes"])
+    assert result.exit_code == 0, result.output
+    assert "model-configuration.md" in result.output
+    assert "nooa-agent-authoring" in result.output
+
+
+def test_interface_and_later_checks_share_the_cli_budget(tmp_path, monkeypatch):
+    import httpx
+
+    client = httpx.AsyncClient
+    sent = []
+
+    def handle(request):
+        sent.append(request)
+        if request.url.path.endswith("chat/completions"):
+            return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
+        return httpx.Response(404)
+
+    monkeypatch.setattr(
+        httpx, "AsyncClient", lambda **kw: client(transport=httpx.MockTransport(handle), **kw)
+    )
+    path = tmp_path / "models.yaml"
+    result = CliRunner().invoke(
+        command,
+        [
+            "model",
+            "--as",
+            "local",
+            "--endpoint",
+            "https://api.test/v1",
+            "--api-key-env",
+            "",
+            "--no-catalogue",
+            "--budget-tokens",
+            "2136",
+            "--output",
+            str(path),
+        ],
+        input="y\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert len(sent) == 3  # All of the budget was spent testing interfaces.
+    provenance = yaml.safe_load(path.read_text())["models"]["local"]["provenance"]
+    assert provenance["tokens_charged_to_budget"] == 2136
+    assert provenance["probes"]["routing"]["outcome"] == "accepted"
+    assert provenance["probes"]["tools"]["outcome"] == "not_probed"
 
 
 def test_script_mode_requires_missing_options_without_prompting():

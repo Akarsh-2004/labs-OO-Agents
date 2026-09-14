@@ -47,7 +47,7 @@ import click
     type=click.Path(dir_okay=False),
     help="Registry path; defaults to the user llm_config.yaml.",
 )
-@click.option("--yes", is_flag=True, help="Approve the displayed plan and write without prompting.")
+@click.option("--yes", is_flag=True, help="Save without prompting; supply the connection options.")
 def command(
     model,
     provider,
@@ -79,6 +79,7 @@ def command(
     import asyncio
     import os
     from contextlib import aclosing
+    from dataclasses import replace
     from pathlib import Path
 
     import httpx
@@ -89,10 +90,44 @@ def command(
 
     from ._connect_prompts import confirm, environment_names, prompt
 
+    async def show_checks(events):
+        async with aclosing(events) as steps:
+            async for event in steps:
+                if isinstance(event, (connect.ConnectResult, connect.InterfaceResult)):
+                    return event
+                outcome = event.outcome
+                if outcome["outcome"] == "running":
+                    click.echo(f"Checking {event.name}...")
+                else:
+                    detail = outcome.get("error") or outcome.get("reason")
+                    click.echo(
+                        f"{event.name}: {outcome['outcome']}" + (f" ({detail})" if detail else "")
+                    )
+                    if outcome.get("reasoning_observed"):
+                        click.echo(
+                            "  Reasoning observed; acceptance alone does not prove a setting was obeyed."
+                        )
+        raise click.ClickException("Checks ended without a result.")
+
     path = Path(output) if output else get_user_dir("llm_config.yaml")
     try:
         default_style = "chat"
+        approval = "none" if no_probe else probe
+        interfaces = None
         click.echo("NOOA Connect — set up a model, check it, then choose whether to save.")
+        if approval != "none":
+            click.echo(
+                f"Warning: setup will make small API calls that may incur charges. "
+                f"Up to three interface checks, then tool/reasoning checks; {output_tokens} output tokens per call, "
+                f"{budget_tokens} estimated tokens shared across all checks, no retries. Servers can ignore caps."
+            )
+        else:
+            click.echo(
+                "Generation checks disabled; model listing and public metadata may still be fetched."
+            )
+        click.echo(
+            "To avoid paid checks: --no-probe. For manual setup, see docs/model-configuration.md and the nooa-agent-authoring skill."
+        )
         click.echo("Type to filter choices; Tab completes. Arrow keys edit; Ctrl-C cancels.")
         if provider and provider not in (*connect.PROVIDERS, "custom"):
             raise click.UsageError(
@@ -142,7 +177,9 @@ def command(
         connect.plan(
             alias or "candidate", model or "candidate", discovery_style, endpoint, api_key_env
         )
-        needs_key = not yes and not no_probe and api_key_env and not os.environ.get(api_key_env)
+        needs_key = (
+            not yes and approval != "none" and api_key_env and not os.environ.get(api_key_env)
+        )
         api_key = (
             prompt("API key (used only for this setup)", hide_input=True)
             if prompt_key or needs_key
@@ -171,13 +208,43 @@ def command(
                 )
                 model = prompt("Model", choices=names)
         if not api_style:
-            click.echo(f"Choose the request interface for {model}:")
-            click.echo(
-                "chat = OpenAI-compatible; responses = OpenAI Responses; anthropic = Anthropic Messages."
-            )
-            api_style = prompt(
-                "API format", choices=["chat", "responses", "anthropic"], default=default_style
-            )
+            available = ("chat", "responses", "anthropic")
+            if approval != "none":
+                interfaces = asyncio.run(
+                    show_checks(
+                        connect.check_interfaces(
+                            alias or "candidate",
+                            model,
+                            endpoint,
+                            api_key_env,
+                            budget_tokens=budget_tokens,
+                            output_tokens=output_tokens,
+                            api_key=api_key,
+                        )
+                    )
+                )
+                available = interfaces.accepted
+                if not available:
+                    raise click.ClickException(
+                        "Could not confirm any interface. This is not proof they are unsupported. "
+                        "Check credentials, the endpoint or the budget; use --api-style with --no-probe for manual setup."
+                    )
+                click.echo(
+                    "Interfaces that returned the expected response format: " + ", ".join(available)
+                )
+            if interfaces and len(available) == 1:
+                api_style = available[0]
+                click.echo(f"Using {api_style} for {model}.")
+            else:
+                click.echo(f"Choose the request interface for {model}:")
+                click.echo(
+                    "chat = OpenAI-compatible; responses = OpenAI Responses; anthropic = Anthropic Messages."
+                )
+                api_style = prompt(
+                    "API format",
+                    choices=available,
+                    default=default_style if default_style in available else available[0],
+                )
         existing = None
         data = {}
         if path.exists():
@@ -271,8 +338,15 @@ def command(
             reasoning_levels=patches,
             budget_tokens=budget_tokens,
             output_tokens=output_tokens,
-            existing_entry=existing,
+            existing_entry=interfaces.results[api_style].entry if interfaces else existing,
         )
+        interface_spent = interfaces.tokens_charged_to_budget if interfaces else 0
+        proposal = replace(proposal, budget_tokens=max(0, budget_tokens - interface_spent))
+        if interfaces:
+            proposal.entry["provenance"]["interfaces"] = {
+                style: result.entry["provenance"]["probes"]["routing"]
+                for style, result in interfaces.results.items()
+            }
         if context_window:
             proposal.entry["context_window"] = context_window
             proposal.entry["provenance"]["context_window"] = {
@@ -288,7 +362,6 @@ def command(
             click.echo(
                 "Context window unknown: the runtime's existing fallback applies; set --context-window if known."
             )
-        approval = "none" if no_probe else probe
         click.echo(yaml.safe_dump({"models": {alias: proposal.entry}}, sort_keys=False))
         price = (
             "unknown"
@@ -299,39 +372,17 @@ def command(
             f"Plan: {len(proposal.probes)} candidate calls, {output_tokens} output tokens per call; approval: {approval}."
         )
         click.echo(
-            f"Estimated total: {proposal.token_estimate} tokens; budget: {budget_tokens}; price: {price}."
+            f"Estimated total for this plan: {proposal.token_estimate} tokens; remaining budget: {proposal.budget_tokens}; price: {price}."
         )
         click.echo(
             "No retries or capacity probes. Estimates are not billing limits: endpoints can ignore output caps."
         )
-        if approval != "none" and not yes and not confirm("Run these paid probes?", default=False):
-            approval = "none"
-
-        async def check():
-            async with aclosing(
-                connect.run_steps(proposal, approved=approval, api_key=api_key)
-            ) as steps:
-                async for event in steps:
-                    if isinstance(event, connect.ConnectResult):
-                        return event
-                    outcome = event.outcome
-                    if outcome["outcome"] == "running":
-                        click.echo(f"Checking {event.name}...")
-                    else:
-                        detail = outcome.get("error") or outcome.get("reason")
-                        click.echo(
-                            f"{event.name}: {outcome['outcome']}"
-                            + (f" ({detail})" if detail else "")
-                        )
-                        if outcome["outcome"] == "accepted":
-                            click.echo(
-                                "  Reasoning observed."
-                                if outcome.get("reasoning_observed")
-                                else "  No reasoning observed; acceptance alone does not prove the setting was obeyed."
-                            )
-            raise click.ClickException("Checks ended without a result.")
-
-        result = asyncio.run(check())
+        result = asyncio.run(
+            show_checks(connect.run_steps(proposal, approved=approval, api_key=api_key))
+        )
+        result.entry["provenance"]["tokens_charged_to_budget"] = (
+            result.entry["provenance"].get("tokens_charged_to_budget", 0) + interface_spent
+        )
         if yes or confirm(f"Write model entry to {path}?", default=True):
             connect.write(result.entry, path, alias=alias)
             click.echo(f"Saved {alias} to {path}.")
