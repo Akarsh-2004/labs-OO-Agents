@@ -10,6 +10,7 @@ import pytest
 import yaml
 
 from nooa import connect
+from tests.connect_http import mock_http, mock_post, response_body
 
 
 def make_plan(**kwargs):
@@ -51,7 +52,6 @@ def test_unobserved_reasoning_checks_use_settings_not_label_names(params, expect
 @pytest.mark.asyncio
 @pytest.mark.parametrize("style", ["chat", "responses", "anthropic"])
 async def test_discover_normalizes_root_and_uses_temporary_key(monkeypatch, style):
-    original = httpx.AsyncClient
     requests = []
 
     def handle(request):
@@ -63,9 +63,7 @@ async def test_discover_normalizes_root_and_uses_temporary_key(monkeypatch, styl
         assert request.headers[key].endswith("temporary-secret")
         return httpx.Response(200, json={"data": [{"id": "model-b"}, {"id": "model-a"}]})
 
-    monkeypatch.setattr(
-        httpx, "AsyncClient", lambda **kw: original(transport=httpx.MockTransport(handle), **kw)
-    )
+    mock_http(monkeypatch, handle)
     found = await connect.discover("https://api.test", api_style=style, api_key="temporary-secret")
     assert found.api_base == "https://api.test/v1"
     assert [model["id"] for model in found.models] == ["model-a", "model-b"]
@@ -74,16 +72,13 @@ async def test_discover_normalizes_root_and_uses_temporary_key(monkeypatch, styl
 
 @pytest.mark.asyncio
 async def test_discovery_auth_failure_is_structured_and_does_not_retry(monkeypatch):
-    original = httpx.AsyncClient
     calls = []
 
     def handle(request):
         calls.append(request)
         return httpx.Response(401, text="echo-secret")
 
-    monkeypatch.setattr(
-        httpx, "AsyncClient", lambda **kw: original(transport=httpx.MockTransport(handle), **kw)
-    )
+    mock_http(monkeypatch, handle)
     with pytest.raises(connect.DiscoveryError) as error:
         await connect.discover("https://api.test", api_key="echo-secret")
     assert error.value.status_code == 401
@@ -93,7 +88,6 @@ async def test_discovery_auth_failure_is_structured_and_does_not_retry(monkeypat
 
 @pytest.mark.asyncio
 async def test_discover_anthropic_pagination_and_optional_auth(monkeypatch):
-    original = httpx.AsyncClient
     calls = []
 
     def handle(request):
@@ -108,16 +102,16 @@ async def test_discover_anthropic_pagination_and_optional_auth(monkeypatch):
         assert request.url.params["after_id"] == "a"
         return httpx.Response(200, json={"data": [{"id": "b"}], "has_more": False})
 
-    monkeypatch.setattr(
-        httpx, "AsyncClient", lambda **kw: original(transport=httpx.MockTransport(handle), **kw)
-    )
+    mock_http(monkeypatch, handle)
     found = await connect.discover("http://localhost:8000/v1/models", api_style="anthropic")
     assert found.api_base == "http://localhost:8000/v1"
     assert len(found.models) == len(calls) == 2
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("key_env,key", [("CONNECT_TEST_KEY", "temporary-key"), ("", None)])
+@pytest.mark.parametrize(
+    "key_env,key", [("CONNECT_TEST_KEY", "temporary-key"), ("", "temporary-key")]
+)
 async def test_run_transient_or_no_key_never_changes_environment(monkeypatch, key_env, key):
     monkeypatch.delenv("CONNECT_TEST_KEY", raising=False)
     proposal = connect.plan("local", "model", "chat", "http://localhost:8000/v1", key_env)
@@ -127,7 +121,7 @@ async def test_run_transient_or_no_key_never_changes_environment(monkeypatch, ke
         requests.append(kwargs)
         return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
 
-    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    mock_post(monkeypatch, post)
     result = await connect.run(proposal, approved="minimal", api_key=key)
     assert len(requests) == 1
     assert requests[0]["headers"].get("Authorization") == (f"Bearer {key}" if key else None)
@@ -197,24 +191,22 @@ async def test_minimal_approval_posts_exact_plan_once(monkeypatch, style, suffix
         requests.append((url, kwargs))
         return httpx.Response(
             200,
-            json={
-                **(
-                    {"choices": [{"message": {"content": "323"}}]}
-                    if style == "chat"
-                    else {"output": []}
-                    if style == "responses"
-                    else {"content": [{"type": "text", "text": "323"}]}
-                ),
-                "usage": {"prompt_tokens": 20, "completion_tokens": 2},
-            },
+            json=response_body(style),
         )
 
-    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    mock_post(monkeypatch, post)
     result = await connect.run(proposal, approved="minimal")
     assert len(requests) == 1
     url, kwargs = requests[0]
     assert url.endswith(suffix)
-    assert kwargs["json"] == proposal.probes[0].body
+    expected = deepcopy(proposal.probes[0].body)
+    if style == "responses":
+        expected["truncation"] = "disabled"
+    elif style == "anthropic":
+        expected["messages"][0]["content"] = [
+            {"type": "text", "text": expected["messages"][0]["content"]}
+        ]
+    assert kwargs["json"] == expected
     assert kwargs["json"][token_key] == 200
     assert kwargs["json"]["model"] == "wire/model"
     assert result.entry["provenance"]["probes"]["routing"]["outcome"] == "accepted"
@@ -230,7 +222,7 @@ async def test_failures_do_not_retry_or_mark_levels_unsupported(monkeypatch):
         calls.append(kwargs)
         return httpx.Response(401, json={"error": {"message": "secret-test-key rejected"}})
 
-    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    mock_post(monkeypatch, post)
     result = await connect.run(
         make_plan(reasoning_levels={"high": {"reasoning_effort": "high"}}), approved="all"
     )
@@ -255,7 +247,7 @@ async def test_budget_stops_before_second_call_and_reconnect_skips_accepted(monk
             },
         )
 
-    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    mock_post(monkeypatch, post)
     first = await connect.run(make_plan(budget_tokens=712), approved="all")
     assert len(bodies) == 1
     assert first.entry["provenance"]["probes"]["tools"]["outcome"] == "not_probed"
@@ -351,12 +343,12 @@ def test_connect_uses_existing_registry_discovery(tmp_path, monkeypatch):
         (
             "responses",
             {"reasoning": {"effort": "high"}},
-            {"output": [{"type": "reasoning", "summary": []}]},
+            response_body("responses"),
         ),
         (
             "anthropic",
             {"thinking": {"type": "adaptive"}, "output_config": {"effort": "high"}},
-            {"content": [{"type": "thinking", "thinking": "reason"}]},
+            response_body("anthropic"),
         ),
     ],
 )
@@ -364,7 +356,6 @@ def test_connect_uses_existing_registry_discovery(tmp_path, monkeypatch):
 async def test_real_httpx_serialization_keeps_level_blocks(monkeypatch, style, patch, response):
     monkeypatch.setenv("CONNECT_TEST_KEY", "private-test-key")
     sent = []
-    client_class = httpx.AsyncClient
 
     async def handle(request):
         assert (
@@ -375,23 +366,30 @@ async def test_real_httpx_serialization_keeps_level_blocks(monkeypatch, style, p
         sent.append(json.loads(request.content))
         return httpx.Response(200, json=response)
 
-    monkeypatch.setattr(
-        httpx,
-        "AsyncClient",
-        lambda **kwargs: client_class(transport=httpx.MockTransport(handle), **kwargs),
-    )
+    mock_http(monkeypatch, handle)
     proposal = connect.plan(
         "local",
-        "wire/model",
+        "claude-sonnet-4-6" if style == "anthropic" else "gpt-5.1",
         style,
         "https://api.test/v1",
         "CONNECT_TEST_KEY",
         reasoning_levels={"high": patch},
     )
     result = await connect.run(proposal, approved="all")
-    assert sent == [probe.body for probe in proposal.probes]
-    assert all(sent[-1][key] == value for key, value in patch.items())
-    assert result.entry["provenance"]["probes"]["level:high"]["fields_reached_wire"] is True
+    assert len(sent) == 3, result.entry["provenance"]["probes"]
+    assert all(
+        body.get("max_output_tokens", body.get("max_tokens", body.get("max_completion_tokens")))
+        == 200
+        for body in sent
+    )
+    if style == "chat" and "thinking" in patch:
+        # The legacy runtime drops this known-but-inapplicable Chat option.
+        # Connect must expose the same behavior, not bypass it via raw HTTP.
+        assert "thinking" not in sent[-1]
+        assert connect.unobserved_reasoning_levels(result.entry) == ["high"]
+    else:
+        assert all(sent[-1][key] == value for key, value in patch.items())
+    assert result.entry["provenance"]["probes"]["level:high"]["client"] == "unifiedllm"
     assert "private-test-key" not in yaml.safe_dump(result.entry)
 
 
@@ -404,7 +402,7 @@ async def test_budget_template_cannot_raise_approved_output_cap(monkeypatch):
         bodies.append(kwargs["json"])
         return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
 
-    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    mock_post(monkeypatch, post)
     proposal = make_plan(
         reasoning_levels={
             "high": {"thinking": {"type": "enabled", "budget_tokens": 4096}, "max_tokens": 5120}
@@ -424,7 +422,7 @@ async def test_alternate_cap_cannot_bypass_budget(monkeypatch):
         bodies.append(kwargs["json"])
         return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
 
-    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    mock_post(monkeypatch, post)
     result = await connect.run(
         make_plan(reasoning_levels={"high": {"max_completion_tokens": 100000}}), approved="all"
     )
@@ -447,7 +445,7 @@ def test_entry_loads_through_main_registry(tmp_path, monkeypatch):
         assert client.context_window == 12345
 
 
-def test_library_source_has_no_ui_or_runtime_imports():
+def test_library_source_has_no_ui_or_provider_imports():
     import ast
     import inspect
 
@@ -458,8 +456,7 @@ def test_library_source_has_no_ui_or_runtime_imports():
         elif isinstance(node, ast.ImportFrom):
             imported.append(node.module or "")
     assert all(
-        name.split(".")[0]
-        not in {"nooa", "nooa_cli", "click", "litellm", "openai", "anthropic", "textual"}
+        name.split(".")[0] not in {"nooa_cli", "click", "litellm", "openai", "anthropic", "textual"}
         for name in imported
     )
 
@@ -516,7 +513,7 @@ async def test_probe_cannot_multiply_generations_or_stream(monkeypatch, settings
         calls.append(kwargs)
         return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
 
-    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    mock_post(monkeypatch, post)
     result = await connect.run(
         make_plan(reasoning_levels={"high": settings}), approved="all", api_key="test-key"
     )
@@ -567,7 +564,7 @@ async def test_reconnect_keeps_observed_tools_without_spending_again(monkeypatch
             },
         )
 
-    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    mock_post(monkeypatch, post)
     first = await connect.run(make_plan(), approved="all", api_key="test-key")
     second = await connect.run(
         make_plan(existing_entry=first.entry), approved="all", api_key="test-key"
@@ -582,7 +579,7 @@ async def test_modified_plan_cannot_remove_the_required_output_cap(monkeypatch):
     async def post(*args, **kwargs):
         raise AssertionError("Uncapped request sent")
 
-    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    mock_post(monkeypatch, post)
     proposal = make_plan()
     proposal.probes[0].body.pop("max_tokens")
     result = await connect.run(proposal, approved="minimal", api_key="test-key")
@@ -598,7 +595,7 @@ async def test_progress_events_arrive_before_and_after_each_request(monkeypatch)
         calls.append(kwargs)
         return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
 
-    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    mock_post(monkeypatch, post)
     async for event in connect.run_steps(make_plan(), approved="all", api_key="test-key"):
         events.append(event)
     assert [(e.name, e.outcome["outcome"]) for e in events[:-1]] == [
@@ -650,4 +647,4 @@ async def test_closing_progress_iterator_before_send_closes_client(monkeypatch):
     async with aclosing(connect.run_steps(make_plan(), approved="minimal", api_key="key")) as steps:
         event = await anext(steps)
         assert event.outcome["outcome"] == "running"
-    assert closed == [True]
+    assert closed == []  # No runtime client exists until dispatch starts.

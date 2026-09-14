@@ -37,6 +37,9 @@ accepts. Keep the key in the named environment variable or NOOA's secrets
 configuration, never as a literal value in this YAML. Unauthenticated local
 servers can use `api_key_env: ''`.
 
+For the current Anthropic client, use the server root without the final `/v1`:
+the client appends `/v1/messages`. Connect normalizes this when saving the entry.
+
 If documented for your route, add `context_window` as a capacity hint. It is
 not an output-token allocation. Add reasoning-level request blocks only when
 you know their exact shape; see [reasoning levels](reasoning-levels.md).

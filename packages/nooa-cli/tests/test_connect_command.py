@@ -5,6 +5,14 @@ import yaml
 from click.testing import CliRunner
 from nooa_cli.commands.connect import command
 
+from tests.connect_http import mock_http, response_body
+
+
+@pytest.fixture(autouse=True)
+def sdk_credentials(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+
 
 def args(path):
     return [
@@ -33,7 +41,6 @@ def test_enabled_reasoning_without_evidence_warns_once_before_save(
 
     import httpx
 
-    client = httpx.AsyncClient
     sent = []
 
     def handle(request):
@@ -46,33 +53,33 @@ def test_enabled_reasoning_without_evidence_warns_once_before_save(
         )
         if enabled and mode == "rejected":
             return httpx.Response(400)
-        data = {
-            "chat": {"choices": [{"message": {"content": "323"}}]},
-            "responses": {"output": []},
-            "anthropic": {"content": [{"type": "text", "text": "323"}]},
-        }[style]
+        data = response_body(style)
         if enabled and mode == "observed":
             if style == "chat":
                 data["choices"][0]["message"]["reasoning_content"] = "private reasoning"
             else:
-                data["output" if style == "responses" else "content"].append(
+                data["output" if style == "responses" else "content"].insert(
+                    0,
                     {
-                        "type": "reasoning" if style == "responses" else "thinking",
-                        "text": "private reasoning",
+                        "type": "reasoning",
+                        "id": "r1",
+                        "summary": [{"type": "summary_text", "text": "private reasoning"}],
                     }
+                    if style == "responses"
+                    else {"type": "thinking", "thinking": "private reasoning", "signature": "sig"},
                 )
         if enabled and mode == "usage":
-            data["usage"] = {"output_tokens_details": {"reasoning_tokens": 8}}
+            data["usage"][
+                "completion_tokens_details" if style == "chat" else "output_tokens_details"
+            ] = {"reasoning_tokens": 8}
         return httpx.Response(200, json=data)
 
-    monkeypatch.setattr(
-        httpx, "AsyncClient", lambda **kw: client(transport=httpx.MockTransport(handle), **kw)
-    )
+    mock_http(monkeypatch, handle)
     path = tmp_path / "models.yaml"
     result = CliRunner().invoke(
         command,
         [
-            "model",
+            "claude-sonnet-4-6" if style == "anthropic" else "gpt-5.1",
             "--as",
             "local",
             "--endpoint",
@@ -94,7 +101,9 @@ def test_enabled_reasoning_without_evidence_warns_once_before_save(
     )
     assert result.exit_code == 0, result.output
     warning = "Warning: no reasoning information was returned for: high."
-    assert result.output.count(warning) == (1 if mode == "missing" else 0)
+    assert result.output.count(warning) == (
+        1 if mode == "missing" or (mode == "usage" and style == "anthropic") else 0
+    )
     assert "returned for: none" not in result.output
     assert "private reasoning" not in result.output
     assert len(sent) == (0 if mode == "unprobed" else 4)
@@ -234,7 +243,6 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
 
     output, requests = [], []
     real_echo = click.echo
-    real_client = httpx.AsyncClient
     monkeypatch.setattr(paths, "get_user_dir", lambda name: tmp_path / name)
     monkeypatch.delenv("CONNECT_WIZARD_KEY", raising=False)
 
@@ -269,9 +277,7 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
 
     monkeypatch.setattr(click, "echo", echo)
     monkeypatch.setattr(connect, "catalogue", catalogue)
-    monkeypatch.setattr(
-        httpx, "AsyncClient", lambda **kw: real_client(transport=httpx.MockTransport(handle), **kw)
-    )
+    mock_http(monkeypatch, handle)
     result = CliRunner().invoke(
         command,
         [],
@@ -301,7 +307,6 @@ def test_interface_menu_only_offers_successes_or_explicit_manual_escape(
     import httpx
     from nooa_cli.commands import _connect_prompts
 
-    client = httpx.AsyncClient
     choices = []
     real_prompt = _connect_prompts.prompt
 
@@ -312,15 +317,13 @@ def test_interface_menu_only_offers_successes_or_explicit_manual_escape(
 
     def handle(request):
         if responses_ok and request.url.path.endswith("responses"):
-            return httpx.Response(200, json={"output": []})
+            return httpx.Response(200, json=response_body("responses"))
         if responses_ok and request.url.path.endswith("chat/completions"):
             return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
         return httpx.Response(401)
 
     monkeypatch.setattr(_connect_prompts, "prompt", prompt)
-    monkeypatch.setattr(
-        httpx, "AsyncClient", lambda **kw: client(transport=httpx.MockTransport(handle), **kw)
-    )
+    mock_http(monkeypatch, handle)
     path = tmp_path / "models.yaml"
     result = CliRunner().invoke(
         command,
@@ -368,7 +371,6 @@ def test_no_probe_points_to_manual_skill_and_does_no_http(tmp_path, monkeypatch)
 def test_interface_and_later_checks_share_the_cli_budget(tmp_path, monkeypatch):
     import httpx
 
-    client = httpx.AsyncClient
     sent = []
 
     def handle(request):
@@ -377,9 +379,7 @@ def test_interface_and_later_checks_share_the_cli_budget(tmp_path, monkeypatch):
             return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
         return httpx.Response(404)
 
-    monkeypatch.setattr(
-        httpx, "AsyncClient", lambda **kw: client(transport=httpx.MockTransport(handle), **kw)
-    )
+    mock_http(monkeypatch, handle)
     path = tmp_path / "models.yaml"
     result = CliRunner().invoke(
         command,
@@ -508,7 +508,6 @@ def test_default_budget_covers_interfaces_tools_and_every_level(tmp_path, monkey
 
     import httpx
 
-    client = httpx.AsyncClient
     bodies = []
 
     def handle(request):
@@ -517,15 +516,13 @@ def test_default_budget_covers_interfaces_tools_and_every_level(tmp_path, monkey
             return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
         return httpx.Response(404)
 
-    monkeypatch.setattr(
-        httpx, "AsyncClient", lambda **kw: client(transport=httpx.MockTransport(handle), **kw)
-    )
+    mock_http(monkeypatch, handle)
     path = tmp_path / "models.yaml"
     levels = "max,xhigh,high,medium,low,none"
     result = CliRunner().invoke(
         command,
         [
-            "model",
+            "gpt-5.6-sol",
             "--as",
             "local",
             "--endpoint",
@@ -546,7 +543,9 @@ def test_default_budget_covers_interfaces_tools_and_every_level(tmp_path, monkey
     assert [
         body["reasoning_effort"] for body in bodies if "reasoning_effort" in body
     ] == levels.split(",")
-    assert len(bodies) == 10  # Three interfaces, tools, six levels; routing is reused.
+    # Two interfaces reach HTTP; the runtime rejects the third before sending.
+    # The tool check and all six levels still run; routing is reused.
+    assert len(bodies) == 9
     probes = yaml.safe_load(path.read_text())["models"]["local"]["provenance"]["probes"]
     assert all(record["outcome"] == "accepted" for record in probes.values())
 
@@ -595,7 +594,12 @@ def test_provider_menu_fills_connection_defaults(
     assert result.exit_code == 0, result.output
     assert seen == [(base, {"api_style": style, "api_key": "preset-test-key"})]
     entry = yaml.safe_load((tmp_path / "llm_config.yaml").read_text())["models"]["my-model"]
-    assert (entry["api_base"], entry["api_style"], entry["api_key_env"]) == (base, style, key_env)
+    saved_base = base.removesuffix("/v1") if style == "anthropic" else base
+    assert (entry["api_base"], entry["api_style"], entry["api_key_env"]) == (
+        saved_base,
+        style,
+        key_env,
+    )
     assert "preset-test-key" not in result.output
     assert "Model server URL:" not in result.output
     assert "Key environment variable" not in result.output
@@ -606,7 +610,6 @@ def test_provider_menu_fills_connection_defaults(
 def test_mixed_endpoint_selects_model_before_request_interface(tmp_path, monkeypatch, style):
     import httpx
 
-    real_client = httpx.AsyncClient
     seen = []
 
     def handle(request):
@@ -617,9 +620,7 @@ def test_mixed_endpoint_selects_model_before_request_interface(tmp_path, monkeyp
             200, json={"data": [{"id": "vendor-a/model"}, {"id": "vendor-b/model"}]}
         )
 
-    monkeypatch.setattr(
-        httpx, "AsyncClient", lambda **kw: real_client(transport=httpx.MockTransport(handle), **kw)
-    )
+    mock_http(monkeypatch, handle)
     path = tmp_path / "models.yaml"
     result = CliRunner().invoke(
         command,

@@ -3,7 +3,7 @@
 `nooa connect` warns about API-call costs, checks the selected model with small
 requests, then asks before saving its registry entry. The same `nooa.connect` library is available to
 the TUI: frontends supply consent and display; the library supplies the plan,
-HTTP probes and registry updates.
+UnifiedLLM checks and registry updates.
 
 ## CLI
 
@@ -141,9 +141,10 @@ user provenance; an unknown limit remains absent and the current runtime's
 fallback applies.
 
 The saved entry uses the current `model_name`/`client_type` schema and the
-registry's reasoning-level mechanism. HTTP probes test the endpoint directly,
-not LiteLLM's translation, so acceptance does not prove that the runtime will
-forward an unfamiliar setting unchanged. Context and maximum-output limits are
+registry's reasoning-level mechanism. Every generation check uses UnifiedLLM,
+constructed from the unsaved entry through the same factory as `get_llm_client`.
+That tests runtime routing, settings translation and response parsing, not just
+whether the server accepts a hand-built request. Context and maximum-output limits are
 metadata, not permission to generate that many tokens on each call.
 
 ## Files and reconnecting
@@ -155,7 +156,8 @@ run before the local alias is chosen. `--yes` skips save/overwrite confirmation;
 it still prints the overwrite warning. Other aliases and surrounding
 comments stay intact. Writes replace the file atomically.
 
-Unchanged accepted probes are reused when reconnecting. Changing the route or
+Unchanged accepted UnifiedLLM probes are reused when reconnecting. Older direct-HTTP
+checks are repeated: they did not test the runtime. Changing the route or
 level declarations changes which probe requests can be reused; unchanged requests
 on the same route remain reusable. `--output` chooses another
 file; load custom paths with `NEMO_OO_LLM_CONFIG` or `reload_registry(path)`.
@@ -195,15 +197,20 @@ entry to `plan(existing_entry=...)`, and deduct that charge from the remaining
 budget before running additional probes. This reuses the exact accepted routing
 request; level and tool requests still need their own checks.
 There are no callbacks, terminal imports, prompts, agent instances or tool
-execution. Probes use HTTPX directly, not an SDK or LiteLLM. Importing the package
-still triggers NOOA's existing eager imports; changing that is separate work.
+execution. Discovery uses HTTPX; generation checks lazily load UnifiedLLM and
+the current runtime (LiteLLM by default). No temporary registry entries or global
+registry changes are needed. Each checked client is closed even if its call fails.
 The TUI keeps model selection, confirmation, secret persistence and switching;
 it can call these async functions directly without invoking Click or a subprocess.
 Its existing Ollama-specific adapter remains separate from these three API styles.
 
 ## What the observations mean
 
-Each record distinguishes fields sent, HTTP acceptance and observed reasoning.
+Each record distinguishes successful runtime calls and observed reasoning.
+The stored request is the planned input, not a claim that every field survived
+runtime translation unchanged. Reasoning observations come from readable response
+text or reported reasoning-token usage. A successful call alone does not establish
+that a setting had an effect.
 HTTP 400 is recorded as rejected, not unsupported. Auth, timeout and transient
 failures remain untested; failed routing or auth stops subsequent calls within
 that interface's plan. Interface detection still tries the other styles within
@@ -214,14 +221,14 @@ bodies and credential headers are not retained. Limits and defaults keep their
 catalogue source and are explicitly marked as not probed.
 An endpoint speaking Responses does not imply it accepts explicit cache fields;
 Connect leaves OpenAI explicit caching unset until that is established separately.
-Responses checks send `store: false` but do not request optional encrypted
-reasoning fields. Those fields require a separate explicit configuration and
-check; merely supporting Responses is not evidence that a route accepts them.
+Responses checks use `store: false`; any other request defaults come from the
+same client an agent will use. Connect does not add optional encrypted-reasoning
+settings to the saved entry.
 
 ## Code walkthrough: what and why
 
 - `src/nooa/connect.py`: plans data first so either frontend can obtain consent;
-  sends bounded HTTP requests so no new SDK or runtime dependency is required;
+  runs bounded UnifiedLLM calls through the registry's shared client factory;
   updates one alias while retaining other entries and comments.
 - `packages/nooa-cli/src/nooa_cli/commands/connect.py`: argument parsing, choices,
   preview and approval only. The TUI does not need to invoke this command.

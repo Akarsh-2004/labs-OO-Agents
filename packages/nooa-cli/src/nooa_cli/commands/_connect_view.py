@@ -25,6 +25,7 @@ def intro(*, checks, output_tokens, budget_tokens):
     click.echo()
     if checks:
         line("API checks may incur charges.", fg="yellow")
+        line("Checks use the same model client as your agents.", dim=True)
         line(f"{output_tokens:,} output tokens / call", dim=True)
         line(
             f"{budget_tokens:,} shared token budget"

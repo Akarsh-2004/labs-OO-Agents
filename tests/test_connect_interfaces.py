@@ -8,15 +8,16 @@ import httpx
 import pytest
 
 from nooa import connect
+from tests.connect_http import mock_http, mock_post, response_body
 
-REPLIES = {
-    "chat": {"choices": [{"message": {"content": "323"}}]},
-    "responses": {
-        "output": [{"type": "message", "content": [{"type": "output_text", "text": "323"}]}]
-    },
-    "anthropic": {"content": [{"type": "text", "text": "323"}]},
-}
+REPLIES = {style: response_body(style) for style in ("chat", "responses", "anthropic")}
 PATHS = {"/v1/chat/completions": "chat", "/v1/responses": "responses", "/v1/messages": "anthropic"}
+
+
+@pytest.fixture(autouse=True)
+def sdk_credentials(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
 
 
 async def check(**kwargs):
@@ -32,7 +33,6 @@ async def check(**kwargs):
 
 @pytest.mark.asyncio
 async def test_all_interfaces_use_correct_wire_shapes_and_one_call_each(monkeypatch):
-    client = httpx.AsyncClient
     sent = []
 
     def handle(request):
@@ -48,9 +48,7 @@ async def test_all_interfaces_use_correct_wire_shapes_and_one_call_each(monkeypa
         )
         return httpx.Response(200, json=REPLIES[style])
 
-    monkeypatch.setattr(
-        httpx, "AsyncClient", lambda **kw: client(transport=httpx.MockTransport(handle), **kw)
-    )
+    mock_http(monkeypatch, handle)
     events, result = await check(api_key="temporary-secret")
     assert len(sent) == 3
     assert list(result.accepted) == ["chat", "responses", "anthropic"]
@@ -80,7 +78,7 @@ async def test_failed_interface_is_not_offered_but_other_interfaces_are_checked(
             else httpx.Response(failure, text="secret must not escape")
         )
 
-    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    mock_post(monkeypatch, post)
     _, result = await check()
     assert result.accepted == ("chat",)
     assert len(calls) == 3
@@ -102,9 +100,19 @@ async def test_interface_checks_share_budget_including_reported_usage(
     async def post(self, url, **kwargs):
         sent.append(url)
         style = PATHS[httpx.URL(url).path]
-        return httpx.Response(200, json={**REPLIES[style], "usage": {"input_tokens": usage}})
+        return httpx.Response(
+            200,
+            json={
+                **REPLIES[style],
+                "usage": {
+                    "prompt_tokens" if style == "chat" else "input_tokens": usage,
+                    "completion_tokens" if style == "chat" else "output_tokens": 0,
+                    "total_tokens": usage,
+                },
+            },
+        )
 
-    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    mock_post(monkeypatch, post)
     _, result = await check(budget_tokens=budget)
     assert len(sent) == calls
     assert result.tokens_charged_to_budget == max(712, usage) * calls
@@ -118,7 +126,7 @@ async def test_selected_routing_result_reused_even_when_levels_are_added(monkeyp
         sent.append(kwargs["json"])
         return httpx.Response(200, json=REPLIES[PATHS[httpx.URL(url).path]])
 
-    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    mock_post(monkeypatch, post)
     _, result = await check()
     proposal = connect.plan(
         "local",
@@ -145,7 +153,7 @@ async def test_success_status_without_expected_response_shape_is_inconclusive(
     async def post(self, url, **kwargs):
         return httpx.Response(200, json=payload)
 
-    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    mock_post(monkeypatch, post)
     proposal = connect.plan("local", "model", style, "https://api.test/v1", "")
     result = await connect.run(proposal, approved="minimal")
     assert result.entry["provenance"]["probes"]["routing"]["outcome"] == "not_probed"
@@ -160,7 +168,7 @@ async def test_plain_responses_probe_does_not_require_optional_replay_fields(mon
             return httpx.Response(200, json=REPLIES["responses"])
         return httpx.Response(400)
 
-    monkeypatch.setattr(httpx.AsyncClient, "post", post)
+    mock_post(monkeypatch, post)
     _, result = await check()
     assert result.accepted == ("responses",)
     entry = result.results["responses"].entry
@@ -187,8 +195,7 @@ async def test_cancelling_interface_checks_before_send_closes_client(monkeypatch
     event = await anext(steps)
     assert event.outcome["outcome"] == "running"
     await steps.aclose()
-    assert len(clients) == 1
-    assert clients[0].is_closed
+    assert len(clients) == 0  # Cancellation before dispatch constructs no runtime client.
 
 
 def test_removed_level_does_not_leave_a_stale_accepted_probe():

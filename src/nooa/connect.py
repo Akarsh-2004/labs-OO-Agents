@@ -395,7 +395,8 @@ def plan(
         "model_name": f"{vendor}/{model}",
         "client_type": "responses" if api_style == "responses" else "completion",
         "api_style": api_style,
-        "api_base": api_base.rstrip("/"),
+        # The Messages runtime adds /v1/messages; Chat/Responses expect an API base.
+        "api_base": api_base.removesuffix("/v1") if api_style == "anthropic" else api_base,
         "api_key_env": api_key_env,
         "replay_vendor": vendor,
     }
@@ -523,48 +524,44 @@ def plan(
     return ConnectPlan(alias, entry, tuple(probes), budget_tokens, estimate, price)
 
 
-def _observations(data: dict, style: str) -> tuple[bool, bool, int]:
-    """Inspect response fields; never execute tools or retain raw responses."""
-    field = {"chat": "choices", "responses": "output", "anthropic": "content"}[style]
-    if not isinstance(data, dict) or data.get("error") or not isinstance(data.get(field), list):
-        raise ValueError("Response did not match the selected API style")
-    if style == "chat" and (
-        not data[field]
-        or any(
-            not isinstance(choice, dict) or not isinstance(choice.get("message"), dict)
-            for choice in data[field]
-        )
-    ):
-        raise ValueError("Chat response must contain message choices")
-    usage = data.get("usage") or {}
-    tokens = sum(
-        value
-        for key in ("input_tokens", "output_tokens", "prompt_tokens", "completion_tokens")
-        if isinstance(value := usage.get(key), int) and value > 0
+async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None):
+    """Check the unsaved entry through the same client factory agents use.
+
+    Only the reply cap, timeout and retries are changed for bounded checks.
+    Discovery and planning stay lightweight: runtime imports happen here only.
+    Tool replies are inspected as data; Connect never executes model calls.
+    """
+    from nooa.unifiedllm import RetryConfig, Tool
+    from nooa.unifiedllm.registry import client_from_config
+
+    def probe_tool(value: str):
+        raise RuntimeError("Setup checks never execute tools")
+
+    params = deepcopy(probe.body)
+    params.pop("model")  # The saved entry, not a second route, selects the model.
+    messages = params.pop("input" if entry["api_style"] == "responses" else "messages")
+    if params.pop("tools", None):
+        params["tools"] = [Tool(name="probe_tool", description="Echo a value", callable=probe_tool)]
+    if probe.name.startswith("level:"):
+        label = probe.name.removeprefix("level:")
+        settings = entry["reasoning_levels"][label]
+        if any(probe.body.get(key) != value for key, value in settings.items()):
+            raise ValueError("Reasoning settings changed after planning; make a new plan")
+        for key in settings:
+            params.pop(key, None)
+        # A level can set the cap itself; do not pass a conflicting override.
+        params["reasoning_level"] = label
+    client = client_from_config(
+        alias,
+        entry,
+        api_key=api_key,
+        retry_config=RetryConfig(max_retries=0, rate_limit_extra_retries=0),
+        num_retries=0,
     )
-    details = usage.get("completion_tokens_details") or usage.get("output_tokens_details") or {}
-    reasoning = bool(details.get("reasoning_tokens"))
-    tool = False
-    for choice in data.get("choices") or []:
-        message = choice.get("message") or {}
-        reasoning |= bool(
-            message.get("reasoning_content")
-            or message.get("thinking_blocks")
-            or message.get("reasoning_items")
-            or (message.get("provider_specific_fields") or {}).get("thought_signatures")
-        )
-        tool |= any(
-            call.get("function", {}).get("name") == "probe_tool"
-            for call in message.get("tool_calls") or []
-        )
-    for item in [*(data.get("content") or []), *(data.get("output") or [])]:
-        if isinstance(item, dict):
-            reasoning |= item.get("type") in {"reasoning", "thinking", "redacted_thinking"}
-            tool |= (
-                item.get("type") in {"function_call", "tool_use"}
-                and item.get("name") == "probe_tool"
-            )
-    return reasoning, tool, tokens
+    try:
+        return await client.acall(messages=messages, **params)
+    finally:
+        await client.aclose()
 
 
 async def run(
@@ -586,7 +583,7 @@ async def run_steps(
     approved: Literal["all", "minimal", "none"],
     api_key: str | None = None,
 ) -> AsyncIterator[ProbeUpdate | ConnectResult]:
-    """Execute approved probes without redirects, retries or provider fallback.
+    """Execute approved probes through UnifiedLLM without retries or provider fallback.
 
     Minimal approval sends only the routing probe. Its failure stops all probes.
     HTTP 400 means rejected, not unsupported; auth and transient failures stay
@@ -604,91 +601,84 @@ async def run_steps(
     spent = 0
     stopped = False
     key = api_key
-    async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
-        for probe in proposal.probes:
-            previous = records.get(probe.name, {})
-            if previous.get("outcome") == "accepted" and previous.get("request") == probe.body:
-                yield ProbeUpdate(
-                    probe.name, {**deepcopy(previous), "reason": "previous result reused"}
-                )
-                continue
-            record: dict[str, Any] = {"outcome": "not_probed"}
-            records[probe.name] = record
-            if approved == "none" or approved == "minimal" and probe.name != "routing":
-                record["reason"] = "not approved"
-                yield ProbeUpdate(probe.name, deepcopy(record))
-                continue
-            if stopped or spent + probe.token_estimate > proposal.budget_tokens:
-                record["reason"] = "previous check failed" if stopped else "budget exhausted"
-                yield ProbeUpdate(probe.name, deepcopy(record))
-                continue
-            if probe.body.get("stream") or any(
-                probe.body.get(name, 1) != 1 for name in ("n", "best_of")
-            ):
-                record["reason"] = "probes require one non-streaming generation"
-                yield ProbeUpdate(probe.name, deepcopy(record))
-                continue
-            style = entry["api_style"]
-            caps = [
-                probe.body[name]
-                for name in ("max_tokens", "max_output_tokens", "max_completion_tokens")
-                if name in probe.body
-            ]
-            required_cap = "max_output_tokens" if style == "responses" else "max_tokens"
-            if required_cap not in probe.body or any(
-                not isinstance(cap, int)
-                or isinstance(cap, bool)
-                or cap < 1
-                or cap > probe.token_estimate - 512
-                for cap in caps
-            ):
-                record["reason"] = "declared output cap exceeds the approved probe cap"
-                yield ProbeUpdate(probe.name, deepcopy(record))
-                continue
-            if key is None and entry["api_key_env"]:
-                key = os.environ.get(entry["api_key_env"])
-                if not key:
-                    raise ValueError(f"Set {entry['api_key_env']} before probing, or approve none")
-            headers = _headers(style, key)
-            spent += probe.token_estimate
-            yield ProbeUpdate(probe.name, {"outcome": "running"})
-            try:
-                async with asyncio.timeout(30):
-                    response = await client.post(
-                        f"{entry['api_base']}/{_PATHS[style]}", json=probe.body, headers=headers
-                    )
-            except (httpx.RequestError, TimeoutError) as exc:
-                record["error"] = type(exc).__name__
-                stopped = probe.name == "routing"
-                yield ProbeUpdate(probe.name, deepcopy(record))
-                continue
-            record["fields_reached_wire"] = True
-            record["status_code"] = response.status_code
-            if not response.is_success:
-                record["outcome"] = "rejected" if response.status_code == 400 else "not_probed"
-                record["error"] = (
-                    f"HTTP {response.status_code}; server body omitted to protect credentials"
-                )
-                stopped = probe.name == "routing" or response.status_code in {401, 403}
-                yield ProbeUpdate(probe.name, deepcopy(record))
-                continue
-            try:
-                reasoning, tool, tokens = _observations(response.json(), style)
-            except (ValueError, TypeError, AttributeError):
-                record["error"] = "Response did not match the selected API style"
-                stopped = probe.name == "routing"
-                yield ProbeUpdate(probe.name, deepcopy(record))
-                continue
-            record.update(
-                outcome="accepted",
-                request=deepcopy(probe.body),
-                reasoning_observed=reasoning,
-                tool_observed=tool,
-                reported_tokens=tokens,
-                checked_at=datetime.now(UTC).isoformat(),
+    for probe in proposal.probes:
+        previous = records.get(probe.name, {})
+        if (
+            previous.get("outcome") == "accepted"
+            and previous.get("request") == probe.body
+            and previous.get("client") == "unifiedllm"
+        ):
+            yield ProbeUpdate(
+                probe.name, {**deepcopy(previous), "reason": "previous result reused"}
             )
-            spent += max(0, tokens - probe.token_estimate)
+            continue
+        record: dict[str, Any] = {"outcome": "not_probed"}
+        records[probe.name] = record
+        if approved == "none" or approved == "minimal" and probe.name != "routing":
+            record["reason"] = "not approved"
             yield ProbeUpdate(probe.name, deepcopy(record))
+            continue
+        if stopped or spent + probe.token_estimate > proposal.budget_tokens:
+            record["reason"] = "previous check failed" if stopped else "budget exhausted"
+            yield ProbeUpdate(probe.name, deepcopy(record))
+            continue
+        if probe.body.get("stream") or any(
+            probe.body.get(name, 1) != 1 for name in ("n", "best_of")
+        ):
+            record["reason"] = "probes require one non-streaming generation"
+            yield ProbeUpdate(probe.name, deepcopy(record))
+            continue
+        style = entry["api_style"]
+        caps = [
+            probe.body[name]
+            for name in ("max_tokens", "max_output_tokens", "max_completion_tokens")
+            if name in probe.body
+        ]
+        required_cap = "max_output_tokens" if style == "responses" else "max_tokens"
+        if required_cap not in probe.body or any(
+            not isinstance(cap, int)
+            or isinstance(cap, bool)
+            or cap < 1
+            or cap > probe.token_estimate - 512
+            for cap in caps
+        ):
+            record["reason"] = "declared output cap exceeds the approved probe cap"
+            yield ProbeUpdate(probe.name, deepcopy(record))
+            continue
+        if key is None and entry["api_key_env"]:
+            key = os.environ.get(entry["api_key_env"])
+            if not key:
+                raise ValueError(f"Set {entry['api_key_env']} before probing, or approve none")
+        spent += probe.token_estimate
+        yield ProbeUpdate(probe.name, {"outcome": "running"})
+        try:
+            async with asyncio.timeout(30):
+                response = await _run_probe(proposal.alias, proposal.entry, probe, key)
+            usage = response.usage
+            reasoning = bool(response.reasoning or (usage and usage.reasoning_tokens))
+            tool = any(call.name == "probe_tool" for call in response.tool_calls)
+            tokens = usage.input_tokens + usage.output_tokens if usage else 0
+        except Exception as exc:
+            status = getattr(exc, "status_code", None)
+            record["error"] = type(exc).__name__
+            if isinstance(status, int):
+                record["status_code"] = status
+                record["outcome"] = "rejected" if status == 400 else "not_probed"
+            stopped = probe.name == "routing" or status in {401, 403}
+            yield ProbeUpdate(probe.name, deepcopy(record))
+            continue
+        record.update(
+            outcome="accepted",
+            client="unifiedllm",
+            request=deepcopy(probe.body),
+            reasoning_observed=reasoning,
+            tool_observed=tool,
+            reported_tokens=tokens,
+            finish_reason=response.finish_reason,
+            checked_at=datetime.now(UTC).isoformat(),
+        )
+        spent += max(0, tokens - probe.token_estimate)
+        yield ProbeUpdate(probe.name, deepcopy(record))
     if records.get("tools", {}).get("tool_observed"):
         entry["tools"] = True  # No call is not evidence that tools are unsupported.
     provenance["requests_accepted"] = [
