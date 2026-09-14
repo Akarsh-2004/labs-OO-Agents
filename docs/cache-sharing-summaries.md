@@ -76,3 +76,19 @@ Offline tests verify that the fork preserves the parent request's prefix.
 They do not measure provider cache hits or summary quality. Cache lifetime,
 routing, changed suffixes and structured-output settings can lower reuse.
 Keep deployment-specific measurements with the configuration used to run them.
+
+## Live release smoke test
+
+`tests/integration/test_summarizer_live.py` installs the summarizer on a real
+CodeAct agent. It requires a background summary, application on the next agent
+turn, preservation of three handoff identifiers, access to the raw archived
+events, and a cache read on the summary request. It also checks the outgoing
+request prefix and that the fork adds no parent events or tool executions.
+
+This paid test is opt-in (`NOOA_RUN_SUMMARIZER_E2E=1`) and resolves the
+`release-gate-openai` and `release-gate-anthropic` registry aliases. Missing
+aliases skip; a skip is not successful release evidence. It allows three
+requests per provider, caps each at 2,048 output tokens, and disables provider
+retries. Private configuration and run results belong in the release repository.
+The ordinary PR suite runs the same scenario with mocked HTTP and negative
+controls that disable forking, disable summary application, or lose a fact.

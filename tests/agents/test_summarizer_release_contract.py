@@ -21,7 +21,7 @@ async def test_release_scenario_detects_missing_summarization(family, broken, mo
     async def send(http_client, request, **kwargs):
         nonlocal calls
         calls += 1
-        text = "READY" if calls == 1 else "Launch Tuesday.\nBudget: 42 units.\nOwner: Alex."
+        text = "READY" if calls == 1 else "Launch ticket-4242 on 2026-11-04.\nOwner: alex.moreau."
         if calls == 2 and broken == "facts":
             text = "A launch was planned."
         if family == "openai":
@@ -69,8 +69,9 @@ async def test_release_scenario_detects_missing_summarization(family, broken, mo
         monkeypatch.setattr(TokenBudgetSummarizer, "_handle_before_turn", lambda *_: None)
     cls = ResponsesClient if family == "openai" else CompletionClient
     model = "openai/test" if family == "openai" else "anthropic/claude-sonnet-4-5"
+    limit = {"max_output_tokens": 2048} if family == "openai" else {"max_tokens": 2048}
     async with cls(
-        model, api_key="test", api_base="https://provider.test", cache_breakpoint=family
+        model, api_key="test", api_base="https://provider.test", cache_breakpoint=family, **limit
     ) as client:
         if broken:
             message = {

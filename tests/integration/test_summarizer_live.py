@@ -34,6 +34,8 @@ pytestmark = [
     ),
 ]
 
+FACTS = ("ticket-4242", "alex.moreau", "2026-11-04")
+
 
 class SummaryParent(Agent):
     @strategy(
@@ -59,7 +61,13 @@ async def exercise_summarization(client, family, monkeypatch):
     async def capture(http_client, request, **kwargs):
         if request.url.host == host and request.method == "POST":
             assert len(bodies) < 3, "Provider request budget exceeded"
-            bodies.append(json.loads(request.content))
+            body = json.loads(request.content)
+            limit_key = "max_output_tokens" if family == "openai" else "max_tokens"
+            assert body.get(limit_key) == 2048, "Missing output cap on provider request"
+            assert all(fact in json.dumps(body).lower() for fact in FACTS), (
+                "Request omitted a required fact"
+            )
+            bodies.append(body)
         return await real_send(http_client, request, **kwargs)
 
     async def call(messages, **params):
@@ -72,6 +80,20 @@ async def exercise_summarization(client, family, monkeypatch):
             await release.wait()
         response = await real_call(messages, **params)
         responses.append(response)
+        usage = response.usage
+        print(
+            json.dumps(
+                {
+                    "family": family,
+                    "call": len(responses),
+                    "finish_reason": response.finish_reason,
+                    "input_tokens": usage.input_tokens if usage else None,
+                    "output_tokens": usage.output_tokens if usage else None,
+                    "cached_input_tokens": usage.cached_input_tokens if usage else None,
+                }
+            ),
+            flush=True,
+        )
         return response
 
     monkeypatch.setattr(httpx.AsyncClient, "send", capture)
@@ -84,11 +106,12 @@ async def exercise_summarization(client, family, monkeypatch):
         content="\n".join(
             f"Record {i}: amber birch cedar dune elm fern grove hill." for i in range(400)
         )
-        + "\nDecision: launch Tuesday. Budget: 42 units. Owner: Alex."
+        + "\nDecision: launch ticket-4242 on 2026-11-04. Owner: alex.moreau. "
+        "These three exact identifiers are required for handoff; retain them verbatim in summaries."
     )
     original_tag = parent.event_manager.add(notes)
     summarizer = TokenBudgetSummarizer.install(
-        parent, config=TokenBudgetConfig(max_tokens=100, preserve_recent=1, target_chars=350)
+        parent, config=TokenBudgetConfig(max_tokens=100, preserve_recent=1, target_chars=600)
     )
     try:
         assert "READY" in await parent.reply("Acknowledge the notes with READY.")
@@ -106,13 +129,16 @@ async def exercise_summarization(client, family, monkeypatch):
             "Fork wrote parent events or executed tools"
         )
         assert text, "Background summary failed or returned unusable text"
-        assert all(fact in text for fact in ("Tuesday", "42", "Alex")), "Summary lost a key fact"
+        missing = [fact for fact in FACTS if fact not in text.lower()]
+        assert not missing, f"Summary lost a key fact: {missing}"
         assert original_tag in parent.event_manager.keys(), "Summary applied before next turn"
 
         # Keep this a three-request smoke test; next turn applies the waiting
         # summary through BeforeTurn, but must not schedule another summary.
         summarizer.config = summarizer.config.model_copy(update={"max_tokens": 1_000_000_000})
-        answer = await parent.reply("What are the launch day, budget and owner? Be concise.")
+        answer = await parent.reply(
+            "What are the launch ticket, date and owner? Preserve their exact identifiers."
+        )
         summaries = [e for e in parent.event_manager.values() if isinstance(e, Summary)]
         assert len(summaries) == 1, "Next agent turn did not apply exactly one summary"
         summary = summaries[0]
@@ -121,7 +147,8 @@ async def exercise_summarization(client, family, monkeypatch):
         assert original_tag not in parent.event_manager.keys()
         assert parent.events[original_tag].id == notes.id, "Raw source was not preserved"
         assert all(parent.event_manager[tag].id == identity for tag, identity in recent.items())
-        assert all(fact in answer for fact in ("Tuesday", "42", "Alex")), "Continuation lost a fact"
+        missing = [fact for fact in FACTS if fact not in answer.lower()]
+        assert not missing, f"Continuation lost a fact: {missing}"
         assert len(bodies) == len(responses) == call_count == 3
 
         first, fork, continuation = bodies
@@ -136,7 +163,7 @@ async def exercise_summarization(client, family, monkeypatch):
             assert fork[key][-1]["content"][:-1] == first[key][-1]["content"]
         # Summary renderers may quote/escape multiline text. Check its facts in
         # the outgoing request as well as the exact stored summary above.
-        assert all(fact in json.dumps(continuation) for fact in ("Tuesday", "42", "Alex")), (
+        assert all(fact in json.dumps(continuation).lower() for fact in FACTS), (
             "Next request lost summary facts"
         )
         assert "Record 399: amber" not in json.dumps(continuation), "Archived notes still rendered"
