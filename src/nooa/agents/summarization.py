@@ -588,16 +588,17 @@ def context_budget(llm: Any, percent: float = 0.8, fallback: int = 100_000) -> i
 class TokenBudgetSummarizer(SummarizationAgent):
     """Summarize old events asynchronously when provider input exceeds the budget.
 
-    By default, fork the completed parent request with a trailing summary
+    Fork the completed parent request with a trailing summary
     instruction. Tools, model settings and cache key stay unchanged so the
     provider can reuse its prefix. Only events present before that request
     are eligible for collapse; the latest response/tool work stays active.
 
     The fork never executes tools. A nonempty string returned through one
-    return_result call is read as data. An unusable reply gets one standalone
-    attempt; provider/policy failures leave history unchanged. A different
-    summarizer client, filtered history, structured output or
-    reuse_parent_prefix=False uses standalone summarization directly.
+    return_result call is read as data. Failed or unusable replies leave history
+    unchanged; there is no standalone retry. Filtered history is skipped because
+    the request cannot explain all events selected for collapse. Structured
+    parents drop their output schema on the fork so it can return summary text;
+    that schema change may reduce cache reuse.
 
     Completed summaries apply at BeforeTurn, provided the selected event IDs
     still match. Owners should await aclose() before closing the shared client.
@@ -612,16 +613,29 @@ class TokenBudgetSummarizer(SummarizationAgent):
     """
 
     _unsub_llm: Annotated[Callable[[], None] | None, hidden] = None
-    _fork_enabled: Annotated[bool, hidden] = False
     _pending_source: Annotated[tuple[tuple[str, str], ...] | None, hidden] = None
+    _warned_filtered: Annotated[bool, hidden] = False
+    _failed_forks: Annotated[int, hidden] = 0
 
     @hidden
     @no_trace
     def _install(self) -> None:
-        super()._install()
-        self._fork_enabled = self.config.reuse_parent_prefix and self.llm is self._target_agent.llm
-        if self._fork_enabled:
-            self._unsub_llm = self.target_event_manager.intercept("llm_call", self._fork_after_call)
+        self._unsub_before = self.target_event_manager.on("BeforeTurn", self._handle_before_turn)
+        self._unsub_llm = self.target_event_manager.intercept("llm_call", self._fork_after_call)
+        if (
+            self._target_agent.event_query is not None
+            or self.target_event_manager.get_event_query() is not None
+        ):
+            self._warn_filtered_history()
+
+    @hidden
+    @no_trace
+    def _warn_filtered_history(self) -> None:
+        if not self._warned_filtered:
+            logger.warning(
+                "Skipping token-budget summaries for filtered history; unseen events cannot be collapsed. The context overflow safety net still applies."
+            )
+            self._warned_filtered = True
 
     @hidden
     @no_trace
@@ -630,14 +644,6 @@ class TokenBudgetSummarizer(SummarizationAgent):
             self._unsub_llm()
             self._unsub_llm = None
         super()._uninstall()
-
-    @hidden
-    @no_trace
-    def _handle_after_turn(self, event: "EventBase") -> None:
-        # Forks start at LLM completion, before new response/tool events exist.
-        # The standalone path retains the existing AfterTurn lifecycle.
-        if not self._fork_enabled:
-            super()._handle_after_turn(event)
 
     @hidden
     @no_trace
@@ -665,12 +671,11 @@ class TokenBudgetSummarizer(SummarizationAgent):
         ):
             return ctx
         start, end = source[0][0], source[-1][0]
-        if ctx.filtered_history or ctx.params.get("output_model") is not None or ctx.client is None:
-            logger.warning(
-                "Using standalone summarization: the request has filtered history, "
-                "structured output, or no effective client. Parent cache reuse is unavailable."
-            )
-            self._schedule_summarization(start, end)
+        if ctx.filtered_history:
+            self._warn_filtered_history()
+            return ctx
+        if ctx.client is None:
+            logger.warning("Skipping summary fork: no effective client; history is unchanged.")
             return ctx
 
         # Allocate only at a fork, not every parent turn. Strings remain shared;
@@ -679,6 +684,7 @@ class TokenBudgetSummarizer(SummarizationAgent):
         try:
             messages = _copy_request_containers(ctx.messages)
             params = _copy_request_containers(ctx.params)
+            params["output_model"] = None
         except Exception:
             logger.warning(
                 "Could not snapshot summary fork; parent call is unchanged", exc_info=True
@@ -725,36 +731,28 @@ class TokenBudgetSummarizer(SummarizationAgent):
             response = result.response
             if response is None:
                 raise ValueError("Summary middleware returned no response")
-            try:
-                text = response.content
-                if response.tool_calls:
-                    # Read CodeAct's final value as data, never as an invocation.
-                    if (
-                        len(response.tool_calls) != 1
-                        or response.tool_calls[0].name != "return_result"
-                    ):
-                        raise ValueError("Summary fork requested executable tools")
-                    text = json.loads(response.tool_calls[0].arguments).get("result")
-                if not isinstance(text, str) or not text.strip():
-                    raise ValueError("Summary fork must return nonempty text")
-                if response.finish_reason in {"length", "max_tokens"}:
-                    raise ValueError("Summary fork exhausted its output budget")
-            except (ValueError, TypeError, AttributeError):
-                # A structured return tool may not admit a string summary. Try
-                # standalone once, asynchronously. Do not take this fallback
-                # when the provider or middleware above raises (e.g. a denial).
-                logger.warning(
-                    "Unusable summary reply; trying standalone without parent cache reuse"
-                )
-                start, end = self._pending_range
-                await self._run_summarization(
-                    self._render_range_to_markdown(start, end), start, end
-                )
-                return
+            text = response.content
+            if response.tool_calls:
+                # Read CodeAct's final value as data, never as an invocation.
+                if len(response.tool_calls) != 1 or response.tool_calls[0].name != "return_result":
+                    raise ValueError("Summary fork requested executable tools")
+                text = json.loads(response.tool_calls[0].arguments).get("result")
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError("Summary fork must return nonempty text")
+            if response.finish_reason in {"length", "max_tokens"}:
+                raise ValueError("Summary fork exhausted its output budget")
             self._pending_summary = text
+            self._failed_forks = 0
         except Exception:
             logger.warning("Summary fork failed; history is unchanged", exc_info=True)
             self._pending_summary = None
+            self._failed_forks += 1
+            if self._failed_forks >= 2 and self._unsub_llm is not None:
+                self._unsub_llm()
+                self._unsub_llm = None
+                logger.warning(
+                    "Token-budget summarization disabled after two consecutive failed forks; history is unchanged. Fix the reported failure before reinstalling."
+                )
         finally:
             _in_summary_fork.reset(token)
             self.event_manager.clear()
@@ -785,13 +783,13 @@ class TokenBudgetSummarizer(SummarizationAgent):
         Args:
             agent: Agent to attach to.
             config: TokenBudgetConfig instance. Use TokenBudgetConfig(field=value) to override.
-            **kwargs: Only 'llm' is allowed; all other flat kwargs raise TypeError.
+            **kwargs: Unsupported; the fork always uses the parent's effective client.
         """
-        unknown = set(kwargs) - {"llm"}
+        unknown = set(kwargs)
         if unknown:
             raise TypeError(
                 f"TokenBudgetSummarizer.install() got unexpected keyword arguments: "
-                f"{sorted(unknown)}. Use config=TokenBudgetConfig(...) instead."
+                f"{sorted(unknown)}. Use config=TokenBudgetConfig(...); the client comes from the parent."
             )
         return super().install(agent, config=config, **kwargs)
 
@@ -799,42 +797,10 @@ class TokenBudgetSummarizer(SummarizationAgent):
         from nooa.config.summarizer_config import TokenBudgetConfig as _TBC
 
         config = kwargs.pop("config", None)
+        if "llm" in kwargs:
+            raise TypeError("TokenBudgetSummarizer uses the parent's effective client; remove llm=")
         self.config = config or _TBC()
         super().__init__(agent, **kwargs)
-
-    @hidden
-    @no_trace
-    def _should_summarize(self, event: "AfterTurn") -> bool:
-        """Trigger only from provider-reported prompt tokens."""
-        agent = self._target_agent
-        if agent is None:
-            return False
-
-        try:
-            actual = agent.runtime.last_prompt_tokens_actual
-        except Exception:
-            logger.warning(
-                "TokenBudgetSummarizer: failed to read API-reported token count", exc_info=True
-            )
-            return False
-
-        return actual is not None and actual > self.config.max_tokens
-
-    @hidden
-    @no_trace
-    def _compute_range(self, event: "AfterTurn") -> tuple[str, str] | None:
-        """Summarize oldest events, preserving recent ones."""
-        if self.target_event_manager is None:
-            return None
-
-        tags = self.target_event_manager.keys()
-        if len(tags) <= self.config.preserve_recent:
-            return None
-
-        # Summarize from oldest to (len - preserve_recent - 1)
-        start_tag = tags[0]
-        end_tag = tags[-(self.config.preserve_recent + 1)]
-        return (start_tag, end_tag)
 
 
 class MethodSummarizer(SummarizationAgent):
@@ -842,6 +808,10 @@ class MethodSummarizer(SummarizationAgent):
 
     Trigger: event.is_final == True (method completed)
     Action: Summarize all events from that method's generation_id
+
+    This method-completion summarizer still uses the base class's standalone
+    render path: unlike the token-budget summarizer, it has no parent request
+    to fork. It is not a fallback for TokenBudgetSummarizer.
 
     Example:
         from nooa.config.summarizer_config import MethodSummarizerConfig

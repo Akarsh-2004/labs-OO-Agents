@@ -209,14 +209,12 @@ async def test_return_result_is_read_as_data_never_executed(result, valid):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("filtered,structured", [(True, False), (False, True)])
-async def test_ineligible_request_uses_standalone_summary(filtered, structured, caplog):
+@pytest.mark.parametrize("missing", ["history", "client"])
+async def test_unavailable_fork_preserves_history_without_fallback(missing, caplog):
     agent, summarizer, ctx = setup()
-    ctx.filtered_history = filtered
-    if structured:
-        from pydantic import BaseModel
-
-        ctx.params["output_model"] = BaseModel
+    ctx.filtered_history = missing == "history"
+    if missing == "client":
+        ctx = ctx.model_copy(update={"client": None})
     summarizer.summarize = AsyncMock(return_value="standalone summary")
     agent.llm.acall = AsyncMock()
 
@@ -225,10 +223,11 @@ async def test_ineligible_request_uses_standalone_summary(filtered, structured, 
         return request
 
     await agent.event_manager.run_middleware("llm_call", ctx, core)
-    await summarizer._pending_task
-    summarizer.summarize.assert_awaited_once()
+    assert summarizer._pending_task is None
+    summarizer.summarize.assert_not_awaited()
     agent.llm.acall.assert_not_awaited()
-    assert "standalone" in caplog.text
+    assert "Skipping" in caplog.text
+    assert agent.event_manager.keys() == ["1", "2", "3", "4"]
     summarizer._uninstall()
 
 
@@ -365,7 +364,7 @@ async def test_fork_borrows_bound_tools_without_copying_their_owner():
 
 
 @pytest.mark.asyncio
-async def test_unusable_fork_has_one_standalone_fallback():
+async def test_unusable_fork_has_no_standalone_fallback():
     agent, summarizer, ctx = setup()
     agent.llm.acall = AsyncMock(
         return_value=response(
@@ -383,22 +382,147 @@ async def test_unusable_fork_has_one_standalone_fallback():
 
     await agent.event_manager.run_middleware("llm_call", ctx, core)
     await summarizer._pending_task
-    assert summarizer._pending_summary == "fallback summary"
-    summarizer.summarize.assert_awaited_once()
+    assert summarizer._pending_summary is None
+    summarizer.summarize.assert_not_awaited()
     agent.llm.acall.assert_awaited_once()
     summarizer._uninstall()
 
 
-def test_model_switch_preserves_standalone_choice():
+def test_model_switch_keeps_fork_subscription():
     from nooa.interactive import apply_model_limits
 
     agent = Agent(llm=FakeLLMClient())
-    summarizer = TokenBudgetSummarizer.install(
-        agent, config=TokenBudgetConfig(reuse_parent_prefix=False)
-    )
+    summarizer = TokenBudgetSummarizer.install(agent, config=TokenBudgetConfig())
     apply_model_limits(agent)
-    assert summarizer.config.reuse_parent_prefix is False
+    assert summarizer._unsub_llm is not None
+    assert "reuse_parent_prefix" not in TokenBudgetConfig.model_fields
     summarizer._uninstall()
+
+
+@pytest.mark.asyncio
+async def test_structured_parent_forks_with_text_output_without_mutating_parent():
+    from pydantic import BaseModel
+
+    agent, summarizer, ctx = setup()
+    ctx.params["output_model"] = BaseModel
+    agent.llm.acall = AsyncMock(return_value=response("summary"))
+    summarizer.summarize = AsyncMock(side_effect=AssertionError("No standalone path"))
+
+    async def core(request):
+        request.response = response("parent")
+        return request
+
+    await agent.event_manager.run_middleware("llm_call", ctx, core)
+    await summarizer._pending_task
+    assert agent.llm.acall.call_args.kwargs["output_model"] is None
+    assert ctx.params["output_model"] is BaseModel
+    assert summarizer._pending_summary == "summary"
+    summarizer.summarize.assert_not_awaited()
+    await summarizer.aclose()
+
+
+def test_separate_summary_client_is_rejected_before_install():
+    agent = Agent(llm=FakeLLMClient())
+    with pytest.raises(TypeError, match="parent"):
+        TokenBudgetSummarizer.install(agent, llm=FakeLLMClient())
+    assert not agent.event_manager._middleware.get("llm_call")
+
+
+@pytest.mark.asyncio
+async def test_repeated_failures_stop_spending_without_collapsing(caplog):
+    agent, summarizer, ctx = setup()
+    agent.llm.acall = AsyncMock(return_value=response("partial", finish_reason="length"))
+
+    async def core(request):
+        request.response = response("parent")
+        return request
+
+    for _ in range(4):
+        await agent.event_manager.run_middleware("llm_call", ctx, core)
+        if summarizer._pending_task:
+            await summarizer._pending_task
+        summarizer._apply_pending_summary()
+    assert agent.llm.acall.await_count == 2
+    assert agent.event_manager.keys() == ["1", "2", "3", "4"]
+    assert "disabled" in caplog.text.lower()
+    await summarizer.aclose()
+
+
+@pytest.mark.asyncio
+async def test_filtered_history_warns_once_and_never_uses_standalone(caplog):
+    agent, summarizer, ctx = setup()
+    ctx.filtered_history = True
+    summarizer.summarize = AsyncMock()
+
+    async def core(request):
+        request.response = response("parent")
+        return request
+
+    for _ in range(3):
+        await agent.event_manager.run_middleware("llm_call", ctx, core)
+    assert len([r for r in caplog.records if "filtered history" in r.message]) == 1
+    summarizer.summarize.assert_not_awaited()
+    await summarizer.aclose()
+
+
+@pytest.mark.parametrize("class_filter", [False, True])
+def test_known_history_filter_warns_at_install(class_filter, caplog):
+    from nooa.runtime.event_query import EventQuery
+
+    query = EventQuery.current_call()
+    if class_filter:
+
+        class FilteredAgent(Agent, event_query=query):
+            pass
+
+        agent = FilteredAgent(llm=FakeLLMClient())
+    else:
+        agent = Agent(llm=FakeLLMClient(), event_query=query)
+    summarizer = TokenBudgetSummarizer.install(agent)
+    assert "filtered history" in caplog.text
+    assert summarizer._unsub_after is None
+    summarizer._uninstall()
+
+
+@pytest.mark.asyncio
+async def test_success_resets_consecutive_failure_stop():
+    agent, summarizer, ctx = setup()
+    agent.llm.acall = AsyncMock(side_effect=[response(""), response("ok"), response("")])
+
+    async def core(request):
+        request.response = response("parent")
+        return request
+
+    for _ in range(3):
+        await agent.event_manager.run_middleware("llm_call", ctx, core)
+        await summarizer._pending_task
+        summarizer._apply_pending_summary()
+    assert agent.llm.acall.await_count == 3
+    assert summarizer._unsub_llm is not None
+    await summarizer.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tokens,preserve,expected",
+    [(1000, 1, True), (100, 1, False), (0, 1, False), (1000, 4, False), (1000, 0, True)],
+)
+async def test_trigger_uses_current_provider_usage_and_preserves_recent(tokens, preserve, expected):
+    agent, summarizer, ctx = setup()
+    summarizer.config = TokenBudgetConfig(max_tokens=100, preserve_recent=preserve)
+    agent.runtime._last_prompt_tokens_actual = 1000000  # Stale count must not trigger.
+    agent.llm.acall = AsyncMock(return_value=response("summary"))
+
+    async def core(request):
+        request.response = LLMResponse(content="parent", usage=LLMUsage(input_tokens=tokens))
+        return request
+
+    await agent.event_manager.run_middleware("llm_call", ctx, core)
+    assert (summarizer._pending_task is not None) is expected
+    if expected:
+        await summarizer._pending_task
+        assert summarizer._pending_range == ("1", str(4 - preserve))
+    await summarizer.aclose()
 
 
 @pytest.mark.asyncio
