@@ -275,8 +275,8 @@ async def test_real_tool_reply_is_replayed_without_execution(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_closing_progress_iterator_closes_owned_client(monkeypatch):
-    from nooa.unifiedllm.registry import client_from_config
     import nooa.unifiedllm.registry as registry
+    from nooa.unifiedllm.registry import client_from_config
 
     clients = []
 
