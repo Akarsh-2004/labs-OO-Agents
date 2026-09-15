@@ -136,6 +136,22 @@ Each check shows progress and its result as it runs. Saving is a separate
 confirmation; Ctrl-C cancels setup. A pasted key is used only for this session;
 the saved entry names its environment variable, not its value.
 
+The wizard replaces the active check line on a terminal and prints compact
+results with elapsed time, then counts passed, inconclusive and skipped checks.
+Conversation checks are numbered 1/3 through 3/3; cache reuse and reasoning
+retention have separate result rows. Piped output stays readable without cursor
+controls, and `NO_COLOR` disables colors. The full YAML is hidden by default;
+`--show-config` previews the final entry before the save question. The agent
+`--stage` JSON interface is unchanged.
+
+The displayed **reported reply ceiling** is capability metadata saved as
+`max_output_tokens`, not a request default. It does not set the runtime's
+`max_tokens` reply budget. A large ceiling can be valid while being unsuitable
+as a default: input, reasoning and the answer must fit together in the context
+window. The wizard highlights ceilings close to that window. Published
+thinking on/off information is shown even when named effort levels are absent;
+this display does not invent request mappings or change the checks.
+
 If enabled reasoning-level checks succeed but return neither reasoning fields
 nor reported reasoning tokens, Connect warns once before saving and lists the
 affected levels. It suggests another API format or checking the server settings.

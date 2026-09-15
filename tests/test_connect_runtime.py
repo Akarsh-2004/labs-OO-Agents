@@ -16,6 +16,41 @@ from tests.connect_http import mock_http, response_body
 
 
 @pytest.mark.asyncio
+async def test_reported_reply_ceiling_is_metadata_not_a_request_default(monkeypatch):
+    bodies = []
+
+    def handle(request):
+        bodies.append(json.loads(request.content))
+        return httpx.Response(200, json=response_body("chat"))
+
+    mock_http(monkeypatch, handle)
+    proposal = connect.plan(
+        "local",
+        "gpt-5.1",
+        "chat",
+        "https://api.test/v1",
+        "",
+        catalogue={
+            "id": "example/model",
+            "context_length": 262144,
+            "top_provider": {"max_completion_tokens": 235929},
+        },
+    )
+    assert proposal.entry["max_output_tokens"] == 235929
+    assert "max_tokens" not in proposal.entry
+    client = registry.client_from_config("local", proposal.entry, api_key="test-key")
+    try:
+        await client.acall(messages=[{"role": "user", "content": "Hello"}])
+    finally:
+        await client.aclose()
+    assert len(bodies) == 1
+    assert all(
+        bodies[0].get(key) != 235929
+        for key in ("max_tokens", "max_output_tokens", "max_completion_tokens")
+    )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("style", ["chat", "responses", "anthropic"])
 async def test_probes_use_registry_entry_and_unified_call(monkeypatch, style):
     proposal = connect.plan(

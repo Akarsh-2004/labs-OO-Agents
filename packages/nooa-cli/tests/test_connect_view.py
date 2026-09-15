@@ -68,7 +68,7 @@ def test_model_details_show_published_limits_separately_from_setup_cap():
         "200",
     ):
         assert text in result.output
-    assert "Maximum reply length" in result.output
+    assert "Reported reply ceiling" in result.output
     assert "Published output default" not in result.output
     assert "Setup check limit" in result.output
     assert "Source: OpenRouter" in result.output
@@ -105,3 +105,81 @@ def test_local_diagnostics_keep_validation_but_hide_provider_bodies(monkeypatch)
     assert "private-key" not in detail and "transient-key" not in detail
     detail = view.local_failure(httpx.ConnectError("untrusted server text private-key"))
     assert "untrusted server text" not in detail and "private-key" not in detail
+
+
+def test_reply_ceiling_and_boolean_reasoning_metadata_are_explained():
+    @click.command()
+    def command():
+        view.model_details(
+            {
+                "id": "example/model",
+                "context_length": 262144,
+                "top_provider": {"max_completion_tokens": 235929},
+                "reasoning": {"mandatory": False, "default_enabled": True},
+            },
+            output_tokens=200,
+            edited=True,
+        )
+
+    result = CliRunner().invoke(command)
+    assert result.exit_code == 0, result.output
+    assert "26,215" in result.output
+    assert "metadata, not your per-reply budget" in result.output
+    assert "Thinking on/off" in result.output
+    assert "Thinking on" in result.output
+    assert "Your edited settings" in result.output
+
+
+def test_progress_reports_evidence_and_skips_without_payloads(monkeypatch):
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setattr(view.shutil, "get_terminal_size", lambda *args: os.terminal_size((58, 24)))
+
+    @click.command()
+    def command():
+        progress = view.CheckProgress()
+        progress.update("tools", {"outcome": "running"})
+        progress.update(
+            "tools", {"outcome": "accepted", "tool_observed": False, "request": "SECRET"}
+        )
+        progress.update("level:high", {"outcome": "accepted"}, missing_reasoning=True)
+        progress.update("level:low", {"outcome": "not_probed", "reason": "budget exhausted"})
+        progress.update(
+            "cache", {"outcome": "confirmed", "input_tokens": 10000, "cached_input_tokens": 9000}
+        )
+        progress.update("reasoning_retention", {"outcome": "confirmed"})
+        progress.finish()
+
+    result = CliRunner().invoke(command)
+    assert result.exit_code == 0, result.output
+    assert "Tool use — checking" in result.output
+    assert "No tool call returned" in result.output
+    assert "No reasoning details returned" in result.output
+    assert "budget exhausted" in result.output
+    assert "Reused 90%" in result.output
+    assert "2 passed · 2 need attention · 1 skipped" in result.output
+    assert "SECRET" not in result.output
+    assert "\x1b" not in result.output
+    assert all(len(line) <= 58 for line in result.output.splitlines())
+
+
+def test_terminal_progress_clears_active_row_on_completion_and_cancel(monkeypatch):
+    from io import StringIO
+
+    class Terminal(StringIO):
+        def isatty(self):
+            return True
+
+    monkeypatch.setattr(click, "get_text_stream", lambda name: Terminal())
+
+    @click.command()
+    def command():
+        progress = view.CheckProgress()
+        progress.update("chat", {"outcome": "running"})
+        progress.update("chat", {"outcome": "accepted"})
+        progress.update("tools", {"outcome": "running"})
+        progress.finish()
+
+    result = CliRunner().invoke(command)
+    assert result.exit_code == 0, result.output
+    assert result.stdout.count("\r\x1b[2K") == 2
+    assert "Chat interface: Connected" in result.output

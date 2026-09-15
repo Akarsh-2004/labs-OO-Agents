@@ -57,6 +57,7 @@ from ._connect_stages import STAGES
     help="Shared estimated-token budget for all checks (default: 65536); never increased after approval.",
 )
 @click.option("--output-tokens", type=click.IntRange(1, 4096), default=200, show_default=True)
+@click.option("--show-config", is_flag=True, help="Show full YAML details before saving.")
 @click.option(
     "--output",
     type=click.Path(dir_okay=False),
@@ -87,6 +88,7 @@ def command(
     no_probe,
     budget_tokens,
     output_tokens,
+    show_config,
     output,
     yes,
 ):
@@ -124,6 +126,7 @@ def command(
                     "--catalogue-model": catalogue_model,
                     "--reasoning-template": reasoning_template,
                     "--levels": levels,
+                    "--show-config": show_config,
                 }.items()
                 if used
             ],
@@ -146,32 +149,26 @@ def command(
     from . import _connect_view as view
     from ._connect_prompts import confirm, edit_model_details, environment_names, prompt
 
-    async def show_checks(events):
+    async def show_checks(events, *, reasoning_levels=None):
         with view.quiet_provider_messages():
-            return await display_checks(events)
+            return await display_checks(events, reasoning_levels=reasoning_levels)
 
-    async def display_checks(events):
-        async with aclosing(events) as steps:
-            async for event in steps:
-                if isinstance(event, (connect.ConnectResult, connect.InterfaceResult)):
-                    return event
-                outcome = event.outcome
-                if outcome["outcome"] == "running":
-                    click.echo(f"Checking {event.name}...")
-                else:
-                    detail = (
-                        view.check_failure(outcome) or outcome.get("error") or outcome.get("reason")
+    async def display_checks(events, *, reasoning_levels=None):
+        progress = view.CheckProgress()
+        try:
+            async with aclosing(events) as steps:
+                async for event in steps:
+                    if isinstance(event, (connect.ConnectResult, connect.InterfaceResult)):
+                        return event
+                    missing = connect.unobserved_reasoning_levels(
+                        {
+                            "reasoning_levels": reasoning_levels or {},
+                            "provenance": {"probes": {event.name: event.outcome}},
+                        }
                     )
-                    label = "not confirmed" if outcome.get("error") else outcome["outcome"]
-                    click.echo(f"{event.name}: {label}" + (f" ({detail})" if detail else ""))
-                    if outcome.get("reasoning_observed"):
-                        click.echo("  Reasoning included in the response.")
-                    if event.name == "cache" and outcome.get("input_tokens"):
-                        cached = outcome.get("cached_input_tokens") or 0
-                        total = outcome["input_tokens"]
-                        click.echo(
-                            f"  Reused {cached:,} / {total:,} input tokens ({cached / total:.0%})."
-                        )
+                    progress.update(event.name, event.outcome, missing_reasoning=bool(missing))
+        finally:
+            progress.finish()
         raise click.ClickException("Checks ended without a result.")
 
     path = Path(output) if output else get_user_dir("llm_config.yaml")
@@ -579,17 +576,28 @@ def command(
             click.echo(
                 "No context window selected. The runtime will use its fallback; set --context-window to supply a limit."
             )
-        click.echo(yaml.safe_dump({"models": {alias: proposal.entry}}, sort_keys=False))
         price = (
             "unknown"
             if proposal.price_estimate is None
             else f"~${proposal.price_estimate:.6f} at catalogue prices"
         )
-        click.echo(
-            f"Plan: {len(proposal.probes) + (3 if proposal.session_checks else 0)} candidate calls; basic checks {output_tokens} output tokens per call, session checks 2048; approval: {approval}."
+        view.line("Check plan", fg="bright_cyan", bold=True)
+        view.line(
+            f"Connection · tools · {len(proposal.entry.get('reasoning_levels', {}))} reasoning settings",
+            dim=True,
         )
-        click.echo(
-            f"Estimated tokens for remaining checks: {remaining_estimate}; remaining budget: {proposal.budget_tokens}; price for the full plan: {price}."
+        if proposal.session_checks:
+            view.line(
+                "Then 3 conversation replies to check cache reuse and reasoning retention.",
+                dim=True,
+            )
+        view.line(
+            f"Reply caps: {output_tokens:,} for basic checks; 2,048 for conversation checks.",
+            dim=True,
+        )
+        view.line(
+            f"Estimated tokens: {remaining_estimate:,} · budget remaining: {proposal.budget_tokens:,} · estimated price: {price}",
+            dim=True,
         )
         if remaining_estimate > proposal.budget_tokens:
             click.echo(
@@ -600,7 +608,10 @@ def command(
             "No retries or capacity probes. Estimates are not billing limits: endpoints can ignore output caps."
         )
         result = asyncio.run(
-            show_checks(connect.run_steps(proposal, approved=approval, api_key=api_key))
+            show_checks(
+                connect.run_steps(proposal, approved=approval, api_key=api_key),
+                reasoning_levels=proposal.entry.get("reasoning_levels"),
+            )
         )
         result.entry["provenance"]["tokens_charged_to_budget"] = (
             result.entry["provenance"].get("tokens_charged_to_budget", 0) + interface_spent
@@ -644,6 +655,14 @@ def command(
                 err=True,
             )
         view.step(4, "Save model")
+        view.line(f"{alias} · {model} · {api_style}", bold=True)
+        if show_config:
+            click.echo(yaml.safe_dump({"models": {alias: result.entry}}, sort_keys=False))
+        else:
+            view.line(
+                "Full configuration is saved with the model. Use --show-config to preview the YAML.",
+                dim=True,
+            )
         if yes or confirm(f"Write model entry to {path}?", default=True):
             connect.write(result.entry, path, alias=alias)
             click.echo(f"Saved {alias} to {path}.")

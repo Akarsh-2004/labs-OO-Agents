@@ -121,7 +121,28 @@ def test_offline_cli_needs_no_key_and_writes_generated_registry(tmp_path, monkey
     result = CliRunner().invoke(command, [*args(path), "--yes"])
     assert result.exit_code == 0, result.output
     assert yaml.safe_load(path.read_text())["models"]["local"]["model_name"] == "openai/wire/model"
-    assert "not_probed" in result.output
+    assert "skipped" in result.output
+    assert "not approved" in result.output
+
+
+@pytest.mark.parametrize("show_config", [False, True])
+def test_full_yaml_preview_is_explicit_and_does_not_change_saved_entry(
+    tmp_path, monkeypatch, show_config
+):
+    monkeypatch.delenv("CONNECT_TEST_KEY", raising=False)
+    path = tmp_path / "models.yaml"
+    result = CliRunner().invoke(
+        command, [*args(path), *(["--show-config"] if show_config else [])], input="y\n"
+    )
+    assert result.exit_code == 0, result.output
+    assert ("provenance:" in result.output) is show_config
+    assert "Results ·" in result.output
+    if show_config:
+        assert result.output.index("Save model") < result.output.index("provenance:")
+        assert result.output.index("provenance:") < result.output.index("Write model entry")
+    entry = yaml.safe_load(path.read_text())["models"]["local"]
+    assert entry["model_name"] == "openai/wire/model"
+    assert all(p["outcome"] == "not_probed" for p in entry["provenance"]["probes"].values())
 
 
 def test_declining_final_write_leaves_no_file(tmp_path):
@@ -287,7 +308,7 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
         if request.method == "GET":
             return httpx.Response(200, json={"data": [{"id": "example-model"}]})
         # Feedback appears before the HTTP operation, not only at the end.
-        assert any("Checking" in line for line in output)
+        assert any("— checking" in line for line in output)
         assert any("may incur charges" in line for line in output)
         if request.url.path != "/v1/chat/completions":
             return httpx.Response(404)
@@ -319,11 +340,15 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
     entry = yaml.safe_load((tmp_path / "llm_config.yaml").read_text())["models"]["my-model"]
     assert entry["model_name"] == "openai/example-model"
     assert "temporary-secret" not in result.output + yaml.safe_dump(entry)
-    assert "Reasoning included in the response." in result.output
+    assert "reasoning returned" in result.output
     assert "acceptance alone" not in result.output
     assert "private test reasoning" not in result.output
-    assert result.output.index("Checking chat") < result.output.index("chat: accepted")
-    assert result.output.index("chat: accepted") < result.output.index("Checking tools")
+    assert result.output.index("Chat interface — checking") < result.output.index(
+        "Chat interface: Connected"
+    )
+    assert result.output.index("Chat interface: Connected") < result.output.index(
+        "Tool use — checking"
+    )
     assert "API format [" not in result.output  # One success is selected automatically.
     assert "Run these paid probes?" not in result.output
 
@@ -528,7 +553,7 @@ def test_interface_and_later_checks_share_the_cli_budget(tmp_path, monkeypatch):
     assert "approved budget is too small" in result.output
     assert "setup is incomplete; budget exhausted before tools" in result.output
     assert result.output.index("approved budget is too small") < result.output.index(
-        "routing: accepted"
+        "Connection: Connected"
     )
 
 

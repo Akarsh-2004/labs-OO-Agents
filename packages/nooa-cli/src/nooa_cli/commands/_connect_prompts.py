@@ -207,7 +207,7 @@ def edit_model_details(model):
     edited["context_length"] = count("Context window (tokens)", model.get("context_length"))
     edited["top_provider"] = dict(model.get("top_provider") or {})
     edited["top_provider"]["max_completion_tokens"] = count(
-        "Maximum reply length (tokens; not the setup check cap)",
+        "Reported reply ceiling (tokens; metadata, not a per-reply budget)",
         edited["top_provider"].get("max_completion_tokens"),
     )
     reasoning = edited["reasoning"] = dict(model.get("reasoning") or {})

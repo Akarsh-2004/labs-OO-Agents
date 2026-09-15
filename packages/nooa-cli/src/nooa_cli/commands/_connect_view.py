@@ -6,6 +6,7 @@ import os
 import shutil
 import sys
 import textwrap
+import time
 from contextlib import contextmanager
 
 import click
@@ -35,6 +36,8 @@ def check_failure(outcome):
         return "No route found for this interface or model."
     if status == 429 or error == "RateLimitError":
         return "Server rate limit reached. Try again later."
+    if isinstance(status, int) and status >= 500:
+        return "Server error. Try again later."
     if "Timeout" in error or error == "APIConnectionError":
         return "Could not reach the server. Check the connection or try again."
     return None
@@ -114,6 +117,114 @@ def step(number, title):
     click.echo()
 
 
+class CheckProgress:
+    """Compact human progress; replace only the active line on a real terminal."""
+
+    def __init__(self):
+        self.inline = click.get_text_stream("stdout").isatty()
+        self.active = False
+        self.started = {}
+        self.results = {}
+
+    def _clear(self):
+        if self.active:
+            click.echo("\r\033[2K", nl=False, color=True)
+            self.active = False
+
+    def update(self, name, record, *, missing_reasoning=False):
+        labels = {
+            "chat": "Chat interface",
+            "responses": "Responses interface",
+            "anthropic": "Anthropic interface",
+            "routing": "Connection",
+            "tools": "Tool use",
+            "session:seed": "Conversation 1/3 · start",
+            "session:replay": "Conversation 2/3 · continue",
+            "session:repeat": "Conversation 3/3 · repeat",
+            "cache": "Cache reuse",
+            "reasoning_retention": "Reasoning carried forward",
+            "encrypted_reasoning": "Encrypted reasoning",
+            "session": "Conversation checks",
+        }
+        label = "Reasoning · " + name[6:] if name.startswith("level:") else labels.get(name, name)
+        outcome = record.get("outcome")
+        self._clear()
+        if outcome == "running":
+            self.started[name] = time.monotonic()
+            text = f"  … {label} — checking"
+            if self.inline:
+                width = max(20, shutil.get_terminal_size((80, 24)).columns - 1)
+                click.echo(text[:width], nl=False)
+                self.active = True
+            else:
+                line(text.strip(), dim=True)
+            return
+        if name == "session" and outcome == "completed":
+            return  # Cache and reasoning rows already describe the result.
+        status = "passed" if outcome in {"accepted", "confirmed"} else "attention"
+        detail = check_failure(record) or record.get("reason")
+        if outcome == "not_probed" and not record.get("error"):
+            status = "skipped"
+        if outcome == "accepted":
+            detail = (
+                "Connected"
+                if name in {"routing", "chat", "responses", "anthropic"}
+                else "Reply received"
+            )
+            if name == "tools":
+                detail = (
+                    "Tool call returned" if record.get("tool_observed") else "No tool call returned"
+                )
+                if not record.get("tool_observed"):
+                    status = "attention"
+            elif name.startswith("level:"):
+                detail = (
+                    "Reasoning returned" if record.get("reasoning_observed") else "Request accepted"
+                )
+                if missing_reasoning:
+                    status, detail = "attention", "No reasoning details returned"
+            elif record.get("reasoning_observed"):
+                detail += " · reasoning returned"
+            if record.get("finish_reason") in {"length", "error", "content_filter"}:
+                status, detail = "attention", "Reply incomplete; check not conclusive"
+            if record.get("reason") == "previous result reused":
+                detail += " · already checked"
+        elif name == "cache" and outcome == "confirmed" and record.get("input_tokens"):
+            cached, total = record.get("cached_input_tokens", 0), record["input_tokens"]
+            detail = f"Reused {cached / total:.0%} of input ({cached:,} / {total:,} tokens)"
+        elif name == "reasoning_retention" and outcome == "confirmed":
+            detail = "Preserved in the next request"
+        icon, color = {
+            "passed": ("✓", "green"),
+            "attention": ("!", "yellow"),
+            "skipped": ("–", None),
+        }[status]
+        elapsed = (
+            f" · {time.monotonic() - self.started.pop(name):.1f}s" if name in self.started else ""
+        )
+        fallback = {
+            "not_probed": "Not checked",
+            "not_confirmed": "Not confirmed",
+            "rejected": "Request rejected",
+        }.get(outcome, outcome)
+        line(f"{icon} {label}: {detail or fallback}{elapsed}", fg=color)
+        self.results[name] = status
+
+    def finish(self):
+        self._clear()
+        if self.results:
+            counts = [
+                f"{sum(s == status for s in self.results.values())} {label}"
+                for status, label in (
+                    ("passed", "passed"),
+                    ("attention", "need attention"),
+                    ("skipped", "skipped"),
+                )
+            ]
+            line("Results · " + " · ".join(counts), bold=True)
+            click.echo()
+
+
 def model_details(model, *, output_tokens, edited=False):
     """Show published model information without changing any request settings."""
 
@@ -126,16 +237,27 @@ def model_details(model, *, output_tokens, edited=False):
 
     reasoning = model.get("reasoning") or {}
     levels = reasoning.get("supported_efforts") or []
+    level_text = ", ".join(levels) if levels else "Not listed"
+    default_text = reasoning.get("default_effort") or "Not listed"
+    if not levels and isinstance(reasoning.get("default_enabled"), bool):
+        level_text = (
+            "Always on"
+            if reasoning.get("mandatory") is True
+            else "Thinking on/off; no named levels listed"
+            if reasoning.get("mandatory") is False
+            else "Thinking available; named levels not listed"
+        )
+        default_text = "Thinking on" if reasoning["default_enabled"] else "Thinking off"
     click.echo()
     line(f"Model details · {model['id']}", fg="bright_cyan", bold=True)
     for label, value in (
         ("Context window", tokens(model.get("context_length"))),
         (
-            "Maximum reply length",
+            "Reported reply ceiling",
             tokens((model.get("top_provider") or {}).get("max_completion_tokens")),
         ),
-        ("Reasoning levels", ", ".join(levels) if levels else "Not listed"),
-        ("Default reasoning", reasoning.get("default_effort") or "Not listed"),
+        ("Reasoning levels", level_text),
+        ("Default reasoning", default_text),
         ("Setup check limit", f"{output_tokens:,} tokens per reply (checks only)"),
     ):
         line(f"{label:<25} {value}")
@@ -146,4 +268,22 @@ def model_details(model, *, output_tokens, edited=False):
         dim=True,
     )
     line("Setup checks do not measure maximum limits.", dim=True)
+    line(
+        "The reply ceiling is metadata, not your per-reply budget. Input, reasoning and the answer share the context window.",
+        dim=True,
+    )
+    context = model.get("context_length")
+    ceiling = (model.get("top_provider") or {}).get("max_completion_tokens")
+    if (
+        isinstance(context, int)
+        and isinstance(ceiling, int)
+        and context > 0
+        and ceiling >= context * 0.8
+    ):
+        line(
+            f"A reply using this whole ceiling would leave only {max(0, context - ceiling):,} tokens for input. Do not use it as an everyday reply budget."
+            if ceiling < context
+            else "This ceiling meets or exceeds the context window. Verify the server limits before using it as a reply budget.",
+            fg="yellow",
+        )
     click.echo()
