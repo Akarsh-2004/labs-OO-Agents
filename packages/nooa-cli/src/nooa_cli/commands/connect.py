@@ -149,7 +149,7 @@ def command(
             checks=approval != "none", output_tokens=output_tokens, budget_tokens=budget_tokens
         )
         if approval != "none" and not yes:
-            if not confirm("Approve API checks within this budget?", default=False):
+            if not confirm("Approve API checks within this budget?", default=True):
                 click.echo("No API checks approved. Run with --no-probe for manual setup.")
                 return
         view.step(1, "Connection")

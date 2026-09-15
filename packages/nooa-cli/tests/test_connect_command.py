@@ -664,6 +664,43 @@ def test_declining_initial_approval_makes_no_calls_or_writes(tmp_path, monkeypat
     assert not path.exists()
 
 
+def test_initial_approval_defaults_to_yes(tmp_path, monkeypatch):
+    import httpx
+
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        return httpx.Response(200, json=response_body("chat"))
+
+    mock_http(monkeypatch, handle)
+    path = tmp_path / "models.yaml"
+    result = CliRunner().invoke(
+        command,
+        [
+            "model",
+            "--as",
+            "local",
+            "--endpoint",
+            "https://api.test/v1",
+            "--api-style",
+            "chat",
+            "--api-key-env",
+            "",
+            "--no-catalogue",
+            "--probe",
+            "minimal",
+            "--output",
+            str(path),
+        ],
+        input="\nn\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert "Approve API checks within this budget? [Y/n]" in result.output
+    assert len(requests) == 1
+    assert not path.exists()  # Saving remains a separate choice.
+
+
 @pytest.mark.parametrize(
     "provider,base,style,key_env",
     [
