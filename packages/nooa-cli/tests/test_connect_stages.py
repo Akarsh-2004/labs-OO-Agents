@@ -26,6 +26,25 @@ BASE = [
 ]
 
 
+def test_explicit_prompt_key_keeps_stage_json_clean(monkeypatch):
+    monkeypatch.delenv("STAGE_TEST_KEY", raising=False)
+    sent = []
+
+    def handle(request):
+        sent.append(request)
+        assert request.headers["authorization"] == "Bearer pasted-test-key"
+        return httpx.Response(200, json=response_body("chat"))
+
+    mock_http(monkeypatch, handle)
+    result = CliRunner().invoke(
+        command, [*BASE, "--stage", "routing", "--prompt-key"], input="pasted-test-key\n"
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["ok"] is True
+    assert len(sent) == 1
+    assert "pasted-test-key" not in result.output
+
+
 @pytest.mark.parametrize(
     "stage,count", [("routing", 1), ("tools", 1), ("reasoning", 2), ("session", 3), ("all", 7)]
 )

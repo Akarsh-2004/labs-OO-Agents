@@ -92,6 +92,7 @@ def diagnostic_context(
     output_tokens=200,
     reasoning_output_tokens=4096,
     stage=None,
+    discovery_succeeded=None,
 ):
     """Describe the run without credentials, registry contents, or raw arguments."""
     import os
@@ -100,11 +101,13 @@ def diagnostic_context(
 
     import yaml
 
+    from nooa._connect_diagnostics import installation_context
     from nooa._version import __version__
     from nooa.connect import normalize_endpoint
     from nooa.llm_config import llm_config_chain
 
     context = {
+        **installation_context(),
         "target_file": str(Path(target).expanduser().resolve()) if target else None,
         "working_directory": str(Path.cwd()),
         "alias": alias,
@@ -115,20 +118,42 @@ def diagnostic_context(
         "output_tokens": output_tokens,
         "reasoning_output_tokens": reasoning_output_tokens,
         "credential_source": "pasted"
-        if api_key
+        if api_key and (not api_key_env or api_key != os.environ.get(api_key_env))
         else "environment_or_secrets"
         if api_key_env
         else "none",
         "credential_available": bool(api_key or (api_key_env and os.environ.get(api_key_env))),
         "interface_timeout_seconds": 30,
         "reasoning_timeout_seconds": 120,
+        "discovery_succeeded": discovery_succeeded,
+        "proxy_variables_set": {
+            name: bool(os.environ.get(name))
+            for name in (
+                "HTTPS_PROXY",
+                "HTTP_PROXY",
+                "NO_PROXY",
+                "https_proxy",
+                "http_proxy",
+                "no_proxy",
+            )
+        },
     }
     override = os.environ.get("NOOA_LLM_TRANSPORT")
     context["transport_override"] = (
         override if override in {None, "direct", "litellm"} else "invalid"
     )
     try:
-        context["registry_files"] = [str(p) for p in llm_config_chain()]
+        context["registry_files"] = [str(p.resolve()) for p in llm_config_chain()]
+        if target:
+            context["target_in_registry_chain"] = (
+                context["target_file"] in context["registry_files"]
+            )
+            if not context["target_in_registry_chain"]:
+                context["target_load_note"] = (
+                    "Target is not in the current registry chain. Saved entries will not load "
+                    "from this working directory unless the target is added to the chain; "
+                    "they may load when running in the target project."
+                )
         found = entries().get(alias) if alias else None
         context["effective_alias_source"] = str(found[1]) if found else None
     except (OSError, ValueError, yaml.YAMLError):
@@ -150,14 +175,22 @@ def diagnostic_context(
                     "interfaces",
                     "--endpoint",
                     address,
-                    "--api-key-env",
-                    api_key_env or "",
+                    *(
+                        ["--prompt-key"]
+                        if context["credential_source"] == "pasted"
+                        else ["--api-key-env", api_key_env or ""]
+                    ),
                     "--output-tokens",
                     str(output_tokens),
                     "--budget-tokens",
-                    str(remaining),
+                    str(min(remaining, 3 * (output_tokens + 512))),
                 ]
             )
+    if context["credential_source"] == "pasted":
+        context["credential_note"] = (
+            "The pasted key is not included. Rerun with --prompt-key; --api-key-env only works "
+            "if that variable contains the intended key in the rerun environment."
+        )
 
     # Even filenames/model IDs must not echo an accidentally pasted active key.
     def scrub(value):
@@ -167,6 +200,8 @@ def diagnostic_context(
                     value = value.replace(secret, "[redacted]")
         elif isinstance(value, list):
             value = [scrub(item) for item in value]
+        elif isinstance(value, dict):
+            value = {key: scrub(item) for key, item in value.items()}
         return value
 
     return {key: scrub(value) for key, value in context.items()}

@@ -16,6 +16,7 @@ import math
 import os
 import re
 import tempfile
+import time
 from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import aclosing
@@ -838,6 +839,9 @@ def diagnostic_prompt(
     stage: str, entry: dict, checks: dict, *, run_context: dict | None = None
 ) -> str:
     """Safe, copyable handoff for a person or agent; no credentials or raw bodies."""
+    from nooa._connect_diagnostics import installation_context
+
+    installation = installation_context()
     context = {
         key: entry[key]
         for key in (
@@ -870,6 +874,10 @@ def diagnostic_prompt(
                 "detail",
                 "reason",
                 "checked_at",
+                "elapsed_seconds",
+                "error_chain",
+                "timeout_kind",
+                "request_shape",
                 "status_code",
                 "reasoning_observed",
                 "answer_correct",
@@ -888,12 +896,8 @@ def diagnostic_prompt(
     }
     return (
         f"Diagnose and fix NOOA Connect stage {stage!r}. "
-        "First read the nooa-agent-authoring skill at skills/nooa-agent-authoring/SKILL.md "
-        "in the NOOA checkout, plus docs/model-connect.md and docs/model-configuration.md. "
-        "If no checkout is available, retrieve the skill and its companion docs with "
-        "`git clone --depth 1 https://github.com/NVIDIA-NeMo/labs-OO-Agents.git nooa-reference`, "
-        "then read nooa-reference/skills/nooa-agent-authoring/SKILL.md. Prefer the source "
-        "version matching the running installation when investigating behaviour. "
+        "First read the nooa-agent-authoring skill and companion docs located by the "
+        "installation references below. "
         "Inspect the configuration, credential lookup, and actual request construction. "
         "Model listing alone does not validate credentials. Distinguish rejection, missing "
         "evidence, and unsupported features; do not infer support from an HTTP success alone. "
@@ -907,7 +911,8 @@ def diagnostic_prompt(
             {
                 "connection": context,
                 "checks": outcomes,
-                "run_context": {
+                "run_context": installation
+                | {
                     key: value
                     for key, value in (run_context or {}).items()
                     if key
@@ -929,6 +934,11 @@ def diagnostic_prompt(
                         "interface_timeout_seconds",
                         "reasoning_timeout_seconds",
                         "rerun_command",
+                        "discovery_succeeded",
+                        "proxy_variables_set",
+                        "target_in_registry_chain",
+                        "target_load_note",
+                        "credential_note",
                     }
                 },
             },
@@ -1018,19 +1028,30 @@ async def run_steps(
                 raise ValueError(f"Set {entry['api_key_env']} before probing, or approve none")
         spent += probe.token_estimate
         yield ProbeUpdate(probe.name, {"outcome": "running"})
+        started = time.monotonic()
+        deadline = asyncio.timeout(120 if probe.name.startswith("level:") else 30)
+        record["request_shape"] = {
+            "api_style": style,
+            "output_tokens": probe.body[required_cap],
+            **{k: deepcopy(probe.body[k]) for k in ("store", "include") if k in probe.body},
+        }
         try:
-            async with asyncio.timeout(120 if probe.name.startswith("level:") else 30):
+            async with deadline:
                 response, settings_sent = await _run_probe(proposal.alias, entry, probe, key)
             usage = response.usage
             reasoning = bool(response.reasoning or (usage and usage.reasoning_tokens))
             tool = any(call.name == "probe_tool" for call in response.tool_calls)
             tokens = usage.input_tokens + usage.output_tokens if usage else 0
         except Exception as exc:
+            from nooa._connect_diagnostics import timeout_details
+
             status = getattr(exc, "status_code", None)
             record["error"] = type(exc).__name__
+            record["elapsed_seconds"] = round(time.monotonic() - started, 3)
             if isinstance(status, int):
                 record["status_code"] = status
                 record["outcome"] = "rejected" if status == 400 else "not_probed"
+            record.update(timeout_details(exc, deadline_expired=deadline.expired()))
             if (
                 probe.name == "routing"
                 and entry.get("include") == ["reasoning.encrypted_content"]
@@ -1047,6 +1068,7 @@ async def run_steps(
             continue
         record.update(
             outcome="accepted",
+            elapsed_seconds=round(time.monotonic() - started, 3),
             client="unifiedllm",
             request=deepcopy(probe.body),
             reasoning_observed=reasoning,

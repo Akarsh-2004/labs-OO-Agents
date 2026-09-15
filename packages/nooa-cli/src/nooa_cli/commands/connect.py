@@ -142,12 +142,12 @@ def command(
             input_file=input_file,
             output=output,
             yes=yes,
+            prompt_key=prompt_key,
             invalid_options=[
                 name
                 for name, used in {
                     "--no-probe": no_probe,
                     "--probe": probe != "all",
-                    "--prompt-key": prompt_key,
                     "--provider": provider,
                     "--catalogue-model": catalogue_model,
                     "--reasoning-template": reasoning_template,
@@ -378,6 +378,8 @@ def command(
         )
         if editing is None:
             view.step(2, "Model")
+        discovery_succeeded = None
+        discovery_endpoint = None
         if not model:
             click.echo("Connecting to the server and listing models...")
             try:
@@ -385,6 +387,8 @@ def command(
                     connect.discover(endpoint, api_style=discovery_style, api_key=api_key)
                 )
             except connect.DiscoveryError as exc:
+                discovery_succeeded = False
+                discovery_endpoint = endpoint
                 click.echo(f"Could not list models: {exc}", err=True)
                 if exc.status_code in {401, 403}:
                     raise click.ClickException(
@@ -393,6 +397,8 @@ def command(
                 model = prompt("Exact model ID (if known; Ctrl-C to cancel)")
             else:
                 endpoint = found.api_base
+                discovery_succeeded = True
+                discovery_endpoint = endpoint
                 names = [item["id"] for item in found.models]
                 click.echo(
                     f"Server listed {len(names)} model(s). Credentials are checked next. Type part of a name to search, then Tab to select."
@@ -450,6 +456,9 @@ def command(
                                 output_tokens=output_tokens,
                                 reasoning_output_tokens=reasoning_output_tokens,
                                 stage="interfaces",
+                                discovery_succeeded=discovery_succeeded
+                                if endpoint == discovery_endpoint
+                                else None,
                             ),
                         )
                     )

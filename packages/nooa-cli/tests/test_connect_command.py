@@ -470,7 +470,7 @@ def test_authentication_recovery_keeps_budget_and_secrets(tmp_path, monkeypatch,
     assert context["interface_timeout_seconds"] == 30
     assert "--stage interfaces" in context["rerun_command"]
     assert "skills/nooa-agent-authoring/SKILL.md" in handoff
-    assert "git clone --depth 1" in handoff
+    assert "git clone" not in handoff
     assert litellm.suppress_debug_info is False
     assert len(sent) == (6 if recover else 3)
     if recover:

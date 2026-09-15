@@ -33,9 +33,10 @@ def run_stage(
     input_file,
     output,
     yes,
+    prompt_key=False,
     invalid_options=(),
 ):
-    """Return an exit status; never prompt, expose a key, or implicitly save."""
+    """Return JSON; only an explicit --prompt-key enables a masked stdin prompt."""
     import asyncio
     import json
     import os
@@ -133,7 +134,13 @@ def run_stage(
             entry = proposal.entry
             if context_window:
                 entry["context_window"] = context_window
-            key = os.environ.get(key_env) if key_env else None
+            key = (
+                click.prompt("API key (used only for this check)", hide_input=True, err=True)
+                if prompt_key and stage != "plan"
+                else os.environ.get(key_env)
+                if key_env
+                else None
+            )
             if stage != "plan" and key_env and not key:
                 raise click.UsageError("Configured credential variable is unset or empty")
             if stage not in {"discover", "plan"} and not model:
@@ -244,6 +251,7 @@ def run_stage(
         output_tokens=output_tokens,
         reasoning_output_tokens=reasoning_output_tokens,
         stage=stage,
+        discovery_succeeded=ok if stage == "discover" else None,
     )
     report = {
         "version": 1,

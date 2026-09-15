@@ -52,14 +52,22 @@ uv run nooa connect --stage save --input model-plan.json --output llm_config.yam
 The diagnostic handoff names the target file, working directory, active registry
 files and effective alias source, installed version, credential availability
 (never the value), caps, timeouts and remaining budget. Interface failures include
-a quoted CLI reproduction command when budget remains. It locates the
-`nooa-agent-authoring` skill at `skills/nooa-agent-authoring/SKILL.md` and gives a
-repository clone command when no checkout is available. Read `docs/model-connect.md`
-and `docs/model-configuration.md` alongside it. The handoff is not new permission
+a quoted CLI reproduction command capped at three basic checks when budget remains.
+Timeouts are `not_confirmed`, with elapsed time and exception-chain class names;
+they do not prove that the server received the request. The handoff includes
+same-run discovery status, proxy-variable presence (never values), safe planned
+request settings, and the running package location. It resolves absolute local
+skill/doc paths from that installation, or supplies a checkout command pinned
+to its recorded commit or release version. Unknown revisions are stated, never
+silently replaced by main. A target outside the current registry chain is called
+out explicitly. The handoff is not new permission
 to spend money or overwrite other aliases.
 
 Use explicit endpoint/interface/key-variable options in stage mode; wizard
-presets, pasted keys and `--no-probe` do not apply. `--budget-tokens` defaults to
+presets and `--no-probe` do not apply. Stages normally never prompt; explicitly
+passing `--prompt-key` enables one masked credential prompt on stderr, leaving
+JSON on stdout. Pasted keys are not persisted or included in reproduction commands.
+`--budget-tokens` defaults to
 131,072; `--output-tokens` controls connection/tool check caps, while
 `--reasoning-output-tokens` controls reasoning checks (4,096 by default). Session checks retain their
 separate documented cap. Redirect stdout to keep stage reports; `--output` is

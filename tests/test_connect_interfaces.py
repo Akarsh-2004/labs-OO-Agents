@@ -84,8 +84,21 @@ async def test_failed_interface_is_not_offered_but_other_interfaces_are_checked(
     assert len(calls) == 3
     assert "secret must not escape" not in repr(result)
     assert result.results["responses"].entry["provenance"]["probes"]["routing"]["outcome"] == (
-        "rejected" if failure == 400 else "not_probed"
+        "rejected" if failure == 400 else "not_confirmed" if failure == "timeout" else "not_probed"
     )
+    if failure == "timeout":
+        record = result.results["responses"].entry["provenance"]["probes"]["routing"]
+        # LiteLLM may replace the original httpx exception instead of chaining it.
+        # Report the actual available class; do not invent connect/read attribution.
+        assert record["timeout_kind"] in {"ReadTimeout", "Timeout", "APITimeoutError"}
+        assert record["error_chain"]
+        assert record["elapsed_seconds"] >= 0
+        assert record["request_shape"] == {
+            "api_style": "responses",
+            "output_tokens": 200,
+            "store": False,
+            "include": ["reasoning.encrypted_content"],
+        }
 
 
 @pytest.mark.asyncio

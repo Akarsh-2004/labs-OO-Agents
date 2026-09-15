@@ -37,7 +37,11 @@ def test_target_and_effective_source_are_distinct(tmp_path, monkeypatch):
         "interfaces", {}, {}, run_context={**context, "api_key": "secret"}
     )
     assert '"api_key"' not in prompt
-    assert "git clone --depth 1" in prompt
+    assert "git clone" not in prompt
+    assert context["source_root"].startswith("/")
+    assert all(path.startswith("/") for path in context["reference_paths"])
+    assert context["target_in_registry_chain"] is False
+    assert shlex.split(context["rerun_command"])[-1] == "2136"
     assert "does not authorize additional paid calls" in prompt
 
 
@@ -59,3 +63,43 @@ def test_context_does_not_mask_broken_yaml_or_leak_pasted_key(tmp_path, monkeypa
     assert "private-secret" not in repr(context)
     assert "rerun_command" not in context
     assert context["credential_source"] == "pasted"
+
+
+def test_pasted_rerun_uses_masked_prompt_and_proxy_presence(monkeypatch):
+    monkeypatch.setenv("HTTPS_PROXY", "https://user:secret@proxy.test")
+    context = diagnostic_context(
+        model="model",
+        endpoint="https://api.test/v1",
+        api_key="pasted-secret",
+        remaining=9000,
+        stage="interfaces",
+    )
+    assert "--prompt-key" in context["rerun_command"]
+    assert "--api-key-env" not in context["rerun_command"]
+    assert context["proxy_variables_set"]["HTTPS_PROXY"] is True
+    assert "user:secret" not in repr(context)
+
+
+def test_wheel_references_pin_version_not_main(monkeypatch, tmp_path):
+    from nooa import _version
+    from nooa._connect_diagnostics import installation_context
+
+    monkeypatch.setattr(_version, "__file__", str(tmp_path / "site-packages/nooa/_version.py"))
+    monkeypatch.setattr(_version, "__version__", "1.2.3")
+    result = installation_context()
+    assert result["source_root"] is None
+    assert "checkout --detach v1.2.3" in result["reference_command"]
+    monkeypatch.setattr(_version, "__version__", "0.0.0+unknown")
+    result = installation_context()
+    assert "reference_command" not in result
+    assert "revision is unknown" in result["reference_guidance"]
+
+
+def test_wrapper_timeout_is_not_claimed_as_server_receipt():
+    from nooa._connect_diagnostics import timeout_details
+
+    details = timeout_details(TimeoutError("private"), deadline_expired=True)
+    assert details["outcome"] == "not_confirmed"
+    assert details["timeout_kind"] == "probe_deadline"
+    assert "unknown" in details["reason"]
+    assert "private" not in repr(details)
