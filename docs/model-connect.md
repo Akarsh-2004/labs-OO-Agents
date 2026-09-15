@@ -162,6 +162,8 @@ available, otherwise 8,192, bounded by the known ceiling and context window.
 mode; `--output-tokens` still controls only the small setup probes.
 The library's `configure_entry()` and `write()` enforce the same defaults,
 including on stage-save input created before these fields were required.
+Keep reply caps, and Responses `store`/`include`, at the entry's top level:
+Connect rejects copies in `extra_body` that would override those settings.
 A large ceiling can be valid while being unsuitable
 as a default: input, reasoning and the answer must fit together in the context
 window. The wizard highlights ceilings close to that window. Published

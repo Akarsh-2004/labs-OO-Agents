@@ -123,6 +123,26 @@ def test_thinking_budget_raises_only_its_level_cap():
     assert "max_tokens" not in entry["reasoning_levels"]["plain"]
 
 
+@pytest.mark.parametrize(
+    "extra", [{"max_tokens": 99999}, {"max_output_tokens": 99999}, {"include": []}, {"store": True}]
+)
+def test_extra_body_cannot_shadow_managed_defaults(extra):
+    with pytest.raises(ValueError, match="not in extra_body"):
+        connect.configure_entry(
+            {"client_type": "responses", "max_tokens": 2048, "extra_body": extra}
+        )
+
+
+def test_preserved_cap_updates_stale_provenance():
+    entry = connect.configure_entry(
+        {
+            "max_tokens": 1024,
+            "provenance": {"reply_limit": {"source": "connect_default", "value": 8192}},
+        }
+    )
+    assert entry["provenance"]["reply_limit"] == {"source": "entry", "value": 1024}
+
+
 @pytest.mark.parametrize("base_key", ["max_tokens", "max_output_tokens"])
 def test_responses_reply_alias_precedence(base_key):
     from nooa.unifiedllm import ResponsesClient

@@ -410,6 +410,19 @@ def configure_entry(entry: dict, *, reply_tokens: int | None = None) -> dict:
     opt-out from carrying encrypted reasoning on stateless Responses calls.
     """
     result = deepcopy(entry)
+    extra = result.get("extra_body") or {}
+    if not isinstance(extra, dict):
+        raise ValueError("extra_body must be a mapping")
+    responses = result.get("api_style") == "responses" or result.get("client_type") == "responses"
+    managed = {"max_tokens", "max_output_tokens", "max_completion_tokens"}
+    if responses:
+        managed |= {"include", "store"}
+    if managed & extra.keys():
+        raise ValueError(
+            "Reply limits and Responses retention settings belong on the entry, not in extra_body"
+        )
+    if "max_completion_tokens" in result:
+        raise ValueError("Use max_tokens for the saved reply limit, not max_completion_tokens")
     provenance = result.setdefault("provenance", {})
     if not isinstance(provenance, dict):
         raise ValueError("provenance must be a mapping")
@@ -445,7 +458,7 @@ def configure_entry(entry: dict, *, reply_tokens: int | None = None) -> dict:
     if bound is not None and cap > bound:
         raise ValueError(f"Reply limit {cap} exceeds the configured model limit {bound}")
     result["max_tokens"] = cap
-    if reply_tokens is not None or "reply_limit" not in provenance:
+    if reply_tokens is not None or provenance.get("reply_limit", {}).get("value") != cap:
         provenance["reply_limit"] = {"source": source, "value": cap}
     for label, patch in (result.get("reasoning_levels") or {}).items():
         thinking = patch.get("thinking") or {}
@@ -468,7 +481,6 @@ def configure_entry(entry: dict, *, reply_tokens: int | None = None) -> dict:
             raise ValueError(
                 f"Reasoning level {label!r} reply limit exceeds the model limit {bound}"
             )
-    responses = result.get("api_style") == "responses" or result.get("client_type") == "responses"
     if responses:
         result.setdefault("store", False)
         if not isinstance(result["store"], bool):
@@ -784,7 +796,7 @@ async def check_stage(
     )
     if stage == "reasoning" and not probes:
         raise ValueError("No reasoning levels configured; provide a reasoning_levels mapping")
-    entry = deepcopy(proposal.entry)
+    entry = configure_entry(proposal.entry)
     for probe in probes:
         entry["provenance"]["probes"].pop(probe.name, None)
     if api_key is None and entry.get("api_key_env"):
@@ -862,7 +874,7 @@ async def run_steps(
     """
     if approved not in {"all", "minimal", "none"}:
         raise ValueError("approved must be all, minimal or none")
-    entry = deepcopy(proposal.entry)
+    entry = configure_entry(proposal.entry)
     provenance = entry["provenance"]
     records = provenance["probes"]
     spent = 0
