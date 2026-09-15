@@ -42,6 +42,10 @@ def intro(*, checks, output_tokens, budget_tokens):
         )
         line("No retries. Caps are estimates, not billing limits.", dim=True)
         line(
+            "If encrypted reasoning is explicitly rejected, one check without it may use the same approved budget.",
+            dim=True,
+        )
+        line(
             "Includes a longer reusable prompt to measure cache reads. Dollar cost depends on your model; servers can ignore caps. Checks stop when the approved budget is exhausted.",
             dim=True,
         )

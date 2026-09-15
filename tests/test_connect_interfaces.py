@@ -160,19 +160,19 @@ async def test_success_status_without_expected_response_shape_is_inconclusive(
 
 
 @pytest.mark.asyncio
-async def test_plain_responses_probe_does_not_require_optional_replay_fields(monkeypatch):
+async def test_responses_probe_recovers_from_explicit_include_rejection(monkeypatch):
     async def post(self, url, **kwargs):
         body = kwargs["json"]
         if url.endswith("/responses") and "include" not in body:
             assert body["store"] is False
             return httpx.Response(200, json=REPLIES["responses"])
-        return httpx.Response(400)
+        return httpx.Response(400, json={"error": {"message": "Unsupported field include"}})
 
     mock_post(monkeypatch, post)
     _, result = await check()
     assert result.accepted == ("responses",)
     entry = result.results["responses"].entry
-    assert "include" not in entry
+    assert entry["include"] == []
     assert "encrypted_reasoning" not in entry
 
 

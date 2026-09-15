@@ -101,7 +101,7 @@ def _reasoning_values(response):
 
 async def session_steps(alias, entry, *, api_key, budget_tokens):
     """Three calls on one client; no retry, invented reasoning, or tool execution."""
-    from nooa.connect import ProbeUpdate
+    from nooa.connect import ProbeUpdate, _include_rejected
     from nooa.context_blocks.formatter import OpenAIProviderFormatter, ResponsesProviderFormatter
     from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
     from nooa.context_blocks.renderer import render_context
@@ -253,6 +253,10 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
                 status = getattr(exc, "status_code", None)
                 if isinstance(status, int):
                     record["status_code"] = status
+                if entry.get("include") == ["reasoning.encrypted_content"] and _include_rejected(
+                    exc
+                ):
+                    record["include_rejected"] = True
                 yield ProbeUpdate("session", record)
                 return
             usage = response.usage

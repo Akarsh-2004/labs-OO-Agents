@@ -31,7 +31,9 @@ async def test_probes_use_registry_entry_and_unified_call(monkeypatch, style):
 
     def create(name, config, **kwargs):
         assert name == "local"
-        assert config == before
+        assert {k: v for k, v in config.items() if k != "provenance"} == {
+            k: v for k, v in before.items() if k != "provenance"
+        }
         assert kwargs["api_key"] == "transient-secret"
         assert kwargs["retry_config"].max_retries == 0
         client = AsyncMock()

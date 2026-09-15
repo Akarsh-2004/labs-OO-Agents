@@ -75,7 +75,22 @@ budget. These are estimates, not billing limits: servers can ignore caps. Use
 incompatible reply caps, failures or insufficient budget leave the conversation
 check unconfirmed or untested. Results include sanitized counts and flags only;
 raw responses, signatures, encrypted state and captured bodies stay in memory.
-The check uses existing cache/replay defaults without forcing optional fields on.
+Responses entries use `store: false` and request
+`include: [reasoning.encrypted_content]` by default, with source `connect` recorded
+in provenance. The wizard explains that encrypted reasoning carries reasoning
+context between turns without requesting stored responses. This is a compatibility
+request, not a guarantee of reasoning availability; current native OpenAI APIs may
+return that state automatically. See [OpenAI's reasoning guide](https://developers.openai.com/api/docs/guides/reasoning).
+
+A 400/422 explicitly rejecting `include` or `encrypted_content` disables the option
+and records a sanitized rejection. Authentication, rate limits, server failures,
+and invalid input-history errors do not change it. The saved `include: []` opt-out
+omits the field on the wire, including on native endpoints. A routing rejection
+can lead to one new capped check without the option, charged to the original
+budget; no unchanged request is retried. A session rejection stops the conversation
+check and leaves retention unconfirmed. Reconnecting to the same route preserves
+the recorded rejection; changing routes tests the default again. Cache settings
+are still tested without overrides.
 `--no-probe` disables these calls too; `--yes` explicitly approves the selected
 checks as well as saving. Library frontends opt in with `plan(..., session_checks=True)`.
 

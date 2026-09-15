@@ -230,6 +230,8 @@ def command(
                 )
                 model = prompt("Model", choices=names)
         view.step(3, "Connection checks")
+        if api_style in {None, "responses"}:
+            view.line(connect.ENCRYPTED_REASONING_EXPLANATION, dim=True)
         if not api_style:
             available = ("chat", "responses", "anthropic")
             if approval != "none":
@@ -424,9 +426,7 @@ def command(
             remaining_estimate += TOKEN_RESERVATION
         proposal = replace(
             proposal,
-            budget_tokens=remaining_estimate
-            if budget_tokens is None
-            else max(0, budget_tokens - interface_spent),
+            budget_tokens=max(0, budget_tokens - interface_spent),
         )
         if interfaces:
             proposal.entry["provenance"]["interfaces"] = {

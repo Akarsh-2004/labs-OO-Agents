@@ -16,6 +16,7 @@ import math
 import os
 import re
 import tempfile
+from collections import deque
 from collections.abc import AsyncIterator
 from contextlib import aclosing
 from copy import deepcopy
@@ -30,6 +31,50 @@ import yaml
 
 CATALOGUE_URL = "https://openrouter.ai/api/v1/models"
 TEMPLATES = ("effort", "adaptive", "budget", "toggle", "thinking")
+ENCRYPTED_REASONING_EXPLANATION = (
+    "Responses setup asks the server not to store replies. Connect requests encrypted "
+    "reasoning so NOOA can carry the model's reasoning context into later turns and tool steps."
+)
+
+
+def _include_rejected(exc: Exception) -> bool:
+    """Recognize a field rejection, never persist provider error text."""
+    status = getattr(exc, "status_code", None)
+    if status not in {400, 422}:
+        return False
+    body = getattr(exc, "body", None)
+    error = body.get("error", body) if isinstance(body, dict) else {}
+    param = error.get("param") if isinstance(error, dict) else None
+    message = str(exc).lower()
+    wrapped_param = re.search(r"""["']param["']\s*:\s*["']([^"']+)""", message)
+    if param is None and wrapped_param:
+        param = wrapped_param.group(1)
+    if isinstance(param, str) and not (
+        param == "include" or param.startswith("include[") or param == "reasoning.encrypted_content"
+    ):
+        return False  # Rejected history/model fields are not include-option rejection.
+    return bool(
+        re.search(r"\b(include|encrypted_content)\b", message)
+        and re.search(
+            r"unsupported|unknown|unrecognized|not supported|not allowed|invalid|reject", message
+        )
+    )
+
+
+def _disable_encrypted_reasoning(entry: dict, status: int) -> dict:
+    # Explicit empty include suppresses the runtime's native-endpoint default too.
+    entry["include"] = []
+    record = {
+        "source": "connect",
+        "outcome": "rejected",
+        "status_code": status,
+        "reason": "The endpoint rejected encrypted reasoning; omitted from requests. Reasoning replay may be unavailable.",
+        "checked_at": datetime.now(UTC).isoformat(),
+    }
+    entry["provenance"]["encrypted_reasoning"] = record
+    return record
+
+
 _RESERVED = {
     "model",
     "messages",
@@ -464,6 +509,20 @@ def plan(
         entry["reasoning_default"] = default
     if api_style == "responses":
         entry["store"] = False
+        entry["include"] = ["reasoning.encrypted_content"]
+        provenance["encrypted_reasoning"] = {"source": "connect", "outcome": "not_probed"}
+        route_keys = ("model_name", "api_base", "api_key_env", "api_style")
+        if (
+            existing_entry
+            and all(existing_entry.get(key) == entry.get(key) for key in route_keys)
+            and existing_entry.get("include") == []
+            and existing_entry.get("provenance", {}).get("encrypted_reasoning", {}).get("outcome")
+            == "rejected"
+        ):
+            entry["include"] = []
+            provenance["encrypted_reasoning"] = deepcopy(
+                existing_entry["provenance"]["encrypted_reasoning"]
+            )
     token_key = "max_output_tokens" if api_style == "responses" else "max_tokens"
     body = {
         "model": model,
@@ -473,9 +532,8 @@ def plan(
         ],
     }
     if api_style == "responses":
-        # Do not make basic interface detection depend on optional replay
-        # fields. Ask only that the probe not be persisted on the server.
         body["store"] = False
+        body["include"] = list(entry["include"])
     probes = [Probe("routing", body, output_tokens + 512)]
     tool_body = deepcopy(body)
     tool_body["input" if api_style == "responses" else "messages"][0]["content"] = (
@@ -606,13 +664,19 @@ async def run_steps(
     spent = 0
     stopped = False
     key = api_key
-    for probe in proposal.probes:
+    pending = deque(proposal.probes)
+    while pending:
+        probe = pending.popleft()
+        if entry.get("include") == [] and "include" in probe.body:
+            probe = replace(probe, body={**probe.body, "include": []})
         previous = records.get(probe.name, {})
         if (
             previous.get("outcome") == "accepted"
             and previous.get("request") == probe.body
             and previous.get("client") == "unifiedllm"
         ):
+            if probe.name == "routing" and entry.get("include"):
+                provenance["encrypted_reasoning"]["outcome"] = "accepted"
             yield ProbeUpdate(
                 probe.name, {**deepcopy(previous), "reason": "previous result reused"}
             )
@@ -658,7 +722,7 @@ async def run_steps(
         yield ProbeUpdate(probe.name, {"outcome": "running"})
         try:
             async with asyncio.timeout(30):
-                response = await _run_probe(proposal.alias, proposal.entry, probe, key)
+                response = await _run_probe(proposal.alias, entry, probe, key)
             usage = response.usage
             reasoning = bool(response.reasoning or (usage and usage.reasoning_tokens))
             tool = any(call.name == "probe_tool" for call in response.tool_calls)
@@ -669,6 +733,17 @@ async def run_steps(
             if isinstance(status, int):
                 record["status_code"] = status
                 record["outcome"] = "rejected" if status == 400 else "not_probed"
+            if (
+                probe.name == "routing"
+                and entry.get("include") == ["reasoning.encrypted_content"]
+                and _include_rejected(exc)
+            ):
+                rejection = _disable_encrypted_reasoning(entry, status)
+                yield ProbeUpdate("encrypted_reasoning", deepcopy(rejection))
+                # A different candidate, once, charged as another capped request.
+                pending.appendleft(probe)
+                yield ProbeUpdate(probe.name, deepcopy(record))
+                continue
             stopped = probe.name == "routing" or status in {401, 403}
             yield ProbeUpdate(probe.name, deepcopy(record))
             continue
@@ -684,6 +759,8 @@ async def run_steps(
         )
         spent += max(0, tokens - probe.token_estimate)
         yield ProbeUpdate(probe.name, deepcopy(record))
+        if probe.name == "routing" and entry.get("include"):
+            provenance["encrypted_reasoning"]["outcome"] = "accepted"
     if records.get("tools", {}).get("tool_observed"):
         entry["tools"] = True  # No call is not evidence that tools are unsupported.
     provenance["requests_accepted"] = [
@@ -708,7 +785,7 @@ async def run_steps(
             async with aclosing(
                 session_steps(
                     proposal.alias,
-                    proposal.entry,
+                    entry,
                     api_key=key,
                     budget_tokens=max(0, proposal.budget_tokens - spent),
                 )
@@ -716,6 +793,11 @@ async def run_steps(
                 async for update in steps:
                     if update.outcome["outcome"] != "running":
                         checks[update.name] = update.outcome
+                    if update.outcome.get("include_rejected"):
+                        rejection = _disable_encrypted_reasoning(
+                            entry, update.outcome["status_code"]
+                        )
+                        yield ProbeUpdate("encrypted_reasoning", deepcopy(rejection))
                     yield update
             provenance["tokens_charged_to_budget"] += checks.get("session", {}).get(
                 "tokens_charged_to_budget", 0
