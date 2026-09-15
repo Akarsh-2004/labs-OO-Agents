@@ -72,6 +72,7 @@ async def test_discovery_keeps_input_and_context_distinct(monkeypatch):
     assert found.models[0]["context_window"] == 120000
     merged = connect.model_metadata("model", endpoint_model=found.models[0])
     assert merged["context_length"] == 100000
+    assert merged["limit_sources"]["context_length"] == "endpoint_input_limit"
     assert merged["endpoint_limits"]["context_window"] == 120000
 
 

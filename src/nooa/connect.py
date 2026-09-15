@@ -543,7 +543,11 @@ def model_metadata(
     input_limit = reported.get("max_input_tokens")
     if context or input_limit:
         result["context_length"] = min(v for v in (context, input_limit) if v)
-        sources["context_length"] = "endpoint" if context else "endpoint_input_limit"
+        sources["context_length"] = (
+            "endpoint_input_limit"
+            if input_limit and (context is None or input_limit < context)
+            else "endpoint"
+        )
     if "max_output_tokens" in reported:
         result["top_provider"] = {
             **(result.get("top_provider") or {}),
