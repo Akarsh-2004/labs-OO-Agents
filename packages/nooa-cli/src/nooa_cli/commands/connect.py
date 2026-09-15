@@ -37,6 +37,11 @@ from ._connect_stages import STAGES
     help="Environment variable name, never the key itself (otherwise prompted).",
 )
 @click.option("--catalogue-model", help="Explicit OpenRouter model ID to use as metadata.")
+@click.option(
+    "--discovery-file",
+    type=click.Path(exists=True, dir_okay=False),
+    help="JSON output from --stage discover; reuse endpoint limits without another request.",
+)
 @click.option("--prompt-key", is_flag=True, help="Read a masked key; offer to save it at the end.")
 @click.option("--no-catalogue", is_flag=True, help="Do not fetch public model metadata.")
 @click.option(
@@ -101,6 +106,7 @@ def command(
     api_key_env,
     prompt_key,
     catalogue_model,
+    discovery_file,
     no_catalogue,
     reasoning_template,
     levels,
@@ -143,6 +149,7 @@ def command(
             output=output,
             yes=yes,
             prompt_key=prompt_key,
+            discovery_file=discovery_file,
             invalid_options=[
                 name
                 for name, used in {
@@ -184,11 +191,11 @@ def command(
     )
     from ._connect_registry import credential_names, diagnostic_context, entries, shadowing_source
 
-    async def show_checks(events, *, reasoning_levels=None):
+    async def show_checks(events, *, reasoning_levels=None, summary=True):
         with view.quiet_provider_messages():
-            return await display_checks(events, reasoning_levels=reasoning_levels)
+            return await display_checks(events, reasoning_levels=reasoning_levels, summary=summary)
 
-    async def display_checks(events, *, reasoning_levels=None):
+    async def display_checks(events, *, reasoning_levels=None, summary=True):
         progress = view.CheckProgress()
         try:
             async with aclosing(events) as steps:
@@ -203,7 +210,7 @@ def command(
                     )
                     progress.update(event.name, event.outcome, missing_reasoning=bool(missing))
         finally:
-            progress.finish()
+            progress.finish(summary=summary)
         raise click.ClickException("Checks ended without a result.")
 
     path = Path(output) if output else get_user_dir("llm_config.yaml")
@@ -380,6 +387,12 @@ def command(
             view.step(2, "Model")
         discovery_succeeded = None
         discovery_endpoint = None
+        endpoint_models = ()
+        if discovery_file:
+            from ._connect_stages import read_discovery
+
+            endpoint_models = read_discovery(discovery_file, endpoint)
+            discovery_endpoint = endpoint
         if not model:
             click.echo("Connecting to the server and listing models...")
             try:
@@ -399,6 +412,7 @@ def command(
                 endpoint = found.api_base
                 discovery_succeeded = True
                 discovery_endpoint = endpoint
+                endpoint_models = found.models
                 names = [item["id"] for item in found.models]
                 click.echo(
                     f"Server listed {len(names)} model(s). Credentials are checked next. Type part of a name to search, then Tab to select."
@@ -411,6 +425,8 @@ def command(
             available = ("chat", "responses", "anthropic")
             if approval != "none":
                 interface_spent = 0
+                retry_styles = ("chat", "responses", "anthropic")
+                interface_timeout = 30
                 while True:
                     interfaces = asyncio.run(
                         show_checks(
@@ -422,7 +438,10 @@ def command(
                                 budget_tokens=max(0, budget_tokens - interface_spent),
                                 output_tokens=output_tokens,
                                 api_key=api_key,
-                            )
+                                styles=retry_styles,
+                                timeout_seconds=interface_timeout,
+                            ),
+                            summary=False,
                         )
                     )
                     interface_spent += interfaces.tokens_charged_to_budget
@@ -430,14 +449,21 @@ def command(
                     available = interfaces.accepted
                     if available:
                         break
-                    view.line(
-                        "Could not confirm a working connection. Listing models does not validate the key.",
-                        fg="yellow",
-                    )
                     failed_checks = {
                         style: r.entry["provenance"]["probes"]["routing"]
                         for style, r in interfaces.results.items()
                     }
+                    slow = (
+                        endpoint == discovery_endpoint
+                        and discovery_succeeded
+                        and all(r.get("timeout_kind") for r in failed_checks.values())
+                    )
+                    view.line(
+                        "Model listing succeeded, but model responses timed out; the route may be slow."
+                        if slow
+                        else "Could not confirm a working connection. Listing models does not validate the key.",
+                        fg="yellow",
+                    )
                     click.echo(
                         "Agent diagnostic prompt:\n"
                         + connect.diagnostic_prompt(
@@ -456,6 +482,7 @@ def command(
                                 output_tokens=output_tokens,
                                 reasoning_output_tokens=reasoning_output_tokens,
                                 stage="interfaces",
+                                interface_timeout_seconds=interface_timeout,
                                 discovery_succeeded=discovery_succeeded
                                 if endpoint == discovery_endpoint
                                 else None,
@@ -477,18 +504,31 @@ def command(
                     )
                     action = prompt(
                         "Next step",
-                        choices=("key", "server", "retry", "cancel"),
-                        default="key",
+                        choices=("key", "server", "retry", "longer", "cancel"),
+                        default="longer" if slow else "key",
                         labels={
                             "key": "Change key",
                             "server": "Edit server and model",
                             "retry": "Try again unchanged",
+                            "longer": "Retry one interface with a 120-second timeout",
                             "cancel": "Exit without saving",
                         },
                     )
                     if action == "cancel":
                         click.echo("Setup cancelled. Nothing was saved.")
                         return
+                    if action == "longer":
+                        retry_styles = (
+                            prompt(
+                                "Interface to retry",
+                                choices=("chat", "responses", "anthropic"),
+                                default=default_style,
+                            ),
+                        )
+                        interface_timeout = 120
+                        continue
+                    retry_styles = ("chat", "responses", "anthropic")
+                    interface_timeout = 30
                     if action == "key":
                         source = prompt(
                             "Key environment variable (or paste for a temporary key)",
@@ -604,6 +644,35 @@ def command(
                         raise click.ClickException("Choose one of the displayed model IDs.")
             else:
                 click.echo("No catalogue match; model limits and reasoning levels remain unknown.")
+        endpoint_model = (
+            next((item for item in endpoint_models if item.get("id") == model), None)
+            if endpoint == discovery_endpoint
+            else None
+        )
+        if (
+            endpoint_model is None
+            and candidate is not None
+            and editing is None
+            and not endpoint_models
+        ):
+            # Explicit MODEL skips the picker, not the endpoint's own limit metadata.
+            try:
+                limits_listing = asyncio.run(
+                    connect.discover(endpoint, api_style=api_style, api_key=api_key)
+                )
+            except connect.DiscoveryError:
+                view.line(
+                    "Endpoint limits unavailable; catalogue limits are fallback information.",
+                    fg="yellow",
+                )
+            else:
+                endpoint_model = next(
+                    (item for item in limits_listing.models if item.get("id") == model), None
+                )
+        if endpoint_model is not None and editing is None:
+            combined = connect.model_metadata(model, candidate, endpoint_model)
+            if combined.get("endpoint_limits"):
+                candidate = combined
         if candidate is not None:
             while True:
                 view.model_details(candidate, output_tokens=output_tokens, edited=edited_settings)
@@ -936,6 +1005,15 @@ def command(
                 f"Warning: {shadow} currently defines this alias and takes precedence over this destination. Update that file or explicitly load {path} to use this entry.",
                 fg="yellow",
             )
+        view.line(
+            f"Save summary: {result.entry['api_style']} · reply budget {result.entry['max_tokens']:,} tokens"
+        )
+        view.line(
+            "Reasoning levels: "
+            + (", ".join(result.entry.get("reasoning_levels", {})) or "none configured")
+            + "; default: "
+            + str(result.entry.get("reasoning_default", "server default"))
+        )
         if yes or confirm(f"Write model entry to {path}?", default=True):
             save_key = False
             if api_key and api_key_env and api_key != os.environ.get(api_key_env):

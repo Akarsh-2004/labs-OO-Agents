@@ -258,7 +258,7 @@ def choose_reply_limit(suggested, ceiling=None, *, source="connect_default"):
                 name: f"{'High' if name == 'high' else 'Extended'} reasoning budget — {cap:,} tokens"
                 for name, cap in larger.items()
             },
-            **{name: f"Smaller budget — {cap:,} tokens" for name, cap in smaller.items()},
+            **{name: f"{cap:,} tokens" for name, cap in smaller.items()},
             "custom": "Custom…",
         },
     )

@@ -14,7 +14,9 @@ from tests.connect_http import mock_http, response_body
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("style", ["chat", "responses", "anthropic"])
-@pytest.mark.parametrize("mode", ["success", "no-cache", "no-reasoning", "no-usage", "truncated"])
+@pytest.mark.parametrize(
+    "mode", ["success", "early-hit", "no-cache", "no-reasoning", "no-usage", "truncated"]
+)
 async def test_session_checks_observe_wire_and_usage(monkeypatch, style, mode):
     sent = []
 
@@ -57,6 +59,8 @@ async def test_session_checks_observe_wire_and_usage(monkeypatch, style, mode):
             else:
                 data["stop_reason"] = "max_tokens"
         cached = 0 if mode == "no-cache" or len(sent) < 3 else 12
+        if mode == "early-hit":
+            cached = 12 if len(sent) == 2 else 0
         if style == "anthropic":
             data["usage"]["cache_read_input_tokens"] = cached
         else:
@@ -92,8 +96,14 @@ async def test_session_checks_observe_wire_and_usage(monkeypatch, style, mode):
     assert len(sent) == 3
     assert records["session"]["outcome"] == "completed"
     assert records["cache"]["stable_prefix"]
+    assert len(records["cache"]["readings"]) == 2
+    if mode == "early-hit":
+        assert records["cache"]["cached_input_tokens"] == 12
+        assert records["cache"]["readings"][1]["cached_input_tokens"] == 0
     assert records["cache"]["outcome"] == (
-        "not_confirmed" if mode in {"no-cache", "no-usage"} else "confirmed"
+        ("not_confirmed" if style == "responses" else "warning")
+        if mode in {"no-cache", "no-usage"}
+        else "confirmed"
     )
     assert records["reasoning_retention"]["outcome"] == (
         "not_confirmed" if mode == "no-reasoning" else "confirmed"
@@ -266,7 +276,7 @@ async def test_small_cache_hit_is_not_a_success(monkeypatch):
         )
     ]
     cache = next(u.outcome for u in updates if u.name == "cache")
-    assert cache["outcome"] == "not_confirmed"
+    assert cache["outcome"] == "warning"
     assert cache["cached_input_tokens"] == 100
 
 

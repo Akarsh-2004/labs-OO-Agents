@@ -6,6 +6,12 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Connect prefers endpoint-reported limits to catalogue values, labels input-only
+  context bounds, and lets staged/offline plans reuse discovery JSON. Cache checks
+  consider both continuations without treating provider misses as setup failures.
+  Add puzzle-result feedback and a user-selected 120-second routing retry within
+  the original approved budget.
+
 - Security: the sandbox parent no longer unpickles worker bytes. Brokered `self.*`
   arguments, `self.x = value` assignments, cell return values and `return_result`
   payloads now cross as msgpack; rich values are rebuilt only from a fixed set of

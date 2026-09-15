@@ -240,7 +240,7 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
     spent = 0
     first = None
     replay = None
-    last_usage = None
+    readings = []
     observations = []
     settings_ok = True
     try:
@@ -292,7 +292,6 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
                     yield ProbeUpdate("session", record)
                     return
                 usage = response.usage
-                last_usage = usage
                 total = usage.input_tokens + usage.output_tokens if usage else 0
                 spent += max(0, total - reservation)
                 observed = bool(
@@ -378,6 +377,14 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
                 break
             observations.append(observed)
             successful_bodies.append(bodies[-1])
+            if index:
+                readings.append(
+                    {
+                        "turn": name,
+                        "input_tokens": usage.input_tokens if usage else None,
+                        "cached_input_tokens": usage.cached_input_tokens if usage else None,
+                    }
+                )
             wire = bodies[-1]
             settings_ok &= settings_on_wire(controls, wire)
             if index == 0:
@@ -414,7 +421,8 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
             else:
                 body[key][-1]["content"] = "<volatile>"
         stable = left == right
-        cached = last_usage.cached_input_tokens if last_usage else None
+        best = max(readings, key=lambda r: r["cached_input_tokens"] or 0)
+        cached = best["cached_input_tokens"]
         seed_input = first.usage.input_tokens if first.usage else 0
         markers = list(_cache_markers(successful_bodies[2]))
         explicit = bool(markers)
@@ -422,18 +430,27 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
         cache_reason = (
             "Reusable conversation cached"
             if substantial
+            else "Stable prefix changed between continuations; check the renderer and request settings"
+            if not stable
             else "Only a small portion was cached; try a longer prompt or check the server's caching support"
             if cached
             else "Cache markers were sent, but the server reported no reuse; retry later or check server support"
             if explicit
+            else "No cache reuse reported on these continuations; provider caching can vary. The model connection still works"
+            if entry["api_style"] == "chat"
             else "No cache markers or cache reads observed; check the runtime's cache defaults and server support"
         )
         yield ProbeUpdate(
             "cache",
             {
-                "outcome": "confirmed" if substantial else "not_confirmed",
+                "outcome": "confirmed"
+                if substantial
+                else "warning"
+                if stable and (explicit or entry["api_style"] == "chat")
+                else "not_confirmed",
                 "cached_input_tokens": cached,
-                "input_tokens": last_usage.input_tokens if last_usage else None,
+                "input_tokens": best["input_tokens"],
+                "readings": readings,
                 "stable_prefix": stable,
                 "marker_count": len(markers),
                 "explicit_mode": successful_bodies[2].get("prompt_cache_options", {}).get("mode")

@@ -93,6 +93,7 @@ def diagnostic_context(
     reasoning_output_tokens=4096,
     stage=None,
     discovery_succeeded=None,
+    interface_timeout_seconds=30,
 ):
     """Describe the run without credentials, registry contents, or raw arguments."""
     import os
@@ -123,7 +124,7 @@ def diagnostic_context(
         if api_key_env
         else "none",
         "credential_available": bool(api_key or (api_key_env and os.environ.get(api_key_env))),
-        "interface_timeout_seconds": 30,
+        "interface_timeout_seconds": interface_timeout_seconds,
         "reasoning_timeout_seconds": 120,
         "discovery_succeeded": discovery_succeeded,
         "proxy_variables_set": {

@@ -16,6 +16,27 @@ STAGES = (
 )
 
 
+def read_discovery(path, endpoint):
+    """Read a previous discovery result only for the selected endpoint."""
+    import json
+    from pathlib import Path
+
+    from nooa import connect
+
+    document = json.loads(Path(path).read_text())
+    data = document.get("data", document)
+    if not isinstance(data, dict) or connect.normalize_endpoint(
+        data.get("api_base", "")
+    ) != connect.normalize_endpoint(endpoint):
+        raise ValueError("Discovery metadata belongs to a different endpoint")
+    models = data.get("models")
+    if not isinstance(models, list) or not all(
+        isinstance(m, dict) and isinstance(m.get("id"), str) for m in models
+    ):
+        raise ValueError("Discovery metadata requires a models list with model IDs")
+    return models
+
+
 def run_stage(
     stage,
     *,
@@ -34,6 +55,7 @@ def run_stage(
     output,
     yes,
     prompt_key=False,
+    discovery_file=None,
     invalid_options=(),
 ):
     """Return JSON; only an explicit --prompt-key enables a masked stdin prompt."""
@@ -130,6 +152,11 @@ def run_stage(
                 reply_tokens=reply_tokens,
                 reasoning_levels=levels,
                 session_checks=stage in {"session", "all"},
+                endpoint_model=next(
+                    (m for m in read_discovery(discovery_file, endpoint) if m["id"] == model), None
+                )
+                if discovery_file
+                else None,
             )
             entry = proposal.entry
             if context_window:
@@ -193,8 +220,10 @@ def run_stage(
                     **entry["provenance"].get("session_checks", {}),
                 }
                 if stage in {"session", "all"}:
-                    required = [checks.get(name, {}) for name in ("cache", "reasoning_retention")]
-                    ok = all(r.get("outcome") == "confirmed" for r in required)
+                    ok = (
+                        checks.get("cache", {}).get("outcome") in {"confirmed", "warning"}
+                        and checks.get("reasoning_retention", {}).get("outcome") == "confirmed"
+                    )
                     if stage == "all":
                         ok &= all(
                             r.get("outcome") == "accepted"
@@ -260,6 +289,7 @@ def run_stage(
         "data": data,
         "error": error,
         "run_context": run_context,
+        "warnings": connect.entry_warnings(entry) if entry else [],
         "checks": {
             name: {k: v for k, v in record.items() if k not in {"request"}}
             for name, record in checks.items()

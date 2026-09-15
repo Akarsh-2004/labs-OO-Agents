@@ -142,6 +142,7 @@ class Probe:
     name: str
     body: dict[str, Any]
     token_estimate: int
+    timeout_seconds: float = 30
 
 
 @dataclass(frozen=True)
@@ -293,10 +294,10 @@ async def discover(
                                 "context_window",
                                 "context_length",
                                 "max_model_len",
-                                "max_input_tokens",
                             ),
                         ),
                         ("max_output_tokens", ("max_output_tokens", "max_completion_tokens")),
+                        ("max_input_tokens", ("max_input_tokens",)),
                     ):
                         for candidate in candidates:
                             value = item.get(candidate)
@@ -512,7 +513,57 @@ def configure_entry(entry: dict, *, reply_tokens: int | None = None) -> dict:
             elif result["include"] and "reasoning.encrypted_content" not in result["include"]:
                 result["include"].append("reasoning.encrypted_content")
                 provenance["encrypted_reasoning"] = {"source": "connect", "outcome": "not_probed"}
+    provenance["warnings"] = entry_warnings(result)
     return result
+
+
+def model_metadata(
+    model: str, catalogue: dict | None = None, endpoint_model: dict | None = None
+) -> dict:
+    """Merge reported limits, preferring this endpoint; never infer context by addition.
+
+    An input-only limit is a conservative context-management bound, not evidence
+    of the model's total context size. Raw limits and their meanings stay visible.
+    """
+    result = deepcopy(catalogue or {"id": model})
+    sources = result.setdefault("limit_sources", {})
+    for field, value in (
+        ("context_length", result.get("context_length")),
+        ("max_completion_tokens", (result.get("top_provider") or {}).get("max_completion_tokens")),
+    ):
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            sources.setdefault(field, "catalogue")
+    endpoint_model = endpoint_model or {}
+    reported = {}
+    for key in ("context_window", "context_length", "max_input_tokens", "max_output_tokens"):
+        value = endpoint_model.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            reported[key] = value
+    context = reported.get("context_window", reported.get("context_length"))
+    input_limit = reported.get("max_input_tokens")
+    if context or input_limit:
+        result["context_length"] = min(v for v in (context, input_limit) if v)
+        sources["context_length"] = "endpoint" if context else "endpoint_input_limit"
+    if "max_output_tokens" in reported:
+        result["top_provider"] = {
+            **(result.get("top_provider") or {}),
+            "max_completion_tokens": reported["max_output_tokens"],
+        }
+        sources["max_completion_tokens"] = "endpoint"
+    if reported:
+        result["endpoint_limits"] = reported
+    return result
+
+
+def entry_warnings(entry: dict) -> list[str]:
+    """Configuration warnings shared by the wizard, library and stage reports."""
+    return (
+        []
+        if entry.get("context_window")
+        else [
+            "Context window unknown: runtime fallback applies; supply --context-window or endpoint discovery metadata."
+        ]
+    )
 
 
 def plan(
@@ -523,6 +574,7 @@ def plan(
     api_key_env: str,
     *,
     catalogue: dict | None = None,
+    endpoint_model: dict | None = None,
     reasoning_levels: dict | None = None,
     budget_tokens: int = DEFAULT_CHECK_BUDGET,
     output_tokens: int = 200,
@@ -577,9 +629,19 @@ def plan(
             "encrypted_reasoning",
         ],
     }
-    if catalogue is not None:
+    if catalogue is not None or endpoint_model is not None:
+        catalogue = model_metadata(model, catalogue, endpoint_model)
         entry["underlying_model"] = catalogue["id"]
-        provenance["catalogue"] = {"url": CATALOGUE_URL, "id": catalogue["id"]}
+        provenance["limit_sources"] = deepcopy(catalogue.get("limit_sources", {}))
+        if catalogue.get("endpoint_limits"):
+            provenance["endpoint_limits"] = {
+                "url": api_base + "/models",
+                **catalogue["endpoint_limits"],
+            }
+        if any(
+            v == "catalogue" for v in catalogue.get("limit_sources", {}).values()
+        ) or catalogue.get("reasoning"):
+            provenance["catalogue"] = {"url": CATALOGUE_URL, "id": catalogue["id"]}
         for field, value in (
             ("context_window", catalogue.get("context_length")),
             (
@@ -682,7 +744,7 @@ def plan(
             REASONING_CHECK_PROMPT
         )
         level_body.update(params)
-        probes.append(Probe(f"level:{label}", level_body, reasoning_output_tokens + 512))
+        probes.append(Probe(f"level:{label}", level_body, reasoning_output_tokens + 512, 120))
     entry["provenance"] = provenance
     if reply_tokens is None:
         recommendation = ((catalogue or {}).get("default_parameters") or {}).get("max_tokens")
@@ -744,6 +806,7 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
     Tool replies are inspected as data; Connect never executes model calls.
     """
     from nooa.unifiedllm import RetryConfig, Tool
+    from nooa.unifiedllm.http_config import HttpConfig
     from nooa.unifiedllm.registry import client_from_config
 
     def probe_tool(value: str):
@@ -772,6 +835,7 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
         api_key=api_key,
         retry_config=RetryConfig(max_retries=0, rate_limit_extra_retries=0),
         num_retries=0,
+        http_config=HttpConfig(read_timeout=probe.timeout_seconds),
     )
     settings_sent = []
 
@@ -784,6 +848,7 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
     hooks = client._http.httpx_async.event_hooks["request"]
     hooks.append(capture)
     try:
+        params["timeout"] = probe.timeout_seconds
         response = await client.acall(messages=messages, **params)
         return response, (len(settings_sent) == 1 and all(settings_sent))
     finally:
@@ -888,6 +953,7 @@ def diagnostic_prompt(
                 "tested_reply_tokens",
                 "input_tokens",
                 "cached_input_tokens",
+                "readings",
                 "finish_reason",
             )
             if key in record
@@ -999,6 +1065,13 @@ async def run_steps(
             record["reason"] = "previous check failed" if stopped else "budget exhausted"
             yield ProbeUpdate(probe.name, deepcopy(record))
             continue
+        if (
+            not isinstance(probe.timeout_seconds, (int, float))
+            or not 1 <= probe.timeout_seconds <= 120
+        ):
+            record["reason"] = "probe timeout must be between 1 and 120 seconds"
+            yield ProbeUpdate(probe.name, deepcopy(record))
+            continue
         if probe.body.get("stream") or any(
             probe.body.get(name, 1) != 1 for name in ("n", "best_of")
         ):
@@ -1029,9 +1102,10 @@ async def run_steps(
         spent += probe.token_estimate
         yield ProbeUpdate(probe.name, {"outcome": "running"})
         started = time.monotonic()
-        deadline = asyncio.timeout(120 if probe.name.startswith("level:") else 30)
+        deadline = asyncio.timeout(probe.timeout_seconds)
         record["request_shape"] = {
             "api_style": style,
+            "timeout_seconds": probe.timeout_seconds,
             "output_tokens": probe.body[required_cap],
             **{k: deepcopy(probe.body[k]) for k in ("store", "include") if k in probe.body},
         }
@@ -1052,6 +1126,10 @@ async def run_steps(
                 record["status_code"] = status
                 record["outcome"] = "rejected" if status == 400 else "not_probed"
             record.update(timeout_details(exc, deadline_expired=deadline.expired()))
+            if type(exc).__name__ == "ReasoningReplayError":
+                record.update(
+                    outcome="not_confirmed", reason="Reply not understood (ReasoningReplayError)"
+                )
             if (
                 probe.name == "routing"
                 and entry.get("include") == ["reasoning.encrypted_content"]
@@ -1149,6 +1227,8 @@ async def check_interfaces(
     budget_tokens: int = 4096,
     output_tokens: int = 200,
     api_key: str | None = None,
+    styles: tuple[str, ...] = ("chat", "responses", "anthropic"),
+    timeout_seconds: float = 30,
 ) -> AsyncIterator[ProbeUpdate | InterfaceResult]:
     """Try one routing request per interface, sharing one budget and no retries.
 
@@ -1159,9 +1239,15 @@ async def check_interfaces(
     the other bounded attempts. Close the iterator when cancelling. The selected
     result can be passed as plan(existing_entry=...) to reuse its routing check.
     """
+    if (
+        not styles
+        or any(style not in _PATHS for style in styles)
+        or not 1 <= timeout_seconds <= 120
+    ):
+        raise ValueError("Choose supported interfaces and a timeout between 1 and 120 seconds")
     results = {}
     spent = 0
-    for style in _PATHS:
+    for style in dict.fromkeys(styles):
         proposal = plan(
             alias,
             model,
@@ -1172,7 +1258,9 @@ async def check_interfaces(
             output_tokens=output_tokens,
         )
         proposal = replace(
-            proposal, probes=proposal.probes[:1], budget_tokens=max(0, budget_tokens - spent)
+            proposal,
+            probes=(replace(proposal.probes[0], timeout_seconds=timeout_seconds),),
+            budget_tokens=max(0, budget_tokens - spent),
         )
         async with aclosing(run_steps(proposal, approved="minimal", api_key=api_key)) as steps:
             async for event in steps:

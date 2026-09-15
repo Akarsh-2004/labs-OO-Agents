@@ -15,6 +15,36 @@ uv run nooa connect
 
 ## Independent stages for agents
 
+Endpoint `/models` limits take priority over public catalogue limits, with sources
+shown per field. An endpoint's `max_input_tokens` is retained separately and used
+as a conservative context-management bound when needed; it is not added to the
+output limit to invent a total context size. Explicit user edits still win.
+When a context bound is unknown, both library provenance and stage JSON warn.
+
+Save discovery JSON and reuse it with `--discovery-file discovery.json` on the
+wizard or a plan/check stage. The file must name the same normalized endpoint;
+limits are selected by exact model ID. This keeps `--stage plan` offline:
+
+```sh
+uv run nooa connect --stage discover --endpoint https://gateway.example/v1 \
+  --api-key-env MODEL_KEY > discovery.json
+uv run nooa connect your-model --stage plan --api-style chat \
+  --endpoint https://gateway.example/v1 --discovery-file discovery.json > model-plan.json
+```
+
+Cache checks report both continuation readings. Substantial reuse on either
+confirms caching; a later miss does not erase that evidence. A stable request
+with implicit caching (Chat), or explicit cache markers but no reported reuse,
+produces a warning rather than making a working entry fail. Missing required
+markers or an unstable prefix still need attention. Reasoning rows show puzzle
+correctness separately from whether reasoning was returned.
+
+After an interface failure the wizard offers **retry one interface with a
+120-second timeout**. This is an explicit new routing check, charged against the
+same approved budget, not an automatic network retry. Both the SDK read timeout
+and whole-check deadline use the longer limit. Successful discovery plus timed-out
+model calls is described as a possibly slow route, not proof of bad credentials.
+
 `--stage` runs without prompts and writes one JSON result to stdout. It never
 saves implicitly. A generation stage runs directly within its configured limits;
 there is no separate spending-approval dialogue. The interactive wizard remains

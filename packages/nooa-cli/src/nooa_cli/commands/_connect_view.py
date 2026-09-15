@@ -38,7 +38,11 @@ def check_failure(outcome):
         return "Server rate limit reached. Try again later."
     if isinstance(status, int) and status >= 500:
         return "Server error. Try again later."
-    if "Timeout" in error or error == "APIConnectionError":
+    if "Timeout" in error:
+        return "Model response timed out; the route may be slow."
+    if error == "ReasoningReplayError":
+        return "Reply not understood (ReasoningReplayError)."
+    if error == "APIConnectionError":
         return "Could not reach the server. Check the connection or try again."
     return None
 
@@ -198,9 +202,18 @@ class CheckProgress:
                 status, detail = "attention", "Reply incomplete; check not conclusive"
             if record.get("reason") == "previous result reused":
                 detail += " · already checked"
+            if name.startswith("level:") and isinstance(record.get("answer_correct"), bool):
+                detail += " · answer correct" if record["answer_correct"] else " · answer incorrect"
+                if not record["answer_correct"]:
+                    status = "attention"
         elif name == "cache" and outcome == "confirmed" and record.get("input_tokens"):
             cached, total = record.get("cached_input_tokens", 0), record["input_tokens"]
             detail = f"Reused {cached / total:.0%} of input ({cached:,} / {total:,} tokens)"
+            if record.get("readings"):
+                detail += " · " + ", ".join(
+                    f"{r['turn']}: {r.get('cached_input_tokens') or 0:,} cached"
+                    for r in record["readings"]
+                )
         elif name == "reasoning_retention" and outcome == "confirmed":
             detail = "Preserved in the next request"
         icon, color = {
@@ -219,9 +232,9 @@ class CheckProgress:
         line(f"{icon} {label}: {detail or fallback}{elapsed}", fg=color)
         self.results[name] = status
 
-    def finish(self):
+    def finish(self, *, summary=True):
         self._clear()
-        if self.results:
+        if self.results and summary:
             counts = [
                 f"{sum(s == status for s in self.results.values())} {label}"
                 for status, label in (
@@ -272,10 +285,22 @@ def model_details(model, *, output_tokens, edited=False):
             f"{output_tokens:,} tokens per reply (not reasoning checks)",
         ),
     ):
-        line(f"{label:<25} {value}")
+        source_key = {
+            "Context window": "context_length",
+            "Reported reply ceiling": "max_completion_tokens",
+        }.get(label)
+        source = (model.get("limit_sources") or {}).get(source_key)
+        source_label = {
+            "catalogue": "catalogue",
+            "endpoint": "endpoint",
+            "endpoint_input_limit": "endpoint input limit; conservative bound",
+        }.get(source, source)
+        line(f"{label:<25} {value}" + (f" · {source_label}" if source_label else ""))
     line(
         "Your edited settings."
         if edited
+        else "Sources: endpoint limits take priority; catalogue information fills gaps."
+        if model.get("endpoint_limits")
         else "Source: OpenRouter model listing. Your server may use different limits.",
         dim=True,
     )
