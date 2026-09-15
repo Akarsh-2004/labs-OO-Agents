@@ -11,7 +11,8 @@ from nooa_cli.commands.connect import command
 
 
 @pytest.mark.parametrize(
-    "choice,expected", [("", 8192), ("recommended", 8192), ("custom\n512", 512)]
+    "choice,expected",
+    [("", 32768), ("recommended", 32768), ("smaller", 8192), ("short", 2048), ("custom\n512", 512)],
 )
 def test_wizard_reply_budget_is_a_runtime_cap(tmp_path, monkeypatch, choice, expected):
     from nooa import llm_config
@@ -42,13 +43,13 @@ def test_wizard_reply_budget_is_a_runtime_cap(tmp_path, monkeypatch, choice, exp
     assert entry["max_tokens"] == expected
     assert entry["include"] == ["reasoning.encrypted_content"]
     assert entry["store"] is False
-    assert "Recommended — 8,192 tokens (NOOA default)" in result.output
+    assert "Recommended — 32,768 tokens (NOOA default)" in result.output
     assert "Short replies and simple questions" not in result.output
     assert "Coding agents and tool use" not in result.output
     assert "Long documents and deeper reasoning" not in result.output
 
 
-def test_reply_dialog_offers_only_recommendation_and_custom(monkeypatch, capsys):
+def test_reply_dialog_offers_recommendation_smaller_and_custom(monkeypatch, capsys):
     from nooa_cli.commands import _connect_prompts
 
     calls = []
@@ -64,7 +65,7 @@ def test_reply_dialog_offers_only_recommendation_and_custom(monkeypatch, capsys)
         == 16384
     )
     menu = calls[0][1]
-    assert menu["choices"] == ("recommended", "custom")
+    assert menu["choices"] == ("recommended", "smaller", "short", "custom")
     assert menu["default"] == "recommended"
     assert menu["open_menu"] is True
     assert menu["labels"]["recommended"] == "Recommended — 32,768 tokens (catalogue recommendation)"
@@ -95,7 +96,7 @@ def test_stage_save_fills_defaults_and_reports_shadow(tmp_path, monkeypatch):
     report = json.loads(result.stdout)
     assert report["data"]["shadowed_by"] == str(source)
     entry = report["data"]["entry"]
-    assert entry["max_tokens"] == 8192
+    assert entry["max_tokens"] == 32768
     assert entry["include"] == ["reasoning.encrypted_content"]
     assert yaml.safe_load(destination.read_text())["models"]["local"] == entry
 
@@ -119,3 +120,47 @@ def test_scripted_plan_honours_explicit_reply_cap():
     plan = json.loads(result.stdout)["data"]
     assert plan["entry"]["max_tokens"] == 1234
     assert plan["probes"][0]["body"]["max_output_tokens"] == 200
+
+
+def test_stage_reasoning_budget_override_reaches_wire(monkeypatch, tmp_path):
+    import httpx
+
+    from tests.connect_http import mock_http, response_body
+
+    seen = []
+
+    def handle(request):
+        body = json.loads(request.content)
+        seen.append(body)
+        assert body["max_output_tokens"] == 8192
+        return httpx.Response(200, json=response_body("responses", "B G D A C E F H"))
+
+    mock_http(monkeypatch, handle)
+    monkeypatch.setenv("TEST_REASONING_KEY", "test-key")
+    levels = tmp_path / "levels.yaml"
+    levels.write_text("high: {reasoning: {effort: high}}\n")
+    result = CliRunner().invoke(
+        command,
+        [
+            "model",
+            "--stage",
+            "reasoning",
+            "--endpoint",
+            "https://api.test/v1",
+            "--api-style",
+            "responses",
+            "--api-key-env",
+            "TEST_REASONING_KEY",
+            "--levels-file",
+            str(levels),
+            "--reasoning-output-tokens",
+            "8192",
+            "--budget-tokens",
+            "9000",
+            "--yes",
+        ],
+    )
+    assert result.exit_code == 1  # Correct answer, but mock returns no reasoning evidence.
+    assert len(seen) == 1
+    report = json.loads(result.stdout)
+    assert report["checks"]["level:high"]["answer_correct"] is True

@@ -31,6 +31,8 @@ import yaml
 
 CATALOGUE_URL = "https://openrouter.ai/api/v1/models"
 TEMPLATES = ("effort", "adaptive", "budget", "toggle", "thinking")
+DEFAULT_CHECK_BUDGET = 131072
+DEFAULT_REASONING_OUTPUT_TOKENS = 4096
 REASONING_CHECK_PROMPT = """Eight jobs—A, B, C, D, E, F, G and H—must run one at a time.
 Each job runs exactly once.
 
@@ -455,7 +457,7 @@ def configure_entry(entry: dict, *, reply_tokens: int | None = None) -> dict:
     cap = reply_tokens if reply_tokens is not None else result.get("max_tokens")
     source = "user" if reply_tokens is not None else "entry"
     if cap is None:
-        cap = min(8192, bound) if bound else 8192
+        cap = min(32768, bound) if bound else 32768
         source = "connect_default"
     if not isinstance(cap, int) or isinstance(cap, bool) or cap <= 0:
         raise ValueError("Reply limit max_tokens must be a positive integer")
@@ -521,8 +523,9 @@ def plan(
     *,
     catalogue: dict | None = None,
     reasoning_levels: dict | None = None,
-    budget_tokens: int = 4096,
+    budget_tokens: int = DEFAULT_CHECK_BUDGET,
     output_tokens: int = 200,
+    reasoning_output_tokens: int = DEFAULT_REASONING_OUTPUT_TOKENS,
     existing_entry: dict | None = None,
     session_checks: bool = False,
     reply_tokens: int | None = None,
@@ -548,6 +551,8 @@ def plan(
         )
     if not 1 <= output_tokens <= 4096 or budget_tokens < 1:
         raise ValueError("output_tokens must be 1..4096 and budget_tokens must be positive")
+    if not 1 <= reasoning_output_tokens <= 32768:
+        raise ValueError("reasoning_output_tokens must be 1..32768")
     vendor = "anthropic" if api_style == "anthropic" else "openai"
     entry: dict[str, Any] = {
         "model_name": f"{vendor}/{model}",
@@ -671,11 +676,12 @@ def plan(
     probes.append(Probe("tools", tool_body, output_tokens + 512))
     for label, params in levels.items():
         level_body = deepcopy(body)
+        level_body[token_key] = reasoning_output_tokens
         level_body["input" if api_style == "responses" else "messages"][0]["content"] = (
             REASONING_CHECK_PROMPT
         )
         level_body.update(params)
-        probes.append(Probe(f"level:{label}", level_body, output_tokens + 512))
+        probes.append(Probe(f"level:{label}", level_body, reasoning_output_tokens + 512))
     entry["provenance"] = provenance
     if reply_tokens is None:
         recommendation = ((catalogue or {}).get("default_parameters") or {}).get("max_tokens")
@@ -715,7 +721,10 @@ def plan(
         try:
             rates = [float(catalogue["pricing"][key]) for key in ("prompt", "completion")]
             if all(math.isfinite(rate) and rate >= 0 for rate in rates):
-                price = len(probes) * (512 * rates[0] + output_tokens * rates[1])
+                price = (
+                    len(probes) * 512 * rates[0]
+                    + sum(probe.token_estimate - 512 for probe in probes) * rates[1]
+                )
         except (ValueError, TypeError, KeyError):
             pass  # Missing catalogue prices are unknown, never zero.
     if session_checks:
@@ -955,7 +964,7 @@ async def run_steps(
         spent += probe.token_estimate
         yield ProbeUpdate(probe.name, {"outcome": "running"})
         try:
-            async with asyncio.timeout(30):
+            async with asyncio.timeout(120 if probe.name.startswith("level:") else 30):
                 response, settings_sent = await _run_probe(proposal.alias, entry, probe, key)
             usage = response.usage
             reasoning = bool(response.reasoning or (usage and usage.reasoning_tokens))

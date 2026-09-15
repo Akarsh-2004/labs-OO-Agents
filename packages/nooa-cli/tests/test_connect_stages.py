@@ -66,8 +66,15 @@ def test_each_check_stage_is_independent_json(monkeypatch, tmp_path, stage, coun
     assert "private reasoning" not in result.output
     assert "Approve" not in result.output
     assert all(
-        body.get("max_tokens", body.get("max_completion_tokens")) in {200, 2048}
-        for body in requests
+        body.get("max_tokens", body.get("max_completion_tokens"))
+        == (
+            4096
+            if body["messages"][0]["content"] == connect.REASONING_CHECK_PROMPT
+            else 2048
+            if stage == "session" or (stage == "all" and i >= 4)
+            else 200
+        )
+        for i, body in enumerate(requests)
     )
     if stage == "reasoning":
         assert [body["reasoning_effort"] for body in requests] == ["high", "low"]

@@ -26,6 +26,7 @@ def run_stage(
     api_key_env,
     budget_tokens,
     output_tokens,
+    reasoning_output_tokens=4096,
     reply_tokens=None,
     levels_file,
     context_window,
@@ -111,7 +112,7 @@ def run_stage(
                 raise click.UsageError("Stage requires --endpoint")
             style = api_style or "chat"
             key_env = api_key_env or ""
-            budget = 65536 if budget_tokens is None else budget_tokens
+            budget = connect.DEFAULT_CHECK_BUDGET if budget_tokens is None else budget_tokens
             levels = None
             if levels_file:
                 with Path(levels_file).open() as source:
@@ -124,6 +125,7 @@ def run_stage(
                 key_env,
                 budget_tokens=budget,
                 output_tokens=output_tokens,
+                reasoning_output_tokens=reasoning_output_tokens,
                 reply_tokens=reply_tokens,
                 reasoning_levels=levels,
                 session_checks=stage in {"session", "all"},

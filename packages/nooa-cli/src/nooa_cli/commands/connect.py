@@ -61,9 +61,16 @@ from ._connect_stages import STAGES
 @click.option(
     "--budget-tokens",
     type=click.IntRange(min=1),
-    help="Shared estimated-token budget for all checks (default: 65536); never increased after approval.",
+    help="Shared estimated-token budget for all checks (default: 131072); never increased after approval.",
 )
 @click.option("--output-tokens", type=click.IntRange(1, 4096), default=200, show_default=True)
+@click.option(
+    "--reasoning-output-tokens",
+    type=click.IntRange(1, 32768),
+    default=4096,
+    show_default=True,
+    help="Output cap for each reasoning check, including thinking; separate from basic checks.",
+)
 @click.option(
     "--max-tokens",
     "--reply-tokens",
@@ -103,6 +110,7 @@ def command(
     no_probe,
     budget_tokens,
     output_tokens,
+    reasoning_output_tokens,
     reply_tokens,
     show_config,
     output,
@@ -127,6 +135,7 @@ def command(
             api_key_env=api_key_env,
             budget_tokens=budget_tokens,
             output_tokens=output_tokens,
+            reasoning_output_tokens=reasoning_output_tokens,
             reply_tokens=reply_tokens,
             levels_file=levels_file,
             context_window=context_window,
@@ -267,10 +276,13 @@ def command(
         server_urls = list(dict.fromkeys(server_urls))
         default_style = "chat"
         approval = "none" if no_probe else probe
-        budget_tokens = 65536 if budget_tokens is None else budget_tokens
+        budget_tokens = connect.DEFAULT_CHECK_BUDGET if budget_tokens is None else budget_tokens
         interfaces = None
         view.intro(
-            checks=approval != "none", output_tokens=output_tokens, budget_tokens=budget_tokens
+            checks=approval != "none",
+            output_tokens=output_tokens,
+            budget_tokens=budget_tokens,
+            reasoning_output_tokens=reasoning_output_tokens,
         )
         if approval != "none" and not yes:
             if not confirm("Approve API checks within this budget?", default=True):
@@ -645,8 +657,9 @@ def command(
             api_key_env,
             catalogue=candidate,
             reasoning_levels=patches,
-            budget_tokens=budget_tokens if budget_tokens is not None else 4096,
+            budget_tokens=budget_tokens,
             output_tokens=output_tokens,
+            reasoning_output_tokens=reasoning_output_tokens,
             existing_entry=interfaces.results[api_style].entry if interfaces else existing,
             session_checks=approval == "all",
             reply_tokens=reply_tokens,
@@ -783,7 +796,7 @@ def command(
                 dim=True,
             )
         view.line(
-            f"Reply caps: {output_tokens:,} for basic checks; conversation checks use the saved cap when the approved budget allows, otherwise at most 2,048.",
+            f"Reply caps: {output_tokens:,} for connection/tool checks; {reasoning_output_tokens:,} for reasoning checks; conversation checks use the saved cap when the approved budget allows, otherwise at most 2,048.",
             dim=True,
         )
         view.line(

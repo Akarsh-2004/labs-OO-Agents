@@ -61,7 +61,7 @@ async def test_saved_defaults_reach_wire(tmp_path, monkeypatch, style, asynchron
 
 
 @pytest.mark.parametrize(
-    "ceiling,recommended,expected", [(None, None, 8192), (1024, None, 1024), (16384, 4096, 4096)]
+    "ceiling,recommended,expected", [(None, None, 32768), (1024, None, 1024), (16384, 4096, 4096)]
 )
 def test_plan_separates_recommendation_from_ceiling(ceiling, recommended, expected):
     proposal = connect.plan(
@@ -103,7 +103,7 @@ def test_save_normalizes_legacy_stateless_entry_without_mutation(tmp_path, inclu
     path = tmp_path / "models.yaml"
     connect.write(entry, path, alias="test")
     saved = yaml.safe_load(path.read_text())["models"]["test"]
-    assert saved["max_tokens"] == 8192
+    assert saved["max_tokens"] == 32768
     assert saved["include"] == ([] if include == [] else ["reasoning.encrypted_content"])
     assert entry == original
 

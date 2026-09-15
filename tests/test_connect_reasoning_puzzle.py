@@ -41,7 +41,7 @@ async def test_puzzle_reaches_wire_and_scores_only_final_answer(
     def handle(request):
         body = json.loads(request.content)
         sent.append(body)
-        assert body.get("max_tokens", body.get("max_output_tokens")) == 200
+        assert body.get("max_tokens", body.get("max_output_tokens")) == 4096
         messages = body.get("messages", body.get("input"))
         assert connect.REASONING_CHECK_PROMPT in json.dumps(messages, ensure_ascii=False).replace(
             "\\n", "\n"
@@ -58,7 +58,7 @@ async def test_puzzle_reaches_wire_and_scores_only_final_answer(
     )
     proposal = connect.plan(
         "test",
-        "test-model",
+        "claude-sonnet-4-6" if style == "anthropic" else "test-model",
         style,
         "https://api.test/v1",
         "",

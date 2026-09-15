@@ -37,7 +37,7 @@ async def test_reported_reply_ceiling_is_metadata_not_a_request_default(monkeypa
         },
     )
     assert proposal.entry["provenance"]["catalogue_limits"]["max_completion_tokens"] == 235929
-    assert proposal.entry["max_tokens"] == 8192
+    assert proposal.entry["max_tokens"] == 32768
     client = registry.client_from_config("local", proposal.entry, api_key="test-key")
     try:
         await client.acall(messages=[{"role": "user", "content": "Hello"}])

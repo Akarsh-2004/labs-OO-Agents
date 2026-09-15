@@ -155,11 +155,11 @@ def test_plan_is_data_without_credentials_or_network(monkeypatch):
     proposal = make_plan(reasoning_levels={"high": {"reasoning_effort": "high"}})
     assert proposal.entry["model_name"] == "openai/gateway/model"
     assert proposal.entry["client_type"] == "completion"
-    assert proposal.entry["max_tokens"] == 8192
+    assert proposal.entry["max_tokens"] == 32768
     assert "context_window" not in proposal.entry
     assert proposal.price_estimate is None
     assert [p.name for p in proposal.probes] == ["routing", "tools", "level:high"]
-    assert all(p.body["max_tokens"] == 200 for p in proposal.probes)
+    assert [p.body["max_tokens"] for p in proposal.probes] == [200, 200, 4096]
     assert proposal.probes[-1].body["reasoning_effort"] == "high"
 
 
@@ -387,8 +387,8 @@ async def test_real_httpx_serialization_keeps_level_blocks(monkeypatch, style, p
     assert len(sent) == 3, result.entry["provenance"]["probes"]
     assert all(
         body.get("max_output_tokens", body.get("max_tokens", body.get("max_completion_tokens")))
-        == 200
-        for body in sent
+        == (4096 if i == 2 else 200)
+        for i, body in enumerate(sent)
     )
     assert all(sent[-1][key] == value for key, value in patch.items())
     assert result.entry["provenance"]["probes"]["level:high"]["client"] == "unifiedllm"

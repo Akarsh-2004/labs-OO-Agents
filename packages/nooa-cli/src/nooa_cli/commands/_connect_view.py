@@ -72,7 +72,7 @@ def line(text, *, fg=None, bold=False, dim=False):
         click.echo("  " + part)
 
 
-def intro(*, checks, output_tokens, budget_tokens):
+def intro(*, checks, output_tokens, budget_tokens, reasoning_output_tokens=4096):
     click.echo()
     line("NOOA  /  CONNECT", fg="bright_cyan", bold=True)
     line("Add a model to your workspace.", dim=True)
@@ -85,7 +85,7 @@ def intro(*, checks, output_tokens, budget_tokens):
             dim=True,
         )
         line(
-            f"Basic checks: {output_tokens:,} output tokens / call. Conversation checks use your chosen reply budget if the shared budget allows; otherwise at most 2,048 tokens each.",
+            f"Connection/tool checks: {output_tokens:,} output tokens / call. Reasoning checks: {reasoning_output_tokens:,} output tokens / call, including thinking. Conversation checks use your chosen reply budget if the shared budget allows; otherwise at most 2,048 tokens each.",
             dim=True,
         )
         line(
@@ -262,7 +262,10 @@ def model_details(model, *, output_tokens, edited=False):
         ),
         ("Reasoning levels", level_text),
         ("Default reasoning", default_text),
-        ("Setup check limit", f"{output_tokens:,} tokens per reply (checks only)"),
+        (
+            "Connection/tool check limit",
+            f"{output_tokens:,} tokens per reply (not reasoning checks)",
+        ),
     ):
         line(f"{label:<25} {value}")
     line(

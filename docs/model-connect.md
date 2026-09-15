@@ -51,7 +51,8 @@ uv run nooa connect --stage save --input model-plan.json --output llm_config.yam
 
 Use explicit endpoint/interface/key-variable options in stage mode; wizard
 presets, pasted keys and `--no-probe` do not apply. `--budget-tokens` defaults to
-65,536; `--output-tokens` controls basic check caps. Session checks retain their
+131,072; `--output-tokens` controls connection/tool check caps, while
+`--reasoning-output-tokens` controls reasoning checks (4,096 by default). Session checks retain their
 separate documented cap. Redirect stdout to keep stage reports; `--output` is
 the registry target for `save` only. Replacing an existing alias requires `--yes`
 and prints a warning to stderr. Saving an untested plan does not validate it.
@@ -155,9 +156,10 @@ The displayed **reported reply ceiling** is capability metadata saved under
 `provenance.catalogue_limits.max_completion_tokens`, not a request default.
 Every entry also has an actual **reply budget**, saved as `max_tokens` for all
 three interfaces. Responses translates that to `max_output_tokens` on the wire.
-Press Enter to accept the single recommendation, or choose Custom to edit the
-number. Connect offers the catalogue's output recommendation when available,
-otherwise 8,192 (labelled NOOA default), bounded by the known ceiling and context
+Press Enter to accept the recommendation, choose a smaller 8,192- or 2,048-token
+budget, or choose Custom to edit the number. Smaller options appear only when
+below the recommendation. Connect offers the catalogue's output recommendation when available,
+otherwise 32,768 (labelled NOOA default), bounded by the known ceiling and context
 window. Existing entries keep their current setting. The budget includes thinking
 and the final answer; short replies use fewer tokens. The custom editor shows the
 known upper limit as a constraint, not as a suggested allocation.
@@ -202,8 +204,8 @@ final question. It does not execute tools or invent reasoning state. It reports:
 
 These calls use the saved reply cap when the shared budget permits. Otherwise
 they use at most 2,048 output tokens each and reserve up to 43,008 estimated tokens
-within the initial shared budget (65,536 by default). Basic checks retain their
-200-token output cap. No retries run; checks stop rather than increase the approved
+within the initial shared budget (131,072 by default). Connection/tool checks retain their
+200-token output cap; reasoning checks have 4,096 tokens each. No retries run; checks stop rather than increase the approved
 budget. These are estimates, not billing limits: servers can ignore caps. Use
 `--budget-tokens` before setup to choose another budget. Small context windows,
 incompatible reply caps, failures or insufficient budget leave the conversation
@@ -288,8 +290,9 @@ Use `--no-probe` to save without model calls, or `--probe minimal` for routing
 only (up to three interface attempts unless `--api-style` is supplied).
 The default plan also checks tools and each proposed reasoning level. The
 selected interface's successful routing request is reused, not sent twice.
-Basic checks use 200 output tokens per call, no retries, and a 30-second total
-deadline per probe (120 seconds for each conversation-check call). The CLI uses
+Connection/tool checks use 200 output tokens per call and a 30-second total
+deadline. Reasoning checks use 4,096 output tokens and a 120-second deadline;
+conversation-check calls also have 120 seconds. No retries run. The CLI uses
 the fixed budget approved at the beginning. Each basic request reserves its
 output cap plus 512 estimated input tokens. An explicit `--budget-tokens` limits
 the entire setup, including interface detection; it is never increased. Connect
@@ -423,8 +426,8 @@ final order. `answer_correct` scores that public answer independently of
 `reasoning_observed`; a correct answer alone does not prove reasoning was enabled.
 Per-call input, output and reasoning-token counts are included when usage is
 available. The final answer and reasoning text are not saved. The default
-200-token check cap is unchanged; a `length` finish is inconclusive, and an agent
-can explicitly rerun `--stage reasoning --output-tokens 2048` within its approved
+reasoning-check cap is 4,096 tokens; a `length` finish is inconclusive, and an agent
+can explicitly rerun `--stage reasoning --reasoning-output-tokens 8192` within its approved
 `--budget-tokens` limit if more room is needed. There is no automatic retry.
 HTTP 400 is recorded as rejected, not unsupported. Auth, timeout and transient
 failures remain untested; failed routing or auth stops subsequent calls within

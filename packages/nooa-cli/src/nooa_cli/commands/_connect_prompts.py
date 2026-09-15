@@ -241,18 +241,20 @@ def choose_reply_limit(suggested, ceiling=None, *, source="connect_default"):
         "connect_default": "NOOA default",
         "catalogue_recommendation": "catalogue recommendation",
     }.get(source, "current setting")
+    smaller = {name: cap for name, cap in (("smaller", 8192), ("short", 2048)) if cap < suggested}
     selected = prompt(
         "Reply budget",
-        choices=("recommended", "custom"),
+        choices=("recommended", *smaller, "custom"),
         default="recommended",
         open_menu=True,
         labels={
             "recommended": f"Recommended — {suggested:,} tokens ({origin})",
+            **{name: f"Smaller budget — {cap:,} tokens" for name, cap in smaller.items()},
             "custom": "Custom…",
         },
     )
     if selected != "custom":
-        return suggested
+        return smaller.get(selected, suggested)
     if ceiling is not None:
         click.echo(f"  Known upper limit: {ceiling:,} tokens.")
     while True:
