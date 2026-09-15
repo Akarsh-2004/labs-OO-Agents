@@ -1831,6 +1831,10 @@ class CompletionClient(UnifiedLLM):
         if "tools" not in api_params:
             api_params.pop("tool_choice", None)
             api_params.pop("parallel_tool_calls", None)
+        elif api_params.get("tool_choice") == "auto":
+            # Auto is the default with tools; sending it alongside parallel=False
+            # can create conflicting tool-choice settings in compatible servers.
+            api_params.pop("tool_choice")
 
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
@@ -1919,6 +1923,10 @@ class CompletionClient(UnifiedLLM):
         if "tools" not in api_params:
             api_params.pop("tool_choice", None)
             api_params.pop("parallel_tool_calls", None)
+        elif api_params.get("tool_choice") == "auto":
+            # Auto is the default with tools; sending it alongside parallel=False
+            # can create conflicting tool-choice settings in compatible servers.
+            api_params.pop("tool_choice")
 
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
