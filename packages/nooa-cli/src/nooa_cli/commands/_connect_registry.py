@@ -77,3 +77,96 @@ def shadowing_source(alias, path):
     if target is None or source is None or source > target:
         return str(found[1])
     return None
+
+
+def diagnostic_context(
+    *,
+    target=None,
+    alias=None,
+    model=None,
+    endpoint=None,
+    api_key_env=None,
+    api_key=None,
+    budget=None,
+    remaining=None,
+    output_tokens=200,
+    reasoning_output_tokens=4096,
+    stage=None,
+):
+    """Describe the run without credentials, registry contents, or raw arguments."""
+    import os
+    import shlex
+    from pathlib import Path
+
+    import yaml
+
+    from nooa._version import __version__
+    from nooa.connect import normalize_endpoint
+    from nooa.llm_config import llm_config_chain
+
+    context = {
+        "target_file": str(Path(target).expanduser().resolve()) if target else None,
+        "working_directory": str(Path.cwd()),
+        "alias": alias,
+        "wire_model": model,
+        "nooa_version": __version__,
+        "approved_budget_tokens": budget,
+        "remaining_budget_tokens": remaining,
+        "output_tokens": output_tokens,
+        "reasoning_output_tokens": reasoning_output_tokens,
+        "credential_source": "pasted"
+        if api_key
+        else "environment_or_secrets"
+        if api_key_env
+        else "none",
+        "credential_available": bool(api_key or (api_key_env and os.environ.get(api_key_env))),
+        "interface_timeout_seconds": 30,
+        "reasoning_timeout_seconds": 120,
+    }
+    override = os.environ.get("NOOA_LLM_TRANSPORT")
+    context["transport_override"] = (
+        override if override in {None, "direct", "litellm"} else "invalid"
+    )
+    try:
+        context["registry_files"] = [str(p) for p in llm_config_chain()]
+        found = entries().get(alias) if alias else None
+        context["effective_alias_source"] = str(found[1]) if found else None
+    except (OSError, ValueError, yaml.YAMLError):
+        pass  # Never hide the original failure with config-discovery errors.
+    if stage == "interfaces" and model and endpoint and remaining and remaining > 0:
+        try:
+            address = normalize_endpoint(endpoint)
+        except (TypeError, ValueError):
+            address = None
+        if address:
+            context["rerun_command"] = shlex.join(
+                [
+                    "uv",
+                    "run",
+                    "nooa",
+                    "connect",
+                    model,
+                    "--stage",
+                    "interfaces",
+                    "--endpoint",
+                    address,
+                    "--api-key-env",
+                    api_key_env or "",
+                    "--output-tokens",
+                    str(output_tokens),
+                    "--budget-tokens",
+                    str(remaining),
+                ]
+            )
+
+    # Even filenames/model IDs must not echo an accidentally pasted active key.
+    def scrub(value):
+        if isinstance(value, str):
+            for secret in (api_key, os.environ.get(api_key_env) if api_key_env else None):
+                if secret:
+                    value = value.replace(secret, "[redacted]")
+        elif isinstance(value, list):
+            value = [scrub(item) for item in value]
+        return value
+
+    return {key: scrub(value) for key, value in context.items()}

@@ -1,5 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
+import json
+
 import pytest
 import yaml
 from click.testing import CliRunner
@@ -459,6 +461,16 @@ def test_authentication_recovery_keeps_budget_and_secrets(tmp_path, monkeypatch,
     assert "Provider List" not in result.output
     assert "wrong-test-secret" not in result.output
     assert "right-test-secret" not in result.output
+    handoff = result.output.split("Agent diagnostic prompt:\n", 1)[1]
+    details, _ = json.JSONDecoder().raw_decode(handoff[handoff.index("{") :])
+    context = details["run_context"]
+    assert context["target_file"] == str(path.resolve())
+    assert context["alias"] == "local"
+    assert context["remaining_budget_tokens"] == 131072 - 3 * 712
+    assert context["interface_timeout_seconds"] == 30
+    assert "--stage interfaces" in context["rerun_command"]
+    assert "skills/nooa-agent-authoring/SKILL.md" in handoff
+    assert "git clone --depth 1" in handoff
     assert litellm.suppress_debug_info is False
     assert len(sent) == (6 if recover else 3)
     if recover:

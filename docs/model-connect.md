@@ -49,6 +49,15 @@ uv run nooa connect your-model --stage plan --as work \
 uv run nooa connect --stage save --input model-plan.json --output llm_config.yaml
 ```
 
+The diagnostic handoff names the target file, working directory, active registry
+files and effective alias source, installed version, credential availability
+(never the value), caps, timeouts and remaining budget. Interface failures include
+a quoted CLI reproduction command when budget remains. It locates the
+`nooa-agent-authoring` skill at `skills/nooa-agent-authoring/SKILL.md` and gives a
+repository clone command when no checkout is available. Read `docs/model-connect.md`
+and `docs/model-configuration.md` alongside it. The handoff is not new permission
+to spend money or overwrite other aliases.
+
 Use explicit endpoint/interface/key-variable options in stage mode; wizard
 presets, pasted keys and `--no-probe` do not apply. `--budget-tokens` defaults to
 131,072; `--output-tokens` controls connection/tool check caps, while
@@ -57,7 +66,7 @@ separate documented cap. Redirect stdout to keep stage reports; `--output` is
 the registry target for `save` only. Replacing an existing alias requires `--yes`
 and prints a warning to stderr. Saving an untested plan does not validate it.
 
-Reports have `version`, `stage`, `ok`, `data`, `checks`, `error`, and
+Reports have `version`, `stage`, `ok`, `data`, `checks`, `error`, `run_context`, and
 `diagnostic_prompt`. Exit 0 means the stage met its criterion; 1 means failure
 or missing evidence, not proof of unsupported features; 2 means invalid stage
 options. Request acceptance alone is not success for tools or enabled reasoning

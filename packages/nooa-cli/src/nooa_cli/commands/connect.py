@@ -182,7 +182,7 @@ def command(
         environment_names,
         prompt,
     )
-    from ._connect_registry import credential_names, entries, shadowing_source
+    from ._connect_registry import credential_names, diagnostic_context, entries, shadowing_source
 
     async def show_checks(events, *, reasoning_levels=None):
         with view.quiet_provider_messages():
@@ -438,6 +438,19 @@ def command(
                             "interfaces",
                             {"model_name": model, "api_base": endpoint, "api_key_env": api_key_env},
                             failed_checks,
+                            run_context=diagnostic_context(
+                                target=path,
+                                alias=alias,
+                                model=model,
+                                endpoint=endpoint,
+                                api_key_env=api_key_env,
+                                api_key=api_key,
+                                budget=budget_tokens,
+                                remaining=max(0, budget_tokens - interface_spent),
+                                output_tokens=output_tokens,
+                                reasoning_output_tokens=reasoning_output_tokens,
+                                stage="interfaces",
+                            ),
                         )
                     )
                     if yes:
@@ -847,7 +860,27 @@ def command(
         ):
             click.echo(
                 "Agent diagnostic prompt:\n"
-                + connect.diagnostic_prompt("checks", result.entry, checks)
+                + connect.diagnostic_prompt(
+                    "checks",
+                    result.entry,
+                    checks,
+                    run_context=diagnostic_context(
+                        target=path,
+                        alias=alias,
+                        model=model,
+                        endpoint=endpoint,
+                        api_key_env=api_key_env,
+                        api_key=api_key,
+                        budget=budget_tokens,
+                        remaining=max(
+                            0,
+                            proposal.budget_tokens
+                            - result.entry["provenance"].get("tokens_charged_to_budget", 0),
+                        ),
+                        output_tokens=output_tokens,
+                        reasoning_output_tokens=reasoning_output_tokens,
+                    ),
+                )
             )
         if unobserved:
             click.echo(
@@ -933,6 +966,15 @@ def command(
                 "setup",
                 {},
                 {"setup": {"outcome": "failed", "error": type(exc).__name__, "detail": detail}},
+                run_context=diagnostic_context(
+                    target=path,
+                    alias=alias,
+                    model=model,
+                    api_key_env=api_key_env,
+                    api_key=api_key,
+                    output_tokens=output_tokens,
+                    reasoning_output_tokens=reasoning_output_tokens,
+                ),
             ),
             err=True,
         )

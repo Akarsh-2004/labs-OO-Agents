@@ -834,11 +834,25 @@ async def check_stage(
     return await run(selected, approved="all", api_key=api_key)
 
 
-def diagnostic_prompt(stage: str, entry: dict, checks: dict) -> str:
+def diagnostic_prompt(
+    stage: str, entry: dict, checks: dict, *, run_context: dict | None = None
+) -> str:
     """Safe, copyable handoff for a person or agent; no credentials or raw bodies."""
     context = {
         key: entry[key]
-        for key in ("model_name", "api_style", "api_base", "api_key_env")
+        for key in (
+            "model_name",
+            "api_style",
+            "client_type",
+            "api_base",
+            "api_key_env",
+            "transport",
+            "max_tokens",
+            "store",
+            "include",
+            "cache_breakpoint",
+            "reasoning_default",
+        )
         if key in entry
     }
     # Endpoints from arbitrary caller input may contain credentials or query data.
@@ -854,6 +868,8 @@ def diagnostic_prompt(stage: str, entry: dict, checks: dict) -> str:
                 "outcome",
                 "error",
                 "detail",
+                "reason",
+                "checked_at",
                 "status_code",
                 "reasoning_observed",
                 "answer_correct",
@@ -872,13 +888,52 @@ def diagnostic_prompt(stage: str, entry: dict, checks: dict) -> str:
     }
     return (
         f"Diagnose and fix NOOA Connect stage {stage!r}. "
+        "First read the nooa-agent-authoring skill at skills/nooa-agent-authoring/SKILL.md "
+        "in the NOOA checkout, plus docs/model-connect.md and docs/model-configuration.md. "
+        "If no checkout is available, retrieve the skill and its companion docs with "
+        "`git clone --depth 1 https://github.com/NVIDIA-NeMo/labs-OO-Agents.git nooa-reference`, "
+        "then read nooa-reference/skills/nooa-agent-authoring/SKILL.md. Prefer the source "
+        "version matching the running installation when investigating behaviour. "
         "Inspect the configuration, credential lookup, and actual request construction. "
         "Model listing alone does not validate credentials. Distinguish rejection, missing "
         "evidence, and unsupported features; do not infer support from an HTTP success alone. "
         "Use nooa.connect library functions or nooa connect --stage to isolate the failure, "
         "then rerun the affected checks within configured limits. Never print or copy key "
-        "values, reasoning text, opaque state, or raw error bodies. Report the cause, fix, and evidence.\n"
-        + json.dumps({"connection": context, "checks": outcomes}, indent=2)
+        "values, reasoning text, opaque state, or raw error bodies. Preserve unrelated aliases "
+        "and inspect layer precedence before editing the target file. This handoff does not "
+        "authorize additional paid calls; confirm the remaining allowance before rerunning. "
+        "Report the cause, fix, and evidence.\n"
+        + json.dumps(
+            {
+                "connection": context,
+                "checks": outcomes,
+                "run_context": {
+                    key: value
+                    for key, value in (run_context or {}).items()
+                    if key
+                    in {
+                        "target_file",
+                        "working_directory",
+                        "alias",
+                        "wire_model",
+                        "registry_files",
+                        "effective_alias_source",
+                        "nooa_version",
+                        "transport_override",
+                        "approved_budget_tokens",
+                        "remaining_budget_tokens",
+                        "output_tokens",
+                        "reasoning_output_tokens",
+                        "credential_source",
+                        "credential_available",
+                        "interface_timeout_seconds",
+                        "reasoning_timeout_seconds",
+                        "rerun_command",
+                    }
+                },
+            },
+            indent=2,
+        )
     )
 
 

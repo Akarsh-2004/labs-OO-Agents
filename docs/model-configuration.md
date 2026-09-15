@@ -43,7 +43,7 @@ the client appends `/v1/messages`. Connect normalizes this when saving the entry
 
 If documented for your route, add `context_window` as a capacity hint. It is
 not an output-token allocation. Set `max_tokens` to the reply budget you want,
-not the model's advertised maximum; 8,192 is Connect's fallback starting budget
+not the model's advertised maximum; 32,768 is Connect's fallback starting budget
 when no recommendation is available. Keep it within the model's documented
 limits. Responses clients translate this to `max_output_tokens` on the wire.
 For stateless Responses entries, also set `store: false` and

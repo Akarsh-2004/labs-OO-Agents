@@ -221,17 +221,44 @@ def run_stage(
             **({"status_code": status} if isinstance(status, int) else {}),
         }
         data = None
+    from ._connect_registry import diagnostic_context
+
+    total_budget = connect.DEFAULT_CHECK_BUDGET if budget_tokens is None else budget_tokens
+    charged = (
+        data.get(
+            "tokens_charged_to_budget",
+            entry.get("provenance", {}).get("tokens_charged_to_budget", 0),
+        )
+        if isinstance(data, dict)
+        else None
+    )
+    run_context = diagnostic_context(
+        target=output,
+        alias=alias,
+        model=model,
+        endpoint=endpoint,
+        api_key_env=api_key_env,
+        api_key=key,
+        budget=total_budget,
+        remaining=max(0, total_budget - charged) if charged is not None else None,
+        output_tokens=output_tokens,
+        reasoning_output_tokens=reasoning_output_tokens,
+        stage=stage,
+    )
     report = {
         "version": 1,
         "stage": stage,
         "ok": bool(ok),
         "data": data,
         "error": error,
+        "run_context": run_context,
         "checks": {
             name: {k: v for k, v in record.items() if k not in {"request"}}
             for name, record in checks.items()
         },
-        "diagnostic_prompt": None if ok else connect.diagnostic_prompt(stage, entry, checks),
+        "diagnostic_prompt": None
+        if ok
+        else connect.diagnostic_prompt(stage, entry, checks, run_context=run_context),
     }
     click.echo(json.dumps(report, ensure_ascii=False))
     return 0 if ok else failure_code
