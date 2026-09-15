@@ -37,6 +37,8 @@ def test_each_check_stage_is_independent_json(monkeypatch, tmp_path, stage, coun
         body = json.loads(request.content)
         requests.append(body)
         data = response_body("chat")
+        if body["messages"][0]["content"] == connect.REASONING_CHECK_PROMPT:
+            data["choices"][0]["message"]["content"] = "B G D A C E F H"
         data["choices"][0]["message"]["reasoning_content"] = "private reasoning"
         data["usage"]["prompt_tokens_details"] = {"cached_tokens": 15}
         if any(t["function"]["name"] == "probe_tool" for t in body.get("tools", [])):
@@ -69,6 +71,10 @@ def test_each_check_stage_is_independent_json(monkeypatch, tmp_path, stage, coun
     )
     if stage == "reasoning":
         assert [body["reasoning_effort"] for body in requests] == ["high", "low"]
+        assert all(
+            body["messages"][0]["content"] == connect.REASONING_CHECK_PROMPT for body in requests
+        )
+        assert all(record["answer_correct"] is True for record in report["checks"].values())
 
 
 def test_failure_is_json_with_safe_agent_handoff(monkeypatch):

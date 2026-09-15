@@ -415,6 +415,14 @@ The stored request is the planned input, not a claim that every field survived
 runtime translation unchanged. Reasoning observations come from readable response
 text or reported reasoning-token usage. A successful call alone does not establish
 that a setting had an effect.
+Reasoning-level checks use an eight-job scheduling puzzle and request only the
+final order. `answer_correct` scores that public answer independently of
+`reasoning_observed`; a correct answer alone does not prove reasoning was enabled.
+Per-call input, output and reasoning-token counts are included when usage is
+available. The final answer and reasoning text are not saved. The default
+200-token check cap is unchanged; a `length` finish is inconclusive, and an agent
+can explicitly rerun `--stage reasoning --output-tokens 2048` within its approved
+`--budget-tokens` limit if more room is needed. There is no automatic retry.
 HTTP 400 is recorded as rejected, not unsupported. Auth, timeout and transient
 failures remain untested; failed routing or auth stops subsequent calls within
 that interface's plan. Interface detection still tries the other styles within

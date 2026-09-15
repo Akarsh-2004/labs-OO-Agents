@@ -31,6 +31,19 @@ import yaml
 
 CATALOGUE_URL = "https://openrouter.ai/api/v1/models"
 TEMPLATES = ("effort", "adaptive", "budget", "toggle", "thinking")
+REASONING_CHECK_PROMPT = """Eight jobs—A, B, C, D, E, F, G and H—must run one at a time.
+Each job runs exactly once.
+
+Rules:
+- A runs exactly three positions after B.
+- C runs immediately before E.
+- F runs immediately after E.
+- G runs immediately before D.
+- E runs after A.
+- H runs last.
+
+Find the order that satisfies every rule.
+Reply only with the eight letters in order, without explanation."""
 ENCRYPTED_REASONING_EXPLANATION = (
     "Responses setup asks the server not to store replies. Connect requests encrypted "
     "reasoning so NOOA can carry the model's reasoning context into later turns and tool steps."
@@ -658,6 +671,9 @@ def plan(
     probes.append(Probe("tools", tool_body, output_tokens + 512))
     for label, params in levels.items():
         level_body = deepcopy(body)
+        level_body["input" if api_style == "responses" else "messages"][0]["content"] = (
+            REASONING_CHECK_PROMPT
+        )
         level_body.update(params)
         probes.append(Probe(f"level:{label}", level_body, output_tokens + 512))
     entry["provenance"] = provenance
@@ -831,6 +847,7 @@ def diagnostic_prompt(stage: str, entry: dict, checks: dict) -> str:
                 "detail",
                 "status_code",
                 "reasoning_observed",
+                "answer_correct",
                 "state_retained",
                 "settings_retained",
                 "settings_sent",
@@ -971,10 +988,18 @@ async def run_steps(
             reasoning_observed=reasoning,
             tool_observed=tool,
             reported_tokens=tokens,
+            input_tokens=usage.input_tokens if usage else None,
+            output_tokens=usage.output_tokens if usage else None,
+            reasoning_tokens=usage.reasoning_tokens if usage else None,
             finish_reason=response.finish_reason,
             checked_at=datetime.now(UTC).isoformat(),
         )
         if probe.name.startswith("level:"):
+            # Score only the public final answer, never retain reasoning/reply text.
+            # Correctness is separate from evidence that a setting was obeyed.
+            record["answer_correct"] = (
+                re.sub(r"[\s,]+", "", response.content or "").upper() == "BGDACEFH"
+            )
             record["settings_sent"] = settings_sent
             if not settings_sent:
                 record["outcome"] = "not_confirmed"
