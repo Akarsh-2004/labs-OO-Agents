@@ -229,3 +229,67 @@ async def test_library_session_never_runs_without_full_approval(monkeypatch, app
     result = await connect.run(proposal, approved=approval, api_key="key")
     assert len(bodies) == (1 if approval == "minimal" else 0)
     assert result.entry["provenance"]["session_checks"]["session"]["outcome"] == "not_probed"
+
+
+@pytest.mark.asyncio
+async def test_real_tool_reply_is_replayed_without_execution(monkeypatch):
+    bodies = []
+
+    def handle(request):
+        body = json.loads(request.content)
+        bodies.append(body)
+        data = response_body("chat")
+        choice = data["choices"][0]
+        choice["message"]["reasoning_content"] = "calculation"
+        if len(bodies) == 1:
+            choice["finish_reason"] = "tool_calls"
+            choice["message"]["tool_calls"] = [
+                {
+                    "type": "function",
+                    "id": "tool-one",
+                    "function": {"name": "probe_tool", "arguments": '{"value":"686"}'},
+                }
+            ]
+        else:
+            prior = next(m for m in body["messages"] if m.get("tool_calls"))
+            assert prior["reasoning_content"] == "calculation"
+            assert prior["tool_calls"][0]["id"] == "tool-one"
+            assert any(
+                m.get("role") == "tool" and m["tool_call_id"] == "tool-one"
+                for m in body["messages"]
+            )
+        return httpx.Response(200, json=data)
+
+    mock_http(monkeypatch, handle)
+    proposal = connect.plan("test", "gpt-5.1", "chat", "https://api.test/v1", "")
+    updates = [
+        u
+        async for u in session_steps(
+            "test", proposal.entry, api_key="key", budget_tokens=TOKEN_RESERVATION
+        )
+    ]
+    # The tool callable raises if executed: completing proves it was read as data.
+    assert updates[-1].outcome["outcome"] == "completed"
+    assert len(bodies) == 3
+
+
+@pytest.mark.asyncio
+async def test_closing_progress_iterator_closes_owned_client(monkeypatch):
+    from nooa.unifiedllm.registry import client_from_config
+    import nooa.unifiedllm.registry as registry
+
+    clients = []
+
+    def track(*args, **kwargs):
+        client = client_from_config(*args, **kwargs)
+        clients.append(client)
+        return client
+
+    monkeypatch.setattr(registry, "client_from_config", track)
+    mock_http(monkeypatch, lambda request: httpx.Response(200, json=response_body("chat")))
+    proposal = connect.plan("test", "gpt-5.1", "chat", "https://api.test/v1", "")
+    steps = session_steps("test", proposal.entry, api_key="key", budget_tokens=TOKEN_RESERVATION)
+    assert (await anext(steps)).name == "session:seed"
+    http = clients[0]._http.httpx_async
+    await steps.aclose()
+    assert http.is_closed
