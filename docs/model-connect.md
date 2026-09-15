@@ -155,9 +155,12 @@ The displayed **reported reply ceiling** is capability metadata saved under
 `provenance.catalogue_limits.max_completion_tokens`, not a request default.
 Every entry also has an actual **reply budget**, saved as `max_tokens` for all
 three interfaces. Responses translates that to `max_output_tokens` on the wire.
-Choose short replies (2,048), coding/tool use (8,192), long documents (32,768),
-or a custom budget. Connect offers the catalogue's output recommendation when
-available, otherwise 8,192, bounded by the known ceiling and context window.
+Press Enter to accept the single recommendation, or choose Custom to edit the
+number. Connect offers the catalogue's output recommendation when available,
+otherwise 8,192 (labelled NOOA default), bounded by the known ceiling and context
+window. Existing entries keep their current setting. The budget includes thinking
+and the final answer; short replies use fewer tokens. The custom editor shows the
+known upper limit as a constraint, not as a suggested allocation.
 `--max-tokens N` (also `--reply-tokens N`) sets it in scripted or interactive
 mode; `--output-tokens` still controls only the small setup probes.
 The library's `configure_entry()` and `write()` enforce the same defaults,

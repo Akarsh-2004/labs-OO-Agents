@@ -13,7 +13,9 @@ def sdk_credentials(monkeypatch):
     from nooa_cli.commands import _connect_prompts
 
     # Reply-budget interaction has its own contract tests.
-    monkeypatch.setattr(_connect_prompts, "choose_reply_limit", lambda suggested, ceiling: suggested)
+    monkeypatch.setattr(
+        _connect_prompts, "choose_reply_limit", lambda suggested, ceiling, **kw: suggested
+    )
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
 

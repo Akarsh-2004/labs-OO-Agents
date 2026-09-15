@@ -17,7 +17,7 @@ def registry(tmp_path, monkeypatch):
     from nooa import llm_config
 
     monkeypatch.setattr(
-        _connect_prompts, "choose_reply_limit", lambda suggested, ceiling: suggested
+        _connect_prompts, "choose_reply_limit", lambda suggested, ceiling, **kw: suggested
     )
 
     path = tmp_path / "llm_config.yaml"

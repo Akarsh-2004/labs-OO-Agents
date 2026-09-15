@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Human presets and scripted saves use the same actual reply limit."""
+"""A recommendation or custom value sets the same actual reply limit as scripts."""
 
 import json
 
@@ -11,7 +11,7 @@ from nooa_cli.commands.connect import command
 
 
 @pytest.mark.parametrize(
-    "choice,expected", [("short", 2048), ("coding", 8192), ("long", 32768), ("custom\n512", 512)]
+    "choice,expected", [("", 8192), ("recommended", 8192), ("custom\n512", 512)]
 )
 def test_wizard_reply_budget_is_a_runtime_cap(tmp_path, monkeypatch, choice, expected):
     from nooa import llm_config
@@ -42,6 +42,36 @@ def test_wizard_reply_budget_is_a_runtime_cap(tmp_path, monkeypatch, choice, exp
     assert entry["max_tokens"] == expected
     assert entry["include"] == ["reasoning.encrypted_content"]
     assert entry["store"] is False
+    assert "Recommended — 8,192 tokens (NOOA default)" in result.output
+    assert "Short replies and simple questions" not in result.output
+    assert "Coding agents and tool use" not in result.output
+    assert "Long documents and deeper reasoning" not in result.output
+
+
+def test_reply_dialog_offers_only_recommendation_and_custom(monkeypatch, capsys):
+    from nooa_cli.commands import _connect_prompts
+
+    calls = []
+    answers = iter(["custom", "99999", "16384"])
+
+    def prompt(text, **kwargs):
+        calls.append((text, kwargs))
+        return next(answers)
+
+    monkeypatch.setattr(_connect_prompts, "prompt", prompt)
+    assert (
+        _connect_prompts.choose_reply_limit(32768, 65536, source="catalogue_recommendation")
+        == 16384
+    )
+    menu = calls[0][1]
+    assert menu["choices"] == ("recommended", "custom")
+    assert menu["default"] == "recommended"
+    assert menu["open_menu"] is True
+    assert menu["labels"]["recommended"] == "Recommended — 32,768 tokens (catalogue recommendation)"
+    assert calls[1][1]["default"] == "32768"
+    output = capsys.readouterr()
+    assert "Known upper limit: 65,536 tokens" in output.out
+    assert "at most 65,536" in output.err
 
 
 def test_stage_save_fills_defaults_and_reports_shadow(tmp_path, monkeypatch):

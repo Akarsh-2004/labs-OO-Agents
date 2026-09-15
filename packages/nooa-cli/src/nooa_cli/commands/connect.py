@@ -744,7 +744,9 @@ def command(
                 if isinstance(v, int) and v > 0
             ]
             chosen_cap = choose_reply_limit(
-                configured["max_tokens"], min(bounds) if bounds else None
+                configured["max_tokens"],
+                min(bounds) if bounds else None,
+                source=configured["provenance"]["reply_limit"]["source"],
             )
             configured = connect.configure_entry(configured, reply_tokens=chosen_cap)
         proposal = replace(proposal, entry=configured)

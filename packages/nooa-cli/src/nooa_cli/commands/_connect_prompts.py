@@ -233,27 +233,28 @@ def edit_model_details(model):
     return edited
 
 
-def choose_reply_limit(suggested, ceiling=None):
+def choose_reply_limit(suggested, ceiling=None, *, source="connect_default"):
     """Choose a real request budget, independent of the capability ceiling."""
-    choices = {"suggested": suggested, "short": 2048, "coding": 8192, "long": 32768}
-    choices = {
-        name: value for name, value in choices.items() if ceiling is None or value <= ceiling
-    }
+    click.echo("\n  Room for each reply, including thinking and the final answer.")
+    click.echo("  Short replies use fewer tokens; this limit does not make replies longer.\n")
+    origin = {
+        "connect_default": "NOOA default",
+        "catalogue_recommendation": "catalogue recommendation",
+    }.get(source, "current setting")
     selected = prompt(
         "Reply budget",
-        choices=(*choices, "custom"),
-        default="suggested",
+        choices=("recommended", "custom"),
+        default="recommended",
         open_menu=True,
         labels={
-            "suggested": f"Suggested starting limit — {suggested:,} tokens",
-            "short": "Short replies and simple questions — 2,048 tokens",
-            "coding": "Coding agents and tool use — 8,192 tokens",
-            "long": "Long documents and deeper reasoning — 32,768 tokens",
-            "custom": "Enter a token limit",
+            "recommended": f"Recommended — {suggested:,} tokens ({origin})",
+            "custom": "Custom…",
         },
     )
     if selected != "custom":
-        return choices[selected]
+        return suggested
+    if ceiling is not None:
+        click.echo(f"  Known upper limit: {ceiling:,} tokens.")
     while True:
         value = prompt("Maximum tokens per reply", default=str(suggested))
         if value.isascii() and value.isdecimal() and int(value) > 0:
