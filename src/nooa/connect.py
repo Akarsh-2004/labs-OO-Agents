@@ -640,6 +640,80 @@ async def run(
     raise RuntimeError("Probe run ended without a result")
 
 
+async def check_stage(
+    proposal: ConnectPlan, stage: str, *, api_key: str | None = None
+) -> ConnectResult:
+    """Run one selected check afresh, without prompts or registry writes.
+
+    Stages are routing, tools, reasoning, session, or all. Calling this function
+    explicitly approves that stage within the plan's existing limits. Results
+    retain other stages' provenance, but selected checks never reuse old evidence.
+    """
+    if stage not in {"routing", "tools", "reasoning", "session", "all"}:
+        raise ValueError("Unknown check stage")
+    probes = tuple(
+        p
+        for p in proposal.probes
+        if stage == "all" or p.name == stage or stage == "reasoning" and p.name.startswith("level:")
+    )
+    if stage == "reasoning" and not probes:
+        raise ValueError("No reasoning levels configured; provide a reasoning_levels mapping")
+    entry = deepcopy(proposal.entry)
+    for probe in probes:
+        entry["provenance"]["probes"].pop(probe.name, None)
+    if api_key is None and entry.get("api_key_env"):
+        api_key = os.environ.get(entry["api_key_env"])
+        if not api_key:
+            raise ValueError("The configured credential variable is unset or empty")
+    selected = replace(
+        proposal, entry=entry, probes=probes, session_checks=stage in {"session", "all"}
+    )
+    return await run(selected, approved="all", api_key=api_key)
+
+
+def diagnostic_prompt(stage: str, entry: dict, checks: dict) -> str:
+    """Safe, copyable handoff for a person or agent; no credentials or raw bodies."""
+    context = {
+        key: entry[key]
+        for key in ("model_name", "api_style", "api_base", "api_key_env")
+        if key in entry
+    }
+    # Endpoints from arbitrary caller input may contain credentials or query data.
+    if "api_base" in context:
+        try:
+            context["api_base"] = normalize_endpoint(context["api_base"])
+        except (TypeError, ValueError):
+            context["api_base"] = "[invalid endpoint omitted]"
+    outcomes = {
+        name: {
+            key: record[key]
+            for key in (
+                "outcome",
+                "error",
+                "status_code",
+                "reasoning_observed",
+                "state_retained",
+                "settings_retained",
+                "input_tokens",
+                "cached_input_tokens",
+                "finish_reason",
+            )
+            if key in record
+        }
+        for name, record in checks.items()
+    }
+    return (
+        f"Diagnose and fix NOOA Connect stage {stage!r}. "
+        "Inspect the configuration, credential lookup, and actual request construction. "
+        "Model listing alone does not validate credentials. Distinguish rejection, missing "
+        "evidence, and unsupported features; do not infer support from an HTTP success alone. "
+        "Use nooa.connect library functions or nooa connect --stage to isolate the failure, "
+        "then rerun the affected checks within configured limits. Never print or copy key "
+        "values, reasoning text, opaque state, or raw error bodies. Report the cause, fix, and evidence.\n"
+        + json.dumps({"connection": context, "checks": outcomes}, indent=2)
+    )
+
+
 async def run_steps(
     proposal: ConnectPlan,
     *,

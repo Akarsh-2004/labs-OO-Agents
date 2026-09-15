@@ -4,9 +4,20 @@
 
 import click
 
+from ._connect_stages import STAGES
+
 
 @click.command()
 @click.argument("model", required=False)
+@click.option(
+    "--stage", type=click.Choice(STAGES), help="Run one non-interactive stage; emit JSON and exit."
+)
+@click.option(
+    "--input",
+    "input_file",
+    type=click.Path(exists=True, dir_okay=False),
+    help="JSON plan/result to save with --stage save.",
+)
 @click.option(
     "--provider",
     help="Connection preset: nvidia, openai, anthropic, google, openrouter, or custom.",
@@ -58,6 +69,8 @@ import click
 )
 def command(
     model,
+    stage,
+    input_file,
     provider,
     alias,
     endpoint,
@@ -84,6 +97,40 @@ def command(
     explicit --endpoint and --api-style.
     MODEL is the exact endpoint model ID, without a LiteLLM routing prefix.
     """
+    if stage:
+        from ._connect_stages import run_stage
+
+        code = run_stage(
+            stage,
+            model=model,
+            alias=alias,
+            endpoint=endpoint,
+            api_style=api_style,
+            api_key_env=api_key_env,
+            budget_tokens=budget_tokens,
+            output_tokens=output_tokens,
+            levels_file=levels_file,
+            context_window=context_window,
+            input_file=input_file,
+            output=output,
+            yes=yes,
+            invalid_options=[
+                name
+                for name, used in {
+                    "--no-probe": no_probe,
+                    "--probe": probe != "all",
+                    "--prompt-key": prompt_key,
+                    "--provider": provider,
+                    "--catalogue-model": catalogue_model,
+                    "--reasoning-template": reasoning_template,
+                    "--levels": levels,
+                }.items()
+                if used
+            ],
+        )
+        raise click.exceptions.Exit(code)
+    if input_file:
+        raise click.UsageError("--input requires --stage save")
     import asyncio
     import os
     from contextlib import aclosing
@@ -263,6 +310,18 @@ def command(
                     view.line(
                         "Could not confirm a working connection. Listing models does not validate the key.",
                         fg="yellow",
+                    )
+                    failed_checks = {
+                        style: r.entry["provenance"]["probes"]["routing"]
+                        for style, r in interfaces.results.items()
+                    }
+                    click.echo(
+                        "Agent diagnostic prompt:\n"
+                        + connect.diagnostic_prompt(
+                            "interfaces",
+                            {"model_name": model, "api_base": endpoint, "api_key_env": api_key_env},
+                            failed_checks,
+                        )
                     )
                     if yes:
                         raise click.ClickException(
@@ -552,6 +611,22 @@ def command(
                 err=True,
             )
         unobserved = connect.unobserved_reasoning_levels(result.entry)
+        checks = {
+            **result.entry["provenance"]["probes"],
+            **result.entry["provenance"].get("session_checks", {}),
+        }
+        if approval != "none" and (
+            unobserved
+            or any(
+                r.get("outcome") in {"rejected", "not_confirmed", "not_probed"}
+                and r.get("reason") != "not approved"
+                for r in checks.values()
+            )
+        ):
+            click.echo(
+                "Agent diagnostic prompt:\n"
+                + connect.diagnostic_prompt("checks", result.entry, checks)
+            )
         if unobserved:
             click.echo(
                 "Warning: no reasoning information was returned for: "
@@ -575,4 +650,13 @@ def command(
                     "For a custom path, include it in NEMO_OO_LLM_CONFIG or reload_registry(path)."
                 )
     except (ValueError, OSError, yaml.YAMLError, httpx.HTTPError) as exc:
-        raise click.ClickException(str(exc)) from None
+        click.echo(
+            "Agent diagnostic prompt:\n"
+            + connect.diagnostic_prompt(
+                "setup", {}, {"setup": {"outcome": "failed", "error": type(exc).__name__}}
+            ),
+            err=True,
+        )
+        raise click.ClickException(
+            "Setup could not finish; see the diagnostic prompt above."
+        ) from None

@@ -13,6 +13,88 @@ Start the guided setup with no arguments:
 uv run nooa connect
 ```
 
+## Independent stages for agents
+
+`--stage` runs without prompts and writes one JSON result to stdout. It never
+saves implicitly. A generation stage runs directly within its configured limits;
+there is no separate spending-approval dialogue. The interactive wizard remains
+available when `--stage` is absent.
+
+| Stage | Purpose |
+|---|---|
+| `discover` | List the endpoint's models (not proof of authentication). |
+| `catalogue` | Read public model metadata; optional MODEL filters candidates. |
+| `interfaces` | Check API formats and report which worked. |
+| `plan` | Build an unsaved configuration and proposed requests; no network. |
+| `routing` | Test one basic request with the chosen interface. |
+| `tools` | Check whether the model produces the requested tool call; never execute it. |
+| `reasoning` | Check declared levels supplied by `--levels-file`. |
+| `session` | Check cache reuse and reasoning replay across turns. |
+| `all` | Run the basic and conversation checks. |
+| `save` | Write the entry from a JSON plan/result to a registry. |
+
+For example:
+
+```sh
+uv run nooa connect --stage discover \
+  --endpoint https://gateway.example/v1 --api-key-env MODEL_KEY
+
+uv run nooa connect your-model --stage routing --as work \
+  --endpoint https://gateway.example/v1 --api-style chat --api-key-env MODEL_KEY
+
+uv run nooa connect your-model --stage plan --as work \
+  --endpoint https://gateway.example/v1 --api-style chat --api-key-env MODEL_KEY \
+  > model-plan.json
+
+uv run nooa connect --stage save --input model-plan.json --output llm_config.yaml
+```
+
+Use explicit endpoint/interface/key-variable options in stage mode; wizard
+presets, pasted keys and `--no-probe` do not apply. `--budget-tokens` defaults to
+65,536; `--output-tokens` controls basic check caps. Session checks retain their
+separate documented cap. Redirect stdout to keep stage reports; `--output` is
+the registry target for `save` only. Replacing an existing alias requires `--yes`
+and prints a warning to stderr. Saving an untested plan does not validate it.
+
+Reports have `version`, `stage`, `ok`, `data`, `checks`, `error`, and
+`diagnostic_prompt`. Exit 0 means the stage met its criterion; 1 means failure
+or missing evidence, not proof of unsupported features; 2 means invalid stage
+options. Request acceptance alone is not success for tools or enabled reasoning
+checks. A session requires both substantial cache reuse and retained reasoning.
+The diagnostic prompt includes safe route/credential-variable names and outcomes,
+not key values, raw provider error bodies, or returned reasoning. It asks an
+agent to investigate, repair, and rerun the affected stage within configured
+limits. Wizard failures print the same library-generated handoff; neither
+frontend launches another agent automatically.
+
+## Library calls from NOOA agents
+
+The CLI is a frontend to `nooa.connect`, not a subprocess requirement. Inside
+an async NOOA agent method, use:
+
+```python
+from nooa import connect
+
+proposal = connect.plan(
+    "work", "your-model", "chat", "https://gateway.example/v1", "MODEL_KEY",
+    budget_tokens=65536,
+    reasoning_levels={"high": {"reasoning_effort": "high"}},
+)
+result = await connect.check_stage(proposal, "reasoning")
+checks = result.entry["provenance"]["probes"]
+handoff = connect.diagnostic_prompt("reasoning", result.entry, checks)
+# Explicit persistence, when wanted:
+# connect.write(result.entry, registry_path, alias=result.alias)
+```
+
+`check_stage` runs selected checks afresh and leaves the input plan unchanged.
+Other public stages are `discover`, `catalogue`, `match_models`, `plan`,
+`check_interfaces`, and `write`. Use `run_steps` for progress events on an approved
+plan. The library never prints, prompts, reads stdin, or launches an agent;
+frontends decide presentation and persistence.
+
+## Interactive setup
+
 Choose NVIDIA (build.nvidia.com), OpenAI, Anthropic, Google (Gemini), OpenRouter,
 or a custom endpoint. Presets fill in the public server URL and key variable;
 model names still come from the endpoint, not a bundled list. The order is
