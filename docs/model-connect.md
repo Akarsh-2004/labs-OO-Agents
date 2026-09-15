@@ -206,10 +206,19 @@ final question. It does not execute tools or invent reasoning state. It reports:
   reasoning. Missing evidence says “not confirmed,” not “reasoning is disabled.”
 
 These calls use the saved reply cap when the shared budget permits. Otherwise
-they use at most 2,048 output tokens each and reserve up to 43,008 estimated tokens
+they start at at most 2,048 output tokens each and reserve up to 43,008 estimated tokens
 within the initial shared budget (131,072 by default). Connection/tool checks retain their
-200-token output cap; reasoning checks have 4,096 tokens each. No retries run; checks stop rather than increase the approved
-budget. These are estimates, not billing limits: servers can ignore caps. Use
+200-token output cap; reasoning checks have 4,096 tokens each. Only a conversation
+reply with stop reason `length` may retry: twice per turn, doubling the reply cap
+each time, never above the saved limit or a reasoning level's fixed cap. The same
+input is resent; truncated replies are never added to history. All attempts are
+charged, and a retry must leave enough approved budget for the remaining turns.
+The approval therefore covers up to nine conversation calls. Errors and filtered
+replies do not retry. Checks stop rather than increase the approved budget.
+Successful rows hide the test cap; retry rows explain the increase, and detailed
+JSON retains per-attempt caps, stop reasons and usage. Testing with a reduced cap
+confirms only cache/replay behaviour, not that the full saved cap is accepted.
+These are estimates, not billing limits: servers can ignore caps. Use
 `--budget-tokens` before setup to choose another budget. Small context windows,
 incompatible reply caps, failures or insufficient budget leave the conversation
 check unconfirmed or untested. Results include sanitized counts and flags only;
@@ -295,7 +304,8 @@ The default plan also checks tools and each proposed reasoning level. The
 selected interface's successful routing request is reused, not sent twice.
 Connection/tool checks use 200 output tokens per call and a 30-second total
 deadline. Reasoning checks use 4,096 output tokens and a 120-second deadline;
-conversation-check calls also have 120 seconds. No retries run. The CLI uses
+conversation-check calls also have 120 seconds per attempt. Only truncated
+conversation replies have the bounded retries described above. The CLI uses
 the fixed budget approved at the beginning. Each basic request reserves its
 output cap plus 512 estimated input tokens. An explicit `--budget-tokens` limits
 the entire setup, including interface detection; it is never increased. Connect

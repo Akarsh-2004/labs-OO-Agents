@@ -3,7 +3,7 @@
 """Model onboarding shared by the CLI and TUI; no prompts or terminal output.
 
 ``plan`` prepares data for approval. ``run`` sends only approved, capped requests
-without retries. ``write`` updates one alias in a registry file. Catalogue limits
+without network-error retries. ``write`` updates one alias in a registry file. Catalogue limits
 are estimates with sources; acceptance does not prove a reasoning setting was
 obeyed. The runtime reads the result, never these onboarding templates.
 """
@@ -888,7 +888,7 @@ async def run_steps(
     approved: Literal["all", "minimal", "none"],
     api_key: str | None = None,
 ) -> AsyncIterator[ProbeUpdate | ConnectResult]:
-    """Execute approved probes through UnifiedLLM without retries or provider fallback.
+    """Execute approved probes without network retries or provider fallback.
 
     Minimal approval sends only the routing probe. Its failure stops all probes.
     HTTP 400 means rejected, not unsupported; auth and transient failures stay

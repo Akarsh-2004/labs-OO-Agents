@@ -7,6 +7,7 @@ import json
 from copy import deepcopy
 
 REPLY_CAP = 2048
+MAX_LENGTH_RETRIES = 2
 # Includes padding, schema/instructions, and up to two prior reply-sized items.
 CALL_RESERVATION = 8192 + 3 * REPLY_CAP
 TOKEN_RESERVATION = 3 * CALL_RESERVATION
@@ -121,7 +122,7 @@ def _reasoning_values(response):
 
 
 async def session_steps(alias, entry, *, api_key, budget_tokens):
-    """Three calls on one client; no retry, invented reasoning, or tool execution."""
+    """Three turns, with bounded length-only retries; never execute model tools."""
     from nooa.connect import ProbeUpdate, _include_rejected
     from nooa.context_blocks.formatter import OpenAIProviderFormatter, ResponsesProviderFormatter
     from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
@@ -217,6 +218,7 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
                     "max_output_tokens" if entry["api_style"] == "responses" else "max_tokens", None
                 )
     bodies = []
+    successful_bodies = []
 
     async def capture(request):
         bodies.append(json.loads(request.content))
@@ -266,62 +268,116 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
                     },
                 ]
             )
-            before = len(bodies)
-            spent += reservation
-            try:
-                async with asyncio.timeout(120):
-                    response = await client.acall(call_messages, **params)
-            except Exception as exc:
-                record = {
-                    "outcome": "not_confirmed",
-                    "error": type(exc).__name__,
-                    "tokens_charged_to_budget": spent,
-                }
-                status = getattr(exc, "status_code", None)
-                if isinstance(status, int):
-                    record["status_code"] = status
-                if entry.get("include") == ["reasoning.encrypted_content"] and _include_rejected(
-                    exc
-                ):
-                    record["include_rejected"] = True
-                yield ProbeUpdate("session", record)
-                return
-            usage = response.usage
-            last_usage = usage
-            total = usage.input_tokens + usage.output_tokens if usage else 0
-            spent += max(0, total - reservation)
-            observed = bool(
-                any(p.kind == "reasoning" for p in response.parts)
-                or (usage and usage.reasoning_tokens)
-            )
-            observations.append(observed)
-            record = {
-                "outcome": "accepted",
-                "reasoning_observed": observed,
-                "input_tokens": usage.input_tokens if usage else None,
-                "output_tokens": usage.output_tokens if usage else None,
-                "cached_input_tokens": usage.cached_input_tokens if usage else None,
-                "finish_reason": response.finish_reason,
-                "tested_reasoning_level": level,
-                "configured_reply_tokens": configured_cap,
-                "tested_reply_tokens": reply_cap,
-                "reply_limit_reduced_for_check": reply_cap != configured_cap,
-            }
-            yield ProbeUpdate(f"session:{name}", record)
-            if (
-                len(bodies) != before + 1
-                or (usage and usage.output_tokens > reply_cap)
-                or response.finish_reason in {"length", "error"}
-            ):
-                yield ProbeUpdate(
-                    "session",
-                    {
+            attempts = []
+            for attempt in range(MAX_LENGTH_RETRIES + 1):
+                before = len(bodies)
+                spent += reservation
+                try:
+                    async with asyncio.timeout(120):
+                        response = await client.acall(call_messages, **params)
+                except Exception as exc:
+                    record = {
                         "outcome": "not_confirmed",
-                        "reason": "request capture missing, reply truncated, or cap exceeded",
+                        "error": type(exc).__name__,
                         "tokens_charged_to_budget": spent,
-                    },
+                        "attempts": deepcopy(attempts),
+                    }
+                    status = getattr(exc, "status_code", None)
+                    if isinstance(status, int):
+                        record["status_code"] = status
+                    if entry.get("include") == [
+                        "reasoning.encrypted_content"
+                    ] and _include_rejected(exc):
+                        record["include_rejected"] = True
+                    yield ProbeUpdate("session", record)
+                    return
+                usage = response.usage
+                last_usage = usage
+                total = usage.input_tokens + usage.output_tokens if usage else 0
+                spent += max(0, total - reservation)
+                observed = bool(
+                    any(p.kind == "reasoning" for p in response.parts)
+                    or (usage and usage.reasoning_tokens)
                 )
-                return
+                record = {
+                    "outcome": "accepted",
+                    "reasoning_observed": observed,
+                    "input_tokens": usage.input_tokens if usage else None,
+                    "output_tokens": usage.output_tokens if usage else None,
+                    "cached_input_tokens": usage.cached_input_tokens if usage else None,
+                    "finish_reason": response.finish_reason,
+                    "tested_reasoning_level": level,
+                    "configured_reply_tokens": configured_cap,
+                    "tested_reply_tokens": reply_cap,
+                    "reply_limit_reduced_for_check": reply_cap != configured_cap,
+                }
+                attempts.append(
+                    {
+                        k: record[k]
+                        for k in (
+                            "input_tokens",
+                            "output_tokens",
+                            "finish_reason",
+                            "tested_reply_tokens",
+                        )
+                    }
+                )
+                record["attempts"] = deepcopy(attempts)
+                reason = None
+                if len(bodies) != before + 1 or (usage and usage.output_tokens > reply_cap):
+                    reason = "request capture missing or server exceeded the reply cap"
+                elif response.finish_reason == "length":
+                    next_cap = min(reply_cap * 2, configured_cap)
+                    next_reservation = 8192 + 3 * next_cap
+                    cap_key = (
+                        "max_output_tokens" if entry["api_style"] == "responses" else "max_tokens"
+                    )
+                    if next_cap <= reply_cap:
+                        reason = "reply truncated at the saved model limit"
+                    elif attempt == MAX_LENGTH_RETRIES:
+                        reason = "reply still truncated after two larger-limit retries"
+                    elif cap_key not in params:
+                        reason = (
+                            "reply truncated; the selected reasoning level fixes the reply limit"
+                        )
+                    elif isinstance(window, int) and window < next_reservation:
+                        reason = (
+                            "reply truncated; a larger check would exceed the context allowance"
+                        )
+                    elif spent + (3 - index) * next_reservation > budget_tokens:
+                        reason = "reply truncated; insufficient approved budget to retry and finish the checks"
+                    else:
+                        yield ProbeUpdate(
+                            f"session:{name}",
+                            {
+                                "outcome": "retrying",
+                                "reason": "reply limit reached",
+                                "previous_reply_tokens": reply_cap,
+                                "tested_reply_tokens": next_cap,
+                                "attempts": deepcopy(attempts),
+                            },
+                        )
+                        reply_cap, reservation = next_cap, next_reservation
+                        params[cap_key] = reply_cap
+                        continue  # Same input; never replay the truncated response.
+                elif response.finish_reason in {"error", "content_filter"}:
+                    reason = "conversation reply failed or was filtered"
+                if reason:
+                    record.update(outcome="not_confirmed", reason=reason)
+                    yield ProbeUpdate(f"session:{name}", record)
+                    yield ProbeUpdate(
+                        "session",
+                        {
+                            "outcome": "not_confirmed",
+                            "reason": reason,
+                            "tokens_charged_to_budget": spent,
+                        },
+                    )
+                    return
+                yield ProbeUpdate(f"session:{name}", record)
+                break
+            observations.append(observed)
+            successful_bodies.append(bodies[-1])
             wire = bodies[-1]
             settings_ok &= settings_on_wire(controls, wire)
             if index == 0:
@@ -347,9 +403,12 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
                     )
 
         # Compare all provider fields; only the final user message may differ.
-        left, right = deepcopy(bodies[1]), deepcopy(bodies[2])
+        left, right = deepcopy(successful_bodies[1]), deepcopy(successful_bodies[2])
         key = "input" if entry["api_style"] == "responses" else "messages"
         for body in (left, right):
+            # The reply allowance may have grown; it is not part of the input prefix.
+            for cap_key in ("max_tokens", "max_output_tokens", "max_completion_tokens"):
+                body.pop(cap_key, None)
             if entry["api_style"] == "anthropic":
                 body[key][-1]["content"][-1]["text"] = "<volatile>"
             else:
@@ -357,7 +416,7 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
         stable = left == right
         cached = last_usage.cached_input_tokens if last_usage else None
         seed_input = first.usage.input_tokens if first.usage else 0
-        markers = list(_cache_markers(bodies[2]))
+        markers = list(_cache_markers(successful_bodies[2]))
         explicit = bool(markers)
         substantial = bool(stable and seed_input > 0 and cached and cached >= seed_input / 2)
         cache_reason = (
@@ -377,13 +436,13 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
                 "input_tokens": last_usage.input_tokens if last_usage else None,
                 "stable_prefix": stable,
                 "marker_count": len(markers),
-                "explicit_mode": bodies[2].get("prompt_cache_options", {}).get("mode")
+                "explicit_mode": successful_bodies[2].get("prompt_cache_options", {}).get("mode")
                 == "explicit",
                 "reason": cache_reason,
             },
         )
         expected = list(_reasoning_values(first))
-        actual = list(_wire_reasoning(bodies[1]))
+        actual = list(_wire_reasoning(successful_bodies[1]))
         retained = bool(expected) and all(value in actual for value in expected)
         yield ProbeUpdate(
             "reasoning_retention",

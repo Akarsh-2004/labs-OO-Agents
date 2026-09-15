@@ -81,7 +81,7 @@ def intro(*, checks, output_tokens, budget_tokens, reasoning_output_tokens=4096)
         line("API checks may incur charges.", fg="yellow")
         line("Checks use the same model client as your agents.", dim=True)
         line(
-            "Up to 3 interface calls, then tools, each proposed reasoning level, and a 3-call conversation check.",
+            "Up to 3 interface calls, then tools, each proposed reasoning level, and a 3-turn conversation check.",
             dim=True,
         )
         line(
@@ -94,7 +94,10 @@ def intro(*, checks, output_tokens, budget_tokens, reasoning_output_tokens=4096)
             else "Up to 3 interface calls, then tools and each proposed reasoning level.",
             dim=True,
         )
-        line("No retries. Caps are estimates, not billing limits.", dim=True)
+        line(
+            "A truncated conversation reply may retry twice with a doubled limit, up to your saved limit and within this budget (at most 9 conversation calls). No network-error retries. Caps are estimates, not billing limits.",
+            dim=True,
+        )
         line(
             "If encrypted reasoning is explicitly rejected, one check without it may use the same approved budget.",
             dim=True,
@@ -161,6 +164,12 @@ class CheckProgress:
             return
         if name == "session" and outcome == "completed":
             return  # Cache and reasoning rows already describe the result.
+        if outcome == "retrying":
+            line(
+                f"↻ {label}: Reached the test limit; retrying with {record['tested_reply_tokens']:,} tokens (saved setting unchanged).",
+                fg="yellow",
+            )
+            return
         status = "passed" if outcome in {"accepted", "confirmed"} else "attention"
         detail = check_failure(record) or record.get("reason")
         if outcome == "not_probed" and not record.get("error"):
@@ -189,10 +198,6 @@ class CheckProgress:
                 status, detail = "attention", "Reply incomplete; check not conclusive"
             if record.get("reason") == "previous result reused":
                 detail += " · already checked"
-            if name == "session:seed" and record.get("tested_reply_tokens"):
-                detail += f" · reply limit {record['tested_reply_tokens']:,}"
-                if record.get("reply_limit_reduced_for_check"):
-                    detail += f" (saved limit {record['configured_reply_tokens']:,}; reduced for this check)"
         elif name == "cache" and outcome == "confirmed" and record.get("input_tokens"):
             cached, total = record.get("cached_input_tokens", 0), record["input_tokens"]
             detail = f"Reused {cached / total:.0%} of input ({cached:,} / {total:,} tokens)"

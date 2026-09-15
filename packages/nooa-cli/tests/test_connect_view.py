@@ -183,3 +183,37 @@ def test_terminal_progress_clears_active_row_on_completion_and_cancel(monkeypatc
     assert result.exit_code == 0, result.output
     assert result.stdout.count("\r\x1b[2K") == 2
     assert "Chat interface: Connected" in result.output
+
+
+def test_success_hides_test_cap_but_length_retry_explains_increase():
+    @click.command()
+    def command():
+        progress = view.CheckProgress()
+        progress.update(
+            "session:seed",
+            {
+                "outcome": "accepted",
+                "reasoning_observed": True,
+                "tested_reply_tokens": 2048,
+                "configured_reply_tokens": 65536,
+                "reply_limit_reduced_for_check": True,
+            },
+        )
+        progress.update(
+            "session:replay",
+            {
+                "outcome": "retrying",
+                "tested_reply_tokens": 4096,
+            },
+        )
+        progress.update("session:replay", {"outcome": "accepted"})
+        progress.finish()
+
+    result = CliRunner().invoke(command)
+    assert result.exit_code == 0
+    assert "2,048" not in result.output
+    assert "65,536" not in result.output
+    text = " ".join(result.output.split())
+    assert "retrying with 4,096 tokens" in text
+    assert "saved setting unchanged" in text
+    assert "2 passed · 0 need attention · 0 skipped" in result.output

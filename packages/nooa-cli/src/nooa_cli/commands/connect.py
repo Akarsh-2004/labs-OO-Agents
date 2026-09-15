@@ -809,7 +809,7 @@ def command(
                 err=True,
             )
         click.echo(
-            "No retries or capacity probes. Estimates are not billing limits: endpoints can ignore output caps."
+            "Only truncated conversation replies retry, within the approved budget. No network-error retries or capacity probes. Estimates are not billing limits: endpoints can ignore output caps."
         )
         result = asyncio.run(
             show_checks(
