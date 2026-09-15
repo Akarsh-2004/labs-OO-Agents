@@ -12,6 +12,17 @@ CALL_RESERVATION = 8192 + 3 * REPLY_CAP
 TOKEN_RESERVATION = 3 * CALL_RESERVATION
 
 
+def reply_budget(entry, budget_tokens):
+    """Prefer the saved cap; fall back within the already approved total budget."""
+    configured = entry.get("max_tokens", REPLY_CAP)
+    cap = configured
+    reservation = 8192 + 3 * cap
+    if 3 * reservation > budget_tokens:
+        cap = min(REPLY_CAP, configured)
+        reservation = 8192 + 3 * cap
+    return configured, cap, reservation
+
+
 def _strings(value):
     if isinstance(value, str):
         yield value
@@ -29,6 +40,16 @@ def _contains(expected, actual):
             key in actual and _contains(value, actual[key]) for key, value in expected.items()
         )
     return expected == actual
+
+
+def settings_on_wire(settings, wire):
+    """Compare declared settings after the API's reply-limit field translation."""
+    expected = deepcopy(settings)
+    caps = {"max_tokens", "max_completion_tokens", "max_output_tokens"}
+    for key in caps & expected.keys():
+        if key not in wire and len(caps & wire.keys()) == 1:
+            expected[next(iter(caps & wire.keys()))] = expected.pop(key)
+    return _contains(expected, wire)
 
 
 def _wire_reasoning(value):
@@ -109,11 +130,12 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
     from nooa.unifiedllm import CacheBoundary, RetryConfig, Tool
     from nooa.unifiedllm.registry import client_from_config
 
-    if budget_tokens < TOKEN_RESERVATION:
+    configured_cap, reply_cap, reservation = reply_budget(entry, budget_tokens)
+    if budget_tokens < 3 * reservation:
         yield ProbeUpdate("session", {"outcome": "not_probed", "reason": "budget exhausted"})
         return
     window = entry.get("context_window")
-    if isinstance(window, int) and window < CALL_RESERVATION:
+    if isinstance(window, int) and window < reservation:
         yield ProbeUpdate(
             "session",
             {"outcome": "not_probed", "reason": "context window too small for this check"},
@@ -131,7 +153,7 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
         in {"thinking", "reasoning", "reasoning_effort", "output_config", "chat_template_kwargs"}
     }
     if any(
-        settings.get(key, REPLY_CAP) != REPLY_CAP
+        settings.get(key, reply_cap) != reply_cap
         for key in ("max_tokens", "max_output_tokens", "max_completion_tokens")
     ):
         yield ProbeUpdate(
@@ -185,10 +207,15 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
         "tools": [
             Tool(name="probe_tool", description="Record a computed value", callable=probe_tool)
         ],
-        "max_output_tokens" if entry["api_style"] == "responses" else "max_tokens": REPLY_CAP,
+        "max_output_tokens" if entry["api_style"] == "responses" else "max_tokens": reply_cap,
     }
     if level is not None:
         params["reasoning_level"] = level
+        for key in ("max_tokens", "max_output_tokens", "max_completion_tokens"):
+            if key in settings:
+                params.pop(
+                    "max_output_tokens" if entry["api_style"] == "responses" else "max_tokens", None
+                )
     bodies = []
 
     async def capture(request):
@@ -216,7 +243,7 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
     settings_ok = True
     try:
         for index, name in enumerate(("seed", "replay", "repeat")):
-            if spent + CALL_RESERVATION > budget_tokens:
+            if spent + reservation > budget_tokens:
                 yield ProbeUpdate(
                     "session",
                     {
@@ -240,7 +267,7 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
                 ]
             )
             before = len(bodies)
-            spent += CALL_RESERVATION
+            spent += reservation
             try:
                 async with asyncio.timeout(120):
                     response = await client.acall(call_messages, **params)
@@ -262,7 +289,7 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
             usage = response.usage
             last_usage = usage
             total = usage.input_tokens + usage.output_tokens if usage else 0
-            spent += max(0, total - CALL_RESERVATION)
+            spent += max(0, total - reservation)
             observed = bool(
                 any(p.kind == "reasoning" for p in response.parts)
                 or (usage and usage.reasoning_tokens)
@@ -276,11 +303,14 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
                 "cached_input_tokens": usage.cached_input_tokens if usage else None,
                 "finish_reason": response.finish_reason,
                 "tested_reasoning_level": level,
+                "configured_reply_tokens": configured_cap,
+                "tested_reply_tokens": reply_cap,
+                "reply_limit_reduced_for_check": reply_cap != configured_cap,
             }
             yield ProbeUpdate(f"session:{name}", record)
             if (
                 len(bodies) != before + 1
-                or (usage and usage.output_tokens > REPLY_CAP)
+                or (usage and usage.output_tokens > reply_cap)
                 or response.finish_reason in {"length", "error"}
             ):
                 yield ProbeUpdate(
@@ -293,7 +323,7 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
                 )
                 return
             wire = bodies[-1]
-            settings_ok &= _contains(controls, wire)
+            settings_ok &= settings_on_wire(controls, wire)
             if index == 0:
                 first = response
                 replay = [m for m in messages if not isinstance(m, CacheBoundary)] + [first]

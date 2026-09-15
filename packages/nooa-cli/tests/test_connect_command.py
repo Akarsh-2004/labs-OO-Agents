@@ -10,6 +10,10 @@ from tests.connect_http import mock_http, response_body
 
 @pytest.fixture(autouse=True)
 def sdk_credentials(monkeypatch):
+    from nooa_cli.commands import _connect_prompts
+
+    # Reply-budget interaction has its own contract tests.
+    monkeypatch.setattr(_connect_prompts, "choose_reply_limit", lambda suggested, ceiling: suggested)
     monkeypatch.setenv("OPENAI_API_KEY", "test-key")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
 
@@ -633,7 +637,7 @@ def test_model_settings_can_be_edited_skipped_or_cancelled(tmp_path, monkeypatch
         if action == "edit":
             assert "Enter a positive whole number" in result.output
         assert entry["context_window"] == (128000 if action == "keep_context" else 64000)
-        assert entry["max_output_tokens"] == 2048
+        assert entry["provenance"]["catalogue_limits"]["max_completion_tokens"] == 2048
         assert entry["reasoning_levels"] == {
             "low": {"reasoning_effort": "low"},
             "medium": {"reasoning_effort": "medium"},

@@ -133,8 +133,9 @@ published details, not cancel. Cancel stops setup without saving.
 It then shows the remaining checks and budget. The initial warning explains that setup
 makes paid API calls and asks once for approval before any generation; there are no repeated approval prompts for these checks.
 Each check shows progress and its result as it runs. Saving is a separate
-confirmation; Ctrl-C cancels setup. A pasted key is used only for this session;
-the saved entry names its environment variable, not its value.
+confirmation; Ctrl-C cancels setup. A pasted key stays in memory unless you
+approve storing it in NOOA's secrets file at final save. The model entry names
+its environment variable, not its value.
 
 After the checks finish, the final **Save model** step asks “Save this model as”.
 The suggested name, existing-name completion and overwrite confirmation all live
@@ -150,13 +151,25 @@ controls, and `NO_COLOR` disables colors. The full YAML is hidden by default;
 `--show-config` previews the final entry before the save question. The agent
 `--stage` JSON interface is unchanged.
 
-The displayed **reported reply ceiling** is capability metadata saved as
-`max_output_tokens`, not a request default. It does not set the runtime's
-`max_tokens` reply budget. A large ceiling can be valid while being unsuitable
+The displayed **reported reply ceiling** is capability metadata saved under
+`provenance.catalogue_limits.max_completion_tokens`, not a request default.
+Every entry also has an actual **reply budget**, saved as `max_tokens` for all
+three interfaces. Responses translates that to `max_output_tokens` on the wire.
+Choose short replies (2,048), coding/tool use (8,192), long documents (32,768),
+or a custom budget. Connect offers the catalogue's output recommendation when
+available, otherwise 8,192, bounded by the known ceiling and context window.
+`--max-tokens N` (also `--reply-tokens N`) sets it in scripted or interactive
+mode; `--output-tokens` still controls only the small setup probes.
+The library's `configure_entry()` and `write()` enforce the same defaults,
+including on stage-save input created before these fields were required.
+A large ceiling can be valid while being unsuitable
 as a default: input, reasoning and the answer must fit together in the context
 window. The wizard highlights ceilings close to that window. Published
 thinking on/off information is shown even when named effort levels are absent;
-this display does not invent request mappings or change the checks.
+this display does not invent request mappings. A declared thinking-token budget
+that would leave no room for the answer raises only that level's reply cap,
+with a warning. It must still fit the model limit; checks cannot exceed their
+approved cap to test such a level.
 
 If enabled reasoning-level checks succeed but return neither reasoning fields
 nor reported reasoning tokens, Connect warns once before saving and lists the
@@ -182,7 +195,8 @@ final question. It does not execute tools or invent reasoning state. It reports:
   controls survived on the wire. Ordinary text fallback does not count as retained
   reasoning. Missing evidence says “not confirmed,” not “reasoning is disabled.”
 
-These calls use up to 2,048 output tokens each and reserve 43,008 estimated tokens
+These calls use the saved reply cap when the shared budget permits. Otherwise
+they use at most 2,048 output tokens each and reserve up to 43,008 estimated tokens
 within the initial shared budget (65,536 by default). Basic checks retain their
 200-token output cap. No retries run; checks stop rather than increase the approved
 budget. These are estimates, not billing limits: servers can ignore caps. Use
@@ -244,7 +258,9 @@ LiteLLM routing prefix. API styles are `chat`, `responses`, and `anthropic`.
 Omit MODEL to list and select from the endpoint's models. Discovery tries `/models`
 and then `/v1/models` if a root endpoint returns 404. For Anthropic, explicitly
 name the appropriate key environment variable. `--prompt-key` reads a masked key
-for this setup only; Connect never saves it or changes environment variables.
+for this setup; Connect offers to save it at final confirmation and never changes
+process environment variables. A project or explicit override secrets file can
+shadow the user secrets file, just as an exported shell value can.
 An empty `--api-key-env ''` supports local servers without authentication.
 In the wizard, enter `-` at the key-variable prompt for no authentication.
 

@@ -12,7 +12,13 @@ from nooa_cli.commands.connect import command
 
 @pytest.fixture
 def registry(tmp_path, monkeypatch):
+    from nooa_cli.commands import _connect_prompts
+
     from nooa import llm_config
+
+    monkeypatch.setattr(
+        _connect_prompts, "choose_reply_limit", lambda suggested, ceiling: suggested
+    )
 
     path = tmp_path / "llm_config.yaml"
     entry = {

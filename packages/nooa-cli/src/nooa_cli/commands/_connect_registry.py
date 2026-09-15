@@ -46,3 +46,34 @@ def credential_names(registry, endpoint):
         if matches and name not in names:
             names.append(name)
     return names
+
+
+def shadowing_source(alias, path):
+    """Name a currently effective file that would override this destination."""
+    import os
+    from pathlib import Path
+
+    from nooa.llm_config import bundled_config_paths
+    from nooa.paths import get_project_dir, get_user_dir
+
+    found = entries().get(alias)
+    if not found or found[1].resolve() == path.resolve():
+        return None
+    # Include missing conventional files so a newly created user/project file
+    # receives its real priority. Unknown --output paths are not auto-loaded.
+    paths = [
+        *bundled_config_paths(),
+        get_user_dir("llm_config.yaml"),
+        get_project_dir("llm_config.yaml"),
+        *(
+            Path(p.strip()).expanduser()
+            for p in os.environ.get("NEMO_OO_LLM_CONFIG", "").split(",")
+            if p.strip()
+        ),
+    ]
+    priority = {p.resolve(): i for i, p in enumerate(paths)}
+    target = priority.get(path.resolve())
+    source = priority.get(found[1].resolve())
+    if target is None or source is None or source > target:
+        return str(found[1])
+    return None

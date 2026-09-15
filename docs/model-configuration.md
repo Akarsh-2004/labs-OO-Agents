@@ -17,6 +17,7 @@ models:
     client_type: completion
     api_base: https://gateway.example/v1
     api_key_env: MY_MODEL_KEY
+    max_tokens: 8192
 ```
 
 `my-model` is the local name your agents use. `your-model` is the exact ID the
@@ -41,7 +42,16 @@ For the current Anthropic client, use the server root without the final `/v1`:
 the client appends `/v1/messages`. Connect normalizes this when saving the entry.
 
 If documented for your route, add `context_window` as a capacity hint. It is
-not an output-token allocation. Add reasoning-level request blocks only when
+not an output-token allocation. Set `max_tokens` to the reply budget you want,
+not the model's advertised maximum; 8,192 is Connect's fallback starting budget
+when no recommendation is available. Keep it within the model's documented
+limits. Responses clients translate this to `max_output_tokens` on the wire.
+For stateless Responses entries, also set `store: false` and
+`include: [reasoning.encrypted_content]` to carry reasoning between turns.
+If the endpoint rejects that include field, explicitly set `include: []` and
+record that reasoning retention has not been confirmed. Connect checks this
+automatically when probes are approved.
+Add reasoning-level request blocks only when
 you know their exact shape; see [reasoning levels](reasoning-levels.md).
 Do not infer optional encrypted-reasoning or explicit-cache support from an
 OpenAI-compatible URL. Unknown capabilities remain untested.

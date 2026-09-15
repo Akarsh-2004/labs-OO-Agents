@@ -155,7 +155,7 @@ def test_plan_is_data_without_credentials_or_network(monkeypatch):
     proposal = make_plan(reasoning_levels={"high": {"reasoning_effort": "high"}})
     assert proposal.entry["model_name"] == "openai/gateway/model"
     assert proposal.entry["client_type"] == "completion"
-    assert "max_tokens" not in proposal.entry
+    assert proposal.entry["max_tokens"] == 8192
     assert "context_window" not in proposal.entry
     assert proposal.price_estimate is None
     assert [p.name for p in proposal.probes] == ["routing", "tools", "level:high"]
@@ -276,7 +276,9 @@ def test_write_replaces_hand_written_alias_preserving_neighbors(tmp_path):
     assert text.startswith("# human notes\n")
     assert "  other: {model_name: openai/other} # keep this\n" in text
     assert "settings: true # keep this too\n" in text
-    assert yaml.safe_load(text)["models"]["local"] == {"model_name": "openai/new"}
+    assert yaml.safe_load(text)["models"]["local"] == connect.configure_entry(
+        {"model_name": "openai/new"}
+    )
 
 
 @pytest.mark.parametrize(
@@ -303,8 +305,8 @@ def test_catalogue_metadata_is_not_claimed_as_probe_evidence():
         }
     )
     assert proposal.entry["context_window"] == 128000
-    assert proposal.entry["max_output_tokens"] == 8192
-    assert "max_tokens" not in proposal.entry
+    assert proposal.entry["provenance"]["catalogue_limits"]["max_completion_tokens"] == 8192
+    assert proposal.entry["max_tokens"] == 8192
     assert "context_window" in proposal.entry["provenance"]["not_probed"]
 
 
@@ -501,7 +503,9 @@ def test_comment_only_registry_and_quoted_alias_round_trip(tmp_path):
     connect.write({"model_name": "openai/m"}, path, alias="off")
     connect.write({"model_name": "openai/n"}, path, alias="off")
     assert path.read_text().startswith("# Keep this note\n")
-    assert yaml.safe_load(path.read_text())["models"] == {"off": {"model_name": "openai/n"}}
+    assert yaml.safe_load(path.read_text())["models"] == {
+        "off": connect.configure_entry({"model_name": "openai/n"})
+    }
 
 
 @pytest.mark.asyncio

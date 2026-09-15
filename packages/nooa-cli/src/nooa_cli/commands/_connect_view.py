@@ -85,7 +85,7 @@ def intro(*, checks, output_tokens, budget_tokens):
             dim=True,
         )
         line(
-            f"Basic checks: {output_tokens:,} output tokens / call. Cache and reasoning replay: 3 calls, up to 2,048 output tokens each.",
+            f"Basic checks: {output_tokens:,} output tokens / call. Conversation checks use your chosen reply budget if the shared budget allows; otherwise at most 2,048 tokens each.",
             dim=True,
         )
         line(
@@ -189,6 +189,10 @@ class CheckProgress:
                 status, detail = "attention", "Reply incomplete; check not conclusive"
             if record.get("reason") == "previous result reused":
                 detail += " · already checked"
+            if name == "session:seed" and record.get("tested_reply_tokens"):
+                detail += f" · reply limit {record['tested_reply_tokens']:,}"
+                if record.get("reply_limit_reduced_for_check"):
+                    detail += f" (saved limit {record['configured_reply_tokens']:,}; reduced for this check)"
         elif name == "cache" and outcome == "confirmed" and record.get("input_tokens"):
             cached, total = record.get("cached_input_tokens", 0), record["input_tokens"]
             detail = f"Reused {cached / total:.0%} of input ({cached:,} / {total:,} tokens)"

@@ -402,6 +402,91 @@ def unobserved_reasoning_levels(entry: dict) -> list[str]:
     return missing
 
 
+def configure_entry(entry: dict, *, reply_tokens: int | None = None) -> dict:
+    """Apply safe persisted defaults to a detached entry, without doing any I/O.
+
+    ``max_tokens`` is the runtime cap on every interface. Published ceilings
+    remain provenance, not request allocations. ``include: []`` is an explicit
+    opt-out from carrying encrypted reasoning on stateless Responses calls.
+    """
+    result = deepcopy(entry)
+    provenance = result.setdefault("provenance", {})
+    if not isinstance(provenance, dict):
+        raise ValueError("provenance must be a mapping")
+    ceiling = result.pop("max_output_tokens", None)
+    limits = provenance.setdefault("catalogue_limits", {})
+    if not isinstance(limits, dict):
+        raise ValueError("catalogue_limits must be a mapping")
+    if isinstance(ceiling, int) and not isinstance(ceiling, bool) and ceiling > 0:
+        limits["max_completion_tokens"] = ceiling
+    ceiling = limits.get("max_completion_tokens")
+    known_limits = [
+        v
+        for v in (ceiling, result.get("context_window"))
+        if isinstance(v, int) and not isinstance(v, bool) and v > 0
+    ]
+    bound = min(known_limits) if known_limits else None
+    cap = reply_tokens if reply_tokens is not None else result.get("max_tokens")
+    source = "user" if reply_tokens is not None else "entry"
+    if cap is None:
+        cap = min(8192, bound) if bound else 8192
+        source = "connect_default"
+    if not isinstance(cap, int) or isinstance(cap, bool) or cap <= 0:
+        raise ValueError("Reply limit max_tokens must be a positive integer")
+    if (
+        bound is not None
+        and cap > bound
+        and reply_tokens is None
+        and provenance.get("reply_limit", {}).get("source")
+        in {"connect_default", "catalogue_recommendation"}
+    ):
+        cap = bound
+        provenance["reply_limit"]["value"] = cap
+    if bound is not None and cap > bound:
+        raise ValueError(f"Reply limit {cap} exceeds the configured model limit {bound}")
+    result["max_tokens"] = cap
+    if reply_tokens is not None or "reply_limit" not in provenance:
+        provenance["reply_limit"] = {"source": source, "value": cap}
+    for label, patch in (result.get("reasoning_levels") or {}).items():
+        thinking = patch.get("thinking") or {}
+        budget = thinking.get("budget_tokens") if isinstance(thinking, dict) else None
+        cap_names = {"max_tokens", "max_output_tokens", "max_completion_tokens"} & patch.keys()
+        if len(cap_names) > 1:
+            raise ValueError(f"Reasoning level {label!r} must set only one reply limit")
+        cap_name = next(iter(cap_names), "max_tokens")
+        level_cap = patch.get(cap_name, cap)
+        if not isinstance(level_cap, int) or isinstance(level_cap, bool) or level_cap <= 0:
+            raise ValueError(f"Reasoning level {label!r} has an invalid reply limit")
+        if isinstance(budget, int) and not isinstance(budget, bool) and budget >= level_cap:
+            level_cap = budget + 1024
+            patch[cap_name] = level_cap
+            provenance.setdefault("level_reply_limits", {})[label] = {
+                "source": "thinking_budget",
+                "value": level_cap,
+            }
+        if bound is not None and level_cap > bound:
+            raise ValueError(
+                f"Reasoning level {label!r} reply limit exceeds the model limit {bound}"
+            )
+    responses = result.get("api_style") == "responses" or result.get("client_type") == "responses"
+    if responses:
+        result.setdefault("store", False)
+        if not isinstance(result["store"], bool):
+            raise ValueError("Responses store must be true or false")
+        if result["store"] is False:
+            if "include" not in result:
+                result["include"] = ["reasoning.encrypted_content"]
+                provenance["encrypted_reasoning"] = {"source": "connect", "outcome": "not_probed"}
+            elif not isinstance(result["include"], list) or not all(
+                isinstance(v, str) for v in result["include"]
+            ):
+                raise ValueError("include must be a list; use [] to opt out of encrypted reasoning")
+            elif result["include"] and "reasoning.encrypted_content" not in result["include"]:
+                result["include"].append("reasoning.encrypted_content")
+                provenance["encrypted_reasoning"] = {"source": "connect", "outcome": "not_probed"}
+    return result
+
+
 def plan(
     alias: str,
     model: str,
@@ -415,6 +500,7 @@ def plan(
     output_tokens: int = 200,
     existing_entry: dict | None = None,
     session_checks: bool = False,
+    reply_tokens: int | None = None,
 ) -> ConnectPlan:
     """Prepare requests without reading credentials, files or network resources.
 
@@ -563,6 +649,27 @@ def plan(
         level_body.update(params)
         probes.append(Probe(f"level:{label}", level_body, output_tokens + 512))
     entry["provenance"] = provenance
+    if reply_tokens is None:
+        recommendation = ((catalogue or {}).get("default_parameters") or {}).get("max_tokens")
+        if (
+            isinstance(recommendation, int)
+            and not isinstance(recommendation, bool)
+            and recommendation > 0
+        ):
+            ceiling = entry.get("max_output_tokens")
+            window = entry.get("context_window")
+            entry["max_tokens"] = min(
+                [recommendation] + [v for v in (ceiling, window) if isinstance(v, int) and v > 0]
+            )
+            provenance["reply_limit"] = {
+                "source": "catalogue_recommendation",
+                "value": entry["max_tokens"],
+            }
+    entry = configure_entry(entry, reply_tokens=reply_tokens)
+    provenance = entry["provenance"]
+    for probe in probes:
+        if probe.name.startswith("level:"):
+            probe.body.update(entry["reasoning_levels"][probe.name.removeprefix("level:")])
     if existing_entry:
         # Each probe is also compared to its exact request in run_steps. Adding
         # a level must not invalidate an unchanged routing or tool check.
@@ -584,9 +691,9 @@ def plan(
         except (ValueError, TypeError, KeyError):
             pass  # Missing catalogue prices are unknown, never zero.
     if session_checks:
-        from nooa._connect_session import TOKEN_RESERVATION
+        from nooa._connect_session import reply_budget
 
-        estimate += TOKEN_RESERVATION
+        estimate += 3 * reply_budget(entry, max(0, budget_tokens - estimate))[2]
         price = None  # The longer replay depends on the actual seed response.
     return ConnectPlan(alias, entry, tuple(probes), budget_tokens, estimate, price, session_checks)
 
@@ -616,6 +723,9 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
             raise ValueError("Reasoning settings changed after planning; make a new plan")
         for key in settings:
             params.pop(key, None)
+        if {"max_tokens", "max_completion_tokens", "max_output_tokens"} & settings.keys():
+            for key in ("max_tokens", "max_completion_tokens", "max_output_tokens"):
+                params.pop(key, None)
         # A level can set the cap itself; do not pass a conflicting override.
         params["reasoning_level"] = label
     client = client_from_config(
@@ -628,10 +738,10 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
     settings_sent = []
 
     async def capture(request):
-        from nooa._connect_session import _contains
+        from nooa._connect_session import settings_on_wire
 
         if probe.name.startswith("level:"):
-            settings_sent.append(_contains(settings, json.loads(request.content)))
+            settings_sent.append(settings_on_wire(settings, json.loads(request.content)))
 
     hooks = client._http.httpx_async.event_hooks["request"]
     hooks.append(capture)
@@ -712,6 +822,8 @@ def diagnostic_prompt(stage: str, entry: dict, checks: dict) -> str:
                 "state_retained",
                 "settings_retained",
                 "settings_sent",
+                "configured_reply_tokens",
+                "tested_reply_tokens",
                 "input_tokens",
                 "cached_input_tokens",
                 "finish_reason",
@@ -955,6 +1067,7 @@ def write(entry: dict, path: Path, *, alias: str) -> None:
     Splice the selected YAML entry instead of reformatting the whole file, so
     unrelated entries and comments remain intact. The final replace is atomic.
     """
+    entry = configure_entry(entry)
     original = path.read_text() if path.exists() else None
     source = original or ""
     data = yaml.safe_load(source)

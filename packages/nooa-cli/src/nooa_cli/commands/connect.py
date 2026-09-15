@@ -64,6 +64,13 @@ from ._connect_stages import STAGES
     help="Shared estimated-token budget for all checks (default: 65536); never increased after approval.",
 )
 @click.option("--output-tokens", type=click.IntRange(1, 4096), default=200, show_default=True)
+@click.option(
+    "--max-tokens",
+    "--reply-tokens",
+    "reply_tokens",
+    type=click.IntRange(min=1),
+    help="Reply budget saved for agents (not the smaller setup-check cap).",
+)
 @click.option("--show-config", is_flag=True, help="Show full YAML details before saving.")
 @click.option(
     "--output",
@@ -96,6 +103,7 @@ def command(
     no_probe,
     budget_tokens,
     output_tokens,
+    reply_tokens,
     show_config,
     output,
     yes,
@@ -119,6 +127,7 @@ def command(
             api_key_env=api_key_env,
             budget_tokens=budget_tokens,
             output_tokens=output_tokens,
+            reply_tokens=reply_tokens,
             levels_file=levels_file,
             context_window=context_window,
             input_file=input_file,
@@ -157,8 +166,14 @@ def command(
     from nooa.paths import get_user_dir
 
     from . import _connect_view as view
-    from ._connect_prompts import confirm, edit_model_details, environment_names, prompt
-    from ._connect_registry import credential_names, entries
+    from ._connect_prompts import (
+        choose_reply_limit,
+        confirm,
+        edit_model_details,
+        environment_names,
+        prompt,
+    )
+    from ._connect_registry import credential_names, entries, shadowing_source
 
     async def show_checks(events, *, reasoning_levels=None):
         with view.quiet_provider_messages():
@@ -495,7 +510,14 @@ def command(
             candidate = {
                 "id": editing.get("underlying_model", model),
                 "context_length": editing.get("context_window"),
-                "top_provider": {"max_completion_tokens": editing.get("max_output_tokens")},
+                "top_provider": {
+                    "max_completion_tokens": editing.get(
+                        "max_output_tokens",
+                        editing.get("provenance", {})
+                        .get("catalogue_limits", {})
+                        .get("max_completion_tokens"),
+                    )
+                },
                 "reasoning": {
                     "supported_efforts": list(editing.get("reasoning_levels", {})),
                     "default_effort": editing.get("reasoning_default"),
@@ -627,6 +649,7 @@ def command(
             output_tokens=output_tokens,
             existing_entry=interfaces.results[api_style].entry if interfaces else existing,
             session_checks=approval == "all",
+            reply_tokens=reply_tokens,
         )
         if editing is not None:
             # Preserve transport controls, custom parameters and exact level blocks.
@@ -684,10 +707,6 @@ def command(
                 and proposal.entry["provenance"]["probes"][p.name].get("request") == p.body
             )
         )
-        if proposal.session_checks:
-            from nooa._connect_session import TOKEN_RESERVATION
-
-            remaining_estimate += TOKEN_RESERVATION
         proposal = replace(
             proposal,
             budget_tokens=max(0, budget_tokens - interface_spent),
@@ -712,6 +731,40 @@ def command(
             click.echo(
                 "No context window selected. The runtime will use its fallback; set --context-window to supply a limit."
             )
+        configured = connect.configure_entry(proposal.entry, reply_tokens=reply_tokens)
+        if reply_tokens is None and not yes:
+            bounds = [
+                v
+                for v in (
+                    configured.get("context_window"),
+                    configured["provenance"]
+                    .get("catalogue_limits", {})
+                    .get("max_completion_tokens"),
+                )
+                if isinstance(v, int) and v > 0
+            ]
+            chosen_cap = choose_reply_limit(
+                configured["max_tokens"], min(bounds) if bounds else None
+            )
+            configured = connect.configure_entry(configured, reply_tokens=chosen_cap)
+        proposal = replace(proposal, entry=configured)
+        for check in proposal.probes:
+            if check.name.startswith("level:"):
+                check.body.update(configured["reasoning_levels"][check.name.removeprefix("level:")])
+        if proposal.session_checks:
+            from nooa._connect_session import reply_budget
+
+            remaining_estimate += (
+                3 * reply_budget(configured, max(0, proposal.budget_tokens - remaining_estimate))[2]
+            )
+        view.line(
+            f"Saved reply budget: {configured['max_tokens']:,} tokens, shared by reasoning and the answer."
+        )
+        for label, limit in configured["provenance"].get("level_reply_limits", {}).items():
+            view.line(
+                f"Reasoning level {label}: reply budget raised to {limit['value']:,} tokens to leave room for its thinking budget.",
+                fg="yellow",
+            )
         price = (
             "unknown"
             if proposal.price_estimate is None
@@ -728,7 +781,7 @@ def command(
                 dim=True,
             )
         view.line(
-            f"Reply caps: {output_tokens:,} for basic checks; 2,048 for conversation checks.",
+            f"Reply caps: {output_tokens:,} for basic checks; conversation checks use the saved cap when the approved budget allows, otherwise at most 2,048.",
             dim=True,
         )
         view.line(
@@ -820,6 +873,11 @@ def command(
             view.line(
                 "Full configuration is saved with the model. Use --show-config to preview the YAML.",
                 dim=True,
+            )
+        if shadow := shadowing_source(alias, path):
+            view.line(
+                f"Warning: {shadow} currently defines this alias and takes precedence over this destination. Update that file or explicitly load {path} to use this entry.",
+                fg="yellow",
             )
         if yes or confirm(f"Write model entry to {path}?", default=True):
             save_key = False

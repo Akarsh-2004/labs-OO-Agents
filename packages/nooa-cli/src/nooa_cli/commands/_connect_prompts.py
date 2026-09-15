@@ -231,3 +231,35 @@ def edit_model_details(model):
         )
         reasoning["default_effort"] = None if value == "-" else value
     return edited
+
+
+def choose_reply_limit(suggested, ceiling=None):
+    """Choose a real request budget, independent of the capability ceiling."""
+    choices = {"suggested": suggested, "short": 2048, "coding": 8192, "long": 32768}
+    choices = {
+        name: value for name, value in choices.items() if ceiling is None or value <= ceiling
+    }
+    selected = prompt(
+        "Reply budget",
+        choices=(*choices, "custom"),
+        default="suggested",
+        open_menu=True,
+        labels={
+            "suggested": f"Suggested starting limit — {suggested:,} tokens",
+            "short": "Short replies and simple questions — 2,048 tokens",
+            "coding": "Coding agents and tool use — 8,192 tokens",
+            "long": "Long documents and deeper reasoning — 32,768 tokens",
+            "custom": "Enter a token limit",
+        },
+    )
+    if selected != "custom":
+        return choices[selected]
+    while True:
+        value = prompt("Maximum tokens per reply", default=str(suggested))
+        if value.isascii() and value.isdecimal() and int(value) > 0:
+            cap = int(value)
+            if ceiling is None or cap <= ceiling:
+                return cap
+        click.echo(
+            f"Enter a positive whole number{f' at most {ceiling:,}' if ceiling else ''}.", err=True
+        )

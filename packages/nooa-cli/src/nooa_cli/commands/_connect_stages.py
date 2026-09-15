@@ -26,6 +26,7 @@ def run_stage(
     api_key_env,
     budget_tokens,
     output_tokens,
+    reply_tokens=None,
     levels_file,
     context_window,
     input_file,
@@ -76,7 +77,10 @@ def run_stage(
                 or not isinstance(data.get("entry"), dict)
             ):
                 raise click.UsageError("Save input requires an alias string and an entry mapping")
-            alias, entry = data["alias"], data["entry"]
+            alias, entry = (
+                data["alias"],
+                connect.configure_entry(data["entry"], reply_tokens=reply_tokens),
+            )
             if "api_key" in entry:
                 raise click.UsageError("Use api_key_env, never a literal key")
             if document.get("ok") is False:
@@ -91,7 +95,12 @@ def run_stage(
                     raise click.UsageError("Alias exists; --yes explicitly permits replacement")
                 click.echo(f"Warning: replacing alias {alias!r} in {path}.", err=True)
             connect.write(entry, path, alias=alias)
-            data = {"alias": alias, "path": str(path)}
+            data = {"alias": alias, "path": str(path), "entry": entry}
+            from ._connect_registry import shadowing_source
+
+            if shadow := shadowing_source(alias, path):
+                data["shadowed_by"] = shadow
+                click.echo(f"Warning: alias is still resolved from {shadow}.", err=True)
             ok = True
         elif stage == "catalogue":
             models = asyncio.run(connect.catalogue())
@@ -115,6 +124,7 @@ def run_stage(
                 key_env,
                 budget_tokens=budget,
                 output_tokens=output_tokens,
+                reply_tokens=reply_tokens,
                 reasoning_levels=levels,
                 session_checks=stage in {"session", "all"},
             )
