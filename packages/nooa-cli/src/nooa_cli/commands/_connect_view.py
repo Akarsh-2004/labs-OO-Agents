@@ -6,8 +6,38 @@ import os
 import shutil
 import sys
 import textwrap
+from contextlib import contextmanager
 
 import click
+
+
+@contextmanager
+def quiet_provider_messages():
+    """Hide legacy-library help banners while this CLI displays safe outcomes."""
+    legacy = sys.modules.get("litellm")
+    previous = getattr(legacy, "suppress_debug_info", False)
+    if legacy is not None:
+        legacy.suppress_debug_info = True
+    try:
+        yield
+    finally:
+        if legacy is not None:
+            legacy.suppress_debug_info = previous
+
+
+def check_failure(outcome):
+    """Translate sanitized error classes, never show a provider error body."""
+    error = outcome.get("error", "")
+    status = outcome.get("status_code")
+    if status in {401, 403} or error in {"AuthenticationError", "PermissionDeniedError"}:
+        return "Key rejected by this server. Check the key and server URL."
+    if status == 404 or error == "NotFoundError":
+        return "No route found for this interface or model."
+    if status == 429 or error == "RateLimitError":
+        return "Server rate limit reached. Try again later."
+    if "Timeout" in error or error == "APIConnectionError":
+        return "Could not reach the server. Check the connection or try again."
+    return None
 
 
 def line(text, *, fg=None, bold=False, dim=False):

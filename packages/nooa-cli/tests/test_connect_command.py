@@ -339,18 +339,110 @@ def test_interface_menu_only_offers_successes_or_explicit_manual_escape(
             "--output",
             str(path),
         ],
-        input="y\nresponses\ny\n" if responses_ok else "y\n",
+        input="y\nresponses\ny\n" if responses_ok else "y\ncancel\n",
     )
     if responses_ok:
         assert result.exit_code == 0, result.output
         assert choices == [("chat", "responses")]
         assert yaml.safe_load(path.read_text())["models"]["local"]["api_style"] == "responses"
     else:
-        assert result.exit_code != 0
+        assert result.exit_code == 0
         assert not choices
         assert not path.exists()
-        assert "--api-style" in result.output
+        assert "Nothing was saved" in result.output
         assert "could not confirm" in result.output.lower()
+
+
+@pytest.mark.parametrize("recover", [True, False])
+def test_authentication_recovery_keeps_budget_and_secrets(tmp_path, monkeypatch, recover):
+    import httpx
+    import litellm
+
+    monkeypatch.setenv("CONNECT_BAD", "wrong-test-secret")
+    monkeypatch.setenv("CONNECT_GOOD", "right-test-secret")
+    monkeypatch.setattr(litellm, "suppress_debug_info", False)
+    sent = []
+
+    def handle(request):
+        sent.append(request)
+        if request.headers.get("authorization") != "Bearer right-test-secret":
+            return httpx.Response(401, json={"error": {"message": "wrong-test-secret rejected"}})
+        if request.url.path.endswith("chat/completions"):
+            return httpx.Response(200, json=response_body("chat"))
+        return httpx.Response(404)
+
+    mock_http(monkeypatch, handle)
+    path = tmp_path / "models.yaml"
+    result = CliRunner().invoke(
+        command,
+        [
+            "model",
+            "--as",
+            "local",
+            "--endpoint",
+            "https://api.test/v1",
+            "--api-key-env",
+            "CONNECT_BAD",
+            "--no-catalogue",
+            "--probe",
+            "minimal",
+            "--output",
+            str(path),
+        ],
+        input="y\nkey\nCONNECT_GOOD\ny\n" if recover else "y\ncancel\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert result.output.count("Approve API checks") == 1
+    assert "Key rejected by this server" in result.output
+    assert "Give Feedback" not in result.output
+    assert "Provider List" not in result.output
+    assert "wrong-test-secret" not in result.output
+    assert "right-test-secret" not in result.output
+    assert litellm.suppress_debug_info is False
+    assert len(sent) == (6 if recover else 3)
+    if recover:
+        entry = yaml.safe_load(path.read_text())["models"]["local"]
+        assert entry["api_key_env"] == "CONNECT_GOOD"
+        assert entry["provenance"]["tokens_charged_to_budget"] == 6 * 712
+        assert "test-secret" not in path.read_text()
+    else:
+        assert not path.exists()
+
+
+def test_retry_stops_when_original_budget_is_exhausted(tmp_path, monkeypatch):
+    import httpx
+
+    sent = []
+
+    def handle(request):
+        sent.append(request)
+        return httpx.Response(401)
+
+    mock_http(monkeypatch, handle)
+    path = tmp_path / "models.yaml"
+    result = CliRunner().invoke(
+        command,
+        [
+            "model",
+            "--as",
+            "local",
+            "--endpoint",
+            "https://api.test/v1",
+            "--api-key-env",
+            "",
+            "--no-catalogue",
+            "--budget-tokens",
+            "2848",
+            "--output",
+            str(path),
+        ],
+        input="y\nretry\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert len(sent) == 4
+    assert "budget is exhausted" in result.output
+    assert result.output.count("Approve API checks") == 1
+    assert not path.exists()
 
 
 def test_no_probe_points_to_manual_skill_and_does_no_http(tmp_path, monkeypatch):

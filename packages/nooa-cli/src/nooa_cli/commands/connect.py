@@ -100,6 +100,10 @@ def command(
     from ._connect_prompts import confirm, edit_model_details, environment_names, prompt
 
     async def show_checks(events):
+        with view.quiet_provider_messages():
+            return await display_checks(events)
+
+    async def display_checks(events):
         async with aclosing(events) as steps:
             async for event in steps:
                 if isinstance(event, (connect.ConnectResult, connect.InterfaceResult)):
@@ -108,10 +112,11 @@ def command(
                 if outcome["outcome"] == "running":
                     click.echo(f"Checking {event.name}...")
                 else:
-                    detail = outcome.get("error") or outcome.get("reason")
-                    click.echo(
-                        f"{event.name}: {outcome['outcome']}" + (f" ({detail})" if detail else "")
+                    detail = (
+                        view.check_failure(outcome) or outcome.get("error") or outcome.get("reason")
                     )
+                    label = "not confirmed" if outcome.get("error") else outcome["outcome"]
+                    click.echo(f"{event.name}: {label}" + (f" ({detail})" if detail else ""))
                     if outcome.get("reasoning_observed"):
                         click.echo("  Reasoning included in the response.")
                     if event.name == "cache" and outcome.get("input_tokens"):
@@ -226,36 +231,94 @@ def command(
                 endpoint = found.api_base
                 names = [item["id"] for item in found.models]
                 click.echo(
-                    f"Connected. Found {len(names)} model(s). Type part of a name to search, then Tab to select."
+                    f"Server listed {len(names)} model(s). Credentials are checked next. Type part of a name to search, then Tab to select."
                 )
                 model = prompt("Model", choices=names)
         view.step(3, "Connection checks")
-        if api_style in {None, "responses"}:
+        if api_style == "responses":
             view.line(connect.ENCRYPTED_REASONING_EXPLANATION, dim=True)
         if not api_style:
             available = ("chat", "responses", "anthropic")
             if approval != "none":
-                interfaces = asyncio.run(
-                    show_checks(
-                        connect.check_interfaces(
-                            alias or "candidate",
-                            model,
-                            endpoint,
-                            api_key_env,
-                            budget_tokens=budget_tokens
-                            if budget_tokens is not None
-                            else 3 * (output_tokens + 512),
-                            output_tokens=output_tokens,
-                            api_key=api_key,
+                interface_spent = 0
+                while True:
+                    interfaces = asyncio.run(
+                        show_checks(
+                            connect.check_interfaces(
+                                alias or "candidate",
+                                model,
+                                endpoint,
+                                api_key_env,
+                                budget_tokens=max(0, budget_tokens - interface_spent),
+                                output_tokens=output_tokens,
+                                api_key=api_key,
+                            )
                         )
                     )
-                )
-                available = interfaces.accepted
-                if not available:
-                    raise click.ClickException(
-                        "Could not confirm any interface. This is not proof they are unsupported. "
-                        "Check credentials, the endpoint or the budget; use --api-style with --no-probe for manual setup."
+                    interface_spent += interfaces.tokens_charged_to_budget
+                    interfaces = replace(interfaces, tokens_charged_to_budget=interface_spent)
+                    available = interfaces.accepted
+                    if available:
+                        break
+                    view.line(
+                        "Could not confirm a working connection. Listing models does not validate the key.",
+                        fg="yellow",
                     )
+                    if yes:
+                        raise click.ClickException(
+                            "Check credentials and endpoint, or run without --yes to correct them interactively."
+                        )
+                    remaining = max(0, budget_tokens - interface_spent)
+                    if remaining < output_tokens + 512:
+                        view.line(
+                            "The approved check budget is exhausted. Nothing was saved; restart setup to approve a new budget."
+                        )
+                        return
+                    view.line(
+                        f"You can correct the connection here. {remaining:,} estimated tokens remain in the approved budget."
+                    )
+                    action = prompt(
+                        "Next step",
+                        choices=("key", "server", "retry", "cancel"),
+                        default="key",
+                        labels={
+                            "key": "Change key",
+                            "server": "Edit server and model",
+                            "retry": "Try again unchanged",
+                            "cancel": "Exit without saving",
+                        },
+                    )
+                    if action == "cancel":
+                        click.echo("Setup cancelled. Nothing was saved.")
+                        return
+                    if action == "key":
+                        source = prompt(
+                            "Key environment variable (or paste for a temporary key)",
+                            default=api_key_env or "paste",
+                            suggestions=environment_names(["paste"]),
+                        )
+                        if source == "paste":
+                            api_key = prompt("API key (used only for this setup)", hide_input=True)
+                        else:
+                            api_key_env = source
+                            api_key = os.environ.get(source)
+                            if not api_key:
+                                view.line(
+                                    "That variable is unset or empty. You can paste a temporary key instead."
+                                )
+                                api_key = prompt(
+                                    "API key (used only for this setup)", hide_input=True
+                                )
+                    elif action == "server":
+                        endpoint = connect.normalize_endpoint(
+                            prompt(
+                                "Model server URL",
+                                default=endpoint,
+                                suggestions=server_urls,
+                                open_menu=True,
+                            )
+                        )
+                        model = prompt("Exact model ID", default=model)
                 click.echo(
                     "Interfaces that returned the expected response format: " + ", ".join(available)
                 )
@@ -272,6 +335,8 @@ def command(
                     choices=available,
                     default=default_style if default_style in available else available[0],
                 )
+            if api_style == "responses":
+                view.line(connect.ENCRYPTED_REASONING_EXPLANATION, dim=True)
         existing = None
         alias = alias or prompt(
             "Save this model as",

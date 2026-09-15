@@ -20,8 +20,14 @@ server, credentials, model selection, then automatic interface checks. It tries
 Chat Completions, Responses and Anthropic Messages once each and offers only
 interfaces that returned the expected response format. One success is selected
 automatically; multiple successes give a choice. A timeout, authentication error
-or rejected request is not labelled “unsupported.” If no check succeeds, setup
-stops with guidance to fix the connection or use explicit manual settings.
+or rejected request is not labelled “unsupported.” If no check succeeds, the wizard
+offers to change the key, edit the server and model, retry, or cancel without saving.
+Failed attempts remain charged to the original approved budget; correcting the
+connection does not increase it or ask for another spending approval. Exhausting
+that budget ends setup without saving. Scripted `--yes` runs still fail without
+prompting. A successful model listing is not described as authenticated: some
+servers list their models publicly. Provider help banners are hidden during CLI
+checks, while safe authentication, routing and timeout explanations remain visible.
 A server listing models is not evidence that every model on it uses the same
 interface. `--api-style` supplies an explicit choice and skips interface detection;
 scripted `--yes --provider ...` setup uses the preset default if none is supplied.
