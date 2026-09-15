@@ -118,7 +118,7 @@ checks, while safe authentication, routing and timeout explanations remain visib
 A server listing models is not evidence that every model on it uses the same
 interface. `--api-style` supplies an explicit choice and skips interface detection;
 scripted `--yes --provider ...` setup uses the preset default if none is supplied.
-The wizard asks what to call the model locally. It shows published model details
+The wizard shows published model details
 before asking to use them: context window, maximum reply length, reasoning levels,
 and default reasoning level. Missing values say “Not listed.”
 These come from OpenRouter's model listing; server limits may differ. The setup
@@ -135,6 +135,12 @@ makes paid API calls and asks once for approval before any generation; there are
 Each check shows progress and its result as it runs. Saving is a separate
 confirmation; Ctrl-C cancels setup. A pasted key is used only for this session;
 the saved entry names its environment variable, not its value.
+
+After the checks finish, the final **Save model** step asks “Save this model as”.
+The suggested name, existing-name completion and overwrite confirmation all live
+here. `--as` supplies the name without prompting; `--yes` still requires it.
+Naming or declining a replacement does not rerun checks. Cancelling at this step
+leaves the registry unchanged; any already-completed API calls have still occurred.
 
 The wizard replaces the active check line on a terminal and prints compact
 results with elapsed time, then counts passed, inconclusive and skipped checks.
@@ -299,10 +305,40 @@ metadata, not permission to generate that many tokens on each call.
 
 ## Files and reconnecting
 
+To edit a model, run `uv run nooa connect --edit-model NAME`. With no name,
+`uv run nooa connect --edit-model` opens a registry selector. This skips server
+listing and catalogue discovery and opens the settings editor. Existing custom
+request fields and reasoning-level bodies are preserved; adding a new level
+requires its complete request settings in `--levels-file`. Checks use the edited
+entry, and changes are written only after save confirmation. The defining user,
+project or override file is edited; bundled defaults are copied into the user
+registry. `--output` chooses a different destination and `--as` renames the copy.
+
+When an endpoint already appears in the registry, Connect selects its saved key
+variable automatically. Multiple saved variables open a selector; an explicit
+`--api-key-env` always wins. URL completion also uses all registry layers.
+
+You can choose `new` at the key-variable prompt, or use `--prompt-key`, to enter a
+masked key without first exporting an environment variable. At final save,
+Connect offers to store that key in NOOA's user `secrets.yaml`, under `env:`.
+The file is plain text with owner-only permissions (`0600`), written atomically;
+existing secret values are preserved but YAML formatting may change. The model
+entry contains only `api_key_env`, never the key. Cancelling before save writes
+neither file. `--yes` does not implicitly consent to storing a pasted key.
+NOOA loads the secrets file on startup; an exported shell value takes precedence,
+so unset or update an old exported value when replacing a key.
+
+Declared reasoning parameters are explicitly allowed through legacy parameter
+filtering. Level checks also inspect the serialized HTTP body: a request that
+succeeds after losing its settings is not a confirmed check. Session reports
+distinguish settings reaching the server from reasoning state surviving replay.
+Neither observation proves the server honoured an effort value.
+
 The default is `llm_config.yaml` in NOOA's user configuration directory. Connect
 warns before overwriting an existing alias, including a hand-written one, and
-asks for confirmation before replacing it. Interface checks may already have
-run before the local alias is chosen. `--yes` skips save/overwrite confirmation;
+asks for confirmation before replacing it. All selected checks run before the
+local alias is chosen. Names are reread at this step to catch entries added while
+checks ran. `--yes` skips save/overwrite confirmation;
 it still prints the overwrite warning. Other aliases and surrounding
 comments stay intact. Writes replace the file atomically.
 

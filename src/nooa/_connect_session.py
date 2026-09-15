@@ -365,6 +365,8 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
                 "tested_reasoning_level": level,
                 "reason": "Reasoning preserved across turns"
                 if retained and settings_ok
+                else "Reasoning state was replayed, but the selected reasoning settings did not reach every request; check parameter filtering in the client"
+                if retained and not settings_ok
                 else "Reasoning was returned but not preserved in the follow-up request; check replay settings or try another interface"
                 if expected
                 else "No replayable reasoning returned; check reasoning/replay settings or try another interface. This does not mean reasoning is off",

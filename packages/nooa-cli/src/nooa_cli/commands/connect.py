@@ -10,6 +10,13 @@ from ._connect_stages import STAGES
 @click.command()
 @click.argument("model", required=False)
 @click.option(
+    "--edit-model",
+    is_flag=False,
+    flag_value="",
+    default=None,
+    help="Edit an existing alias; omit NAME to select from the registry.",
+)
+@click.option(
     "--stage", type=click.Choice(STAGES), help="Run one non-interactive stage; emit JSON and exit."
 )
 @click.option(
@@ -30,7 +37,7 @@ from ._connect_stages import STAGES
     help="Environment variable name, never the key itself (otherwise prompted).",
 )
 @click.option("--catalogue-model", help="Explicit OpenRouter model ID to use as metadata.")
-@click.option("--prompt-key", is_flag=True, help="Read a masked, temporary key; never save it.")
+@click.option("--prompt-key", is_flag=True, help="Read a masked key; offer to save it at the end.")
 @click.option("--no-catalogue", is_flag=True, help="Do not fetch public model metadata.")
 @click.option(
     "--reasoning-template",
@@ -70,6 +77,7 @@ from ._connect_stages import STAGES
 )
 def command(
     model,
+    edit_model,
     stage,
     input_file,
     provider,
@@ -127,6 +135,7 @@ def command(
                     "--reasoning-template": reasoning_template,
                     "--levels": levels,
                     "--show-config": show_config,
+                    "--edit-model": edit_model is not None,
                 }.items()
                 if used
             ],
@@ -137,6 +146,7 @@ def command(
     import asyncio
     import os
     from contextlib import aclosing
+    from copy import deepcopy
     from dataclasses import replace
     from pathlib import Path
 
@@ -148,6 +158,7 @@ def command(
 
     from . import _connect_view as view
     from ._connect_prompts import confirm, edit_model_details, environment_names, prompt
+    from ._connect_registry import credential_names, entries
 
     async def show_checks(events, *, reasoning_levels=None):
         with view.quiet_provider_messages():
@@ -173,15 +184,65 @@ def command(
 
     path = Path(output) if output else get_user_dir("llm_config.yaml")
     api_key = None
+    explicit_key_env = api_key_env is not None
+    editing = None
     try:
+        registry = entries(path if output else None)
+        if edit_model is not None:
+            if any(
+                (model, provider, endpoint, api_style, catalogue_model, reasoning_template, levels)
+            ):
+                raise click.UsageError(
+                    "--edit-model cannot also select a new connection or catalogue template"
+                )
+            if edit_model == "":
+                if yes:
+                    raise click.UsageError("With --yes, --edit-model requires an alias")
+                if not registry:
+                    raise click.ClickException(
+                        "No registry models to edit. Run nooa connect to add one."
+                    )
+                edit_model = prompt("Model to edit", choices=sorted(registry), open_menu=True)
+            if edit_model not in registry:
+                raise click.ClickException(f"Unknown registry model {edit_model!r}")
+            editing, source_path = registry[edit_model]
+            editing = deepcopy(editing)
+            if not output:
+                from nooa.llm_config import bundled_config_paths
+
+                if source_path.resolve() not in {p.resolve() for p in bundled_config_paths()}:
+                    path = source_path
+            alias = alias or edit_model
+            routed = editing.get("model_name", edit_model)
+            api_style = editing.get("api_style") or (
+                "responses"
+                if editing.get("client_type") == "responses"
+                else "anthropic"
+                if routed.startswith("anthropic/")
+                else "chat"
+            )
+            prefix = "anthropic/" if api_style == "anthropic" else "openai/"
+            model = routed.removeprefix(prefix)
+            endpoint = (
+                editing.get("api_base")
+                or connect.PROVIDERS["anthropic" if api_style == "anthropic" else "openai"].api_base
+            )
+            if api_key_env is None:
+                api_key_env = editing.get("api_key_env", "")
+            explicit_key_env = True
+            no_catalogue = True
+            view.line(f"Editing {edit_model} from {source_path}. No model discovery is needed.")
         data = {}
         if path.exists():
             with path.open() as source:
                 data = yaml.safe_load(source) or {}
         if not isinstance(data, dict) or not isinstance(data.get("models", {}), dict):
             raise click.ClickException("Registry must contain a models mapping.")
+        for name, entry in data.get("models", {}).items():
+            if isinstance(name, str) and isinstance(entry, dict):
+                registry.setdefault(name, (entry, path))
         server_urls = [p.api_base for p in connect.PROVIDERS.values()]
-        for entry in data.get("models", {}).values():
+        for entry, _ in registry.values():
             address = entry.get("api_base") if isinstance(entry, dict) else None
             if isinstance(address, str):
                 try:
@@ -200,7 +261,8 @@ def command(
             if not confirm("Approve API checks within this budget?", default=True):
                 click.echo("No API checks approved. Run with --no-probe for manual setup.")
                 return
-        view.step(1, "Connection")
+        if editing is None:
+            view.step(1, "Connection")
         if provider and provider not in (*connect.PROVIDERS, "custom"):
             raise click.UsageError(
                 "Unknown provider. Choose nvidia, openai, anthropic, google, openrouter, or custom."
@@ -227,6 +289,25 @@ def command(
             raise click.UsageError("With --yes supply MODEL, --endpoint, --api-style and --as.")
         endpoint = endpoint or prompt("Model server URL", suggestions=server_urls, open_menu=True)
         endpoint = connect.normalize_endpoint(endpoint)
+        if not explicit_key_env:
+            saved_names = credential_names(registry, endpoint)
+            if len(saved_names) == 1:
+                api_key_env = saved_names[0]
+                view.line(
+                    f"Using saved key variable {api_key_env or '(no authentication)'} for this endpoint."
+                )
+            elif len(saved_names) > 1:
+                if yes:
+                    raise click.UsageError(
+                        "Several key variables are saved for this endpoint; supply --api-key-env"
+                    )
+                api_key_env = prompt(
+                    "Saved key variable",
+                    choices=[name or "-" for name in saved_names],
+                    open_menu=True,
+                )
+                if api_key_env == "-":
+                    api_key_env = ""
         # Listing/authentication conventions do not choose the selected model's
         # generation interface. A mixed server can list all models via /models.
         discovery_style = api_style or default_style
@@ -238,15 +319,22 @@ def command(
                 default_env
                 if yes
                 else prompt(
-                    "Key environment variable (enter - for no authentication)",
+                    "Key environment variable (new to enter a key; - for no authentication)",
                     default=default_env,
                     suggestions=environment_names(
-                        [p.api_key_env for p in connect.PROVIDERS.values()] + ["-"]
+                        [p.api_key_env for p in connect.PROVIDERS.values()] + ["-", "new"]
                     ),
                 )
             )
             if api_key_env == "-":
                 api_key_env = ""
+        if api_key_env == "new":
+            api_key_env = prompt(
+                "Save key under variable name",
+                default="NOOA_MODEL_API_KEY",
+                suggestions=environment_names(),
+            )
+            prompt_key = True
         # Validate before using an endpoint or collecting a credential.
         connect.plan(
             alias or "candidate", model or "candidate", discovery_style, endpoint, api_key_env
@@ -261,7 +349,8 @@ def command(
             if api_key_env
             else None
         )
-        view.step(2, "Model")
+        if editing is None:
+            view.step(2, "Model")
         if not model:
             click.echo("Connecting to the server and listing models...")
             try:
@@ -397,21 +486,24 @@ def command(
                 )
             if api_style == "responses":
                 view.line(connect.ENCRYPTED_REASONING_EXPLANATION, dim=True)
-        existing = None
-        alias = alias or prompt(
-            "Save this model as",
-            default=model.rsplit("/", 1)[-1],
-            suggestions=list(data.get("models", {})) + [model.rsplit("/", 1)[-1]],
-            existing=tuple(data.get("models", {})),
-        )
-        if path.exists():
-            existing = data.get("models", {}).get(alias)
-            if alias in data.get("models", {}):
-                click.echo(f"Warning: saving will overwrite model {alias!r} in {path}.", err=True)
-                if not yes and not confirm("Replace this model?", default=False):
-                    return
+        # An explicit --as can reuse its previous evidence. Otherwise checks use
+        # a temporary label; the user names the entry only when ready to save.
+        existing = editing or (data.get("models", {}).get(alias) if alias else None)
         candidate = None
         edited_settings = False
+        if editing is not None:
+            candidate = {
+                "id": editing.get("underlying_model", model),
+                "context_length": editing.get("context_window"),
+                "top_provider": {"max_completion_tokens": editing.get("max_output_tokens")},
+                "reasoning": {
+                    "supported_efforts": list(editing.get("reasoning_levels", {})),
+                    "default_effort": editing.get("reasoning_default"),
+                },
+            }
+            if not yes:
+                candidate = edit_model_details(candidate)
+            edited_settings = True
         if no_catalogue and catalogue_model:
             raise click.UsageError("--catalogue-model cannot be used with --no-catalogue")
         if not no_catalogue:
@@ -479,6 +571,9 @@ def command(
                     click.echo("Setup cancelled. Nothing saved.")
                     return
                 if action == "skip":
+                    if editing is not None:
+                        click.echo("Edits discarded. Nothing saved.")
+                        return
                     candidate = None
                     edited_settings = False
                     click.echo(
@@ -489,7 +584,7 @@ def command(
                     break
                 candidate = edit_model_details(candidate)
                 edited_settings = True
-            if edited_settings:
+            if edited_settings and editing is None:
                 # Apply edits only after confirmation, not if the user skips them.
                 context_window = None
                 levels_file = levels = reasoning_template = None
@@ -498,6 +593,14 @@ def command(
                 "Use either --levels-file or --reasoning-template with --levels."
             )
         patches = None
+        if editing is not None:
+            labels = candidate.get("reasoning", {}).get("supported_efforts", [])
+            original_levels = editing.get("reasoning_levels", {})
+            if not levels_file and any(label not in original_levels for label in labels):
+                raise click.UsageError(
+                    "New reasoning levels need request settings; supply --levels-file"
+                )
+            patches = {label: deepcopy(original_levels[label]) for label in labels}
         if levels_file:
             with Path(levels_file).open() as source:
                 patches = yaml.safe_load(source)
@@ -513,7 +616,7 @@ def command(
                 for label in levels.split(",")
             }
         proposal = connect.plan(
-            alias,
+            alias or "candidate",
             model,
             api_style,
             endpoint,
@@ -525,6 +628,39 @@ def command(
             existing_entry=interfaces.results[api_style].entry if interfaces else existing,
             session_checks=approval == "all",
         )
+        if editing is not None:
+            # Preserve transport controls, custom parameters and exact level blocks.
+            merged = deepcopy(editing)
+            for field in (
+                "context_window",
+                "max_output_tokens",
+                "reasoning_levels",
+                "reasoning_default",
+            ):
+                merged.pop(field, None)
+                if field in proposal.entry:
+                    merged[field] = deepcopy(proposal.entry[field])
+            merged["api_key_env"] = api_key_env
+            merged.setdefault("api_style", api_style)
+            if proposal.entry.get("allowed_openai_params"):
+                merged["allowed_openai_params"] = sorted(
+                    set(merged.get("allowed_openai_params", []))
+                    | set(proposal.entry["allowed_openai_params"])
+                )
+            if "reasoning_levels" not in editing and not merged.get("reasoning_levels"):
+                merged.pop("reasoning_levels", None)
+            merged["provenance"] = {
+                **deepcopy(editing.get("provenance", {})),
+                **proposal.entry["provenance"],
+            }
+            merged["provenance"]["probes"] = {}  # Edits must not reuse stale evidence.
+            proposal = replace(proposal, entry=merged)
+            if api_style == "responses":
+                for check in proposal.probes:
+                    for field in ("store", "include"):
+                        check.body.pop(field, None)
+                        if field in merged:
+                            check.body[field] = deepcopy(merged[field])
         if edited_settings:
             for field in (
                 "context_window",
@@ -655,6 +791,28 @@ def command(
                 err=True,
             )
         view.step(4, "Save model")
+        # Checks may take a while: refresh names before offering completion or
+        # asking to replace an entry added since setup started.
+        data = {}
+        if path.exists():
+            with path.open() as source:
+                data = yaml.safe_load(source) or {}
+        if not isinstance(data, dict) or not isinstance(data.get("models", {}), dict):
+            raise click.ClickException("Registry must contain a models mapping.")
+        while not alias or not alias.strip():
+            alias = prompt(
+                "Save this model as",
+                default=model.rsplit("/", 1)[-1],
+                suggestions=list(data.get("models", {})) + [model.rsplit("/", 1)[-1]],
+                existing=tuple(data.get("models", {})),
+            )
+            if not alias.strip():
+                click.echo("Enter a non-empty model name.", err=True)
+        if alias in data.get("models", {}):
+            click.echo(f"Warning: saving will overwrite model {alias!r} in {path}.", err=True)
+            if not yes and not confirm("Replace this model?", default=False):
+                return
+        result = replace(result, alias=alias)
         view.line(f"{alias} · {model} · {api_style}", bold=True)
         if show_config:
             click.echo(yaml.safe_dump({"models": {alias: result.entry}}, sort_keys=False))
@@ -664,9 +822,28 @@ def command(
                 dim=True,
             )
         if yes or confirm(f"Write model entry to {path}?", default=True):
+            save_key = False
+            if api_key and api_key_env and api_key != os.environ.get(api_key_env):
+                secrets_path = get_user_dir("secrets.yaml")
+                view.line(
+                    f"This setup used a new key. It can be saved in {secrets_path} with owner-only permissions (plain text, not encrypted). Existing values are preserved; YAML formatting may change."
+                )
+                save_key = not yes and confirm("Save this key for future NOOA runs?", default=True)
+                if save_key:
+                    from nooa.secrets import write_secret_env
+
+                    write_secret_env(secrets_path, api_key_env, api_key)
+                    view.line(
+                        f"Saved key as {api_key_env}. Existing secret values are preserved; YAML formatting may change."
+                    )
+                    if os.environ.get(api_key_env):
+                        view.line(
+                            f"Your current environment still overrides this file. Unset or update {api_key_env} before starting NOOA again.",
+                            fg="yellow",
+                        )
             connect.write(result.entry, path, alias=alias)
             click.echo(f"Saved {alias} to {path}.")
-            if api_key and not os.environ.get(api_key_env):
+            if api_key and not save_key and api_key != os.environ.get(api_key_env):
                 click.echo(
                     f"The key was not saved. Set {api_key_env} (or add it to your NOOA secrets file) before using this alias."
                 )

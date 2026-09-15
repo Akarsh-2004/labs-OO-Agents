@@ -187,6 +187,69 @@ async def test_selected_reasoning_level_and_cache_defaults_reach_wire(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_missing_settings_are_not_reported_as_missing_replay(monkeypatch):
+    bodies = []
+
+    def handle(request):
+        bodies.append(json.loads(request.content))
+        data = response_body("chat")
+        data["choices"][0]["message"]["reasoning_content"] = "test reasoning"
+        return httpx.Response(200, json=data)
+
+    mock_http(monkeypatch, handle)
+    proposal = connect.plan(
+        "test",
+        "vendor/unlisted-model",
+        "chat",
+        "https://api.test/v1",
+        "",
+        reasoning_levels={"max": {"reasoning_effort": "max"}},
+    )
+    proposal.entry.pop("allowed_openai_params", None)  # A pre-fix saved entry.
+    updates = [
+        u
+        async for u in session_steps(
+            "test", proposal.entry, api_key="key", budget_tokens=TOKEN_RESERVATION
+        )
+    ]
+    retained = next(u.outcome for u in updates if u.name == "reasoning_retention")
+    assert all("reasoning_effort" not in body for body in bodies)
+    assert retained["state_retained"] is True
+    assert retained["settings_retained"] is False
+    assert "state was replayed" in retained["reason"]
+
+
+@pytest.mark.asyncio
+async def test_unlisted_model_declared_effort_reaches_level_and_session_requests(monkeypatch):
+    sent = []
+
+    def handle(request):
+        body = json.loads(request.content)
+        sent.append(body)
+        data = response_body("chat")
+        data["choices"][0]["message"]["reasoning_content"] = "test reasoning"
+        return httpx.Response(200, json=data)
+
+    mock_http(monkeypatch, handle)
+    proposal = connect.plan(
+        "test",
+        "vendor/unlisted-model",
+        "chat",
+        "https://api.test/v1",
+        "",
+        reasoning_levels={"max": {"reasoning_effort": "max"}},
+        session_checks=True,
+        budget_tokens=65536,
+    )
+    result = await connect.run(proposal, approved="all", api_key="test-key")
+    assert result.entry["provenance"]["probes"]["level:max"]["settings_sent"] is True
+    assert all(body["reasoning_effort"] == "max" for body in sent[2:])
+    retention = result.entry["provenance"]["session_checks"]["reasoning_retention"]
+    assert retention["state_retained"] is True
+    assert retention["settings_retained"] is True
+
+
+@pytest.mark.asyncio
 async def test_small_cache_hit_is_not_a_success(monkeypatch):
     def handle(request):
         data = response_body("chat")

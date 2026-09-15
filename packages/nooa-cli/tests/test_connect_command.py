@@ -248,19 +248,19 @@ def test_masked_key_is_transient_and_cancel_does_not_write(tmp_path, monkeypatch
     assert "CONNECT_TEST_KEY" not in os.environ
 
 
-def test_declining_replace_stops_before_discovery_or_paid_work(tmp_path, monkeypatch):
+def test_declining_replace_after_checks_keeps_original_entry(tmp_path, monkeypatch):
     from nooa import connect
 
     async def forbidden(*args, **kwargs):
         raise AssertionError("Cancelled replacement must not call the endpoint")
 
     monkeypatch.setattr(connect, "catalogue", forbidden)
-    monkeypatch.setattr(connect, "run_steps", forbidden)
     path = tmp_path / "models.yaml"
     original = "models: {local: {model_name: openai/old}}\n"
     path.write_text(original)
     result = CliRunner().invoke(command, args(path), input="n\n")
     assert result.exit_code == 0, result.output
+    assert result.output.index("Results ·") < result.output.index("Replace this model?")
     assert path.read_text() == original
 
 
@@ -332,7 +332,7 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
         [],
         input=(
             "y\ncustom\nhttps://api.test/v1\nCONNECT_WIZARD_KEY\ntemporary-secret\n"
-            "example-model\nmy-model\ny\n"
+            "example-model\nmy-model\ny\nn\n"
         ),
     )
     assert result.exit_code == 0, result.output
@@ -349,6 +349,8 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
     assert result.output.index("Chat interface: Connected") < result.output.index(
         "Tool use — checking"
     )
+    assert result.output.index("Tool use — checking") < result.output.index("Save this model as")
+    assert result.output.index("Save model") < result.output.index("Save this model as")
     assert "API format [" not in result.output  # One success is selected automatically.
     assert "Run these paid probes?" not in result.output
 

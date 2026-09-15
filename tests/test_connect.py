@@ -376,19 +376,19 @@ async def test_real_httpx_serialization_keeps_level_blocks(monkeypatch, style, p
         reasoning_levels={"high": patch},
     )
     result = await connect.run(proposal, approved="all")
+    if style == "chat" and "thinking" in patch:
+        # Explicitly preserving an incompatible field must not produce a green
+        # probe after silently dropping it. The legacy SDK rejects this shape.
+        assert len(sent) == 2
+        assert result.entry["provenance"]["probes"]["level:high"]["outcome"] == "not_probed"
+        return
     assert len(sent) == 3, result.entry["provenance"]["probes"]
     assert all(
         body.get("max_output_tokens", body.get("max_tokens", body.get("max_completion_tokens")))
         == 200
         for body in sent
     )
-    if style == "chat" and "thinking" in patch:
-        # The legacy runtime drops this known-but-inapplicable Chat option.
-        # Connect must expose the same behavior, not bypass it via raw HTTP.
-        assert "thinking" not in sent[-1]
-        assert connect.unobserved_reasoning_levels(result.entry) == ["high"]
-    else:
-        assert all(sent[-1][key] == value for key, value in patch.items())
+    assert all(sent[-1][key] == value for key, value in patch.items())
     assert result.entry["provenance"]["probes"]["level:high"]["client"] == "unifiedllm"
     assert "private-test-key" not in yaml.safe_dump(result.entry)
 

@@ -505,6 +505,10 @@ def plan(
             )
     if reasoning_levels is not None:
         entry["reasoning_levels"] = levels
+        # These are explicitly requested fields, not inferred model capabilities.
+        # Legacy parameter filtering must not silently remove them for an alias
+        # that is absent from its model catalogue.
+        entry["allowed_openai_params"] = sorted({key for patch in levels.values() for key in patch})
     if (default := reasoning.get("default_effort")) in levels:
         entry["reasoning_default"] = default
     if api_style == "responses":
@@ -621,9 +625,21 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
         retry_config=RetryConfig(max_retries=0, rate_limit_extra_retries=0),
         num_retries=0,
     )
+    settings_sent = []
+
+    async def capture(request):
+        from nooa._connect_session import _contains
+
+        if probe.name.startswith("level:"):
+            settings_sent.append(_contains(settings, json.loads(request.content)))
+
+    hooks = client._http.httpx_async.event_hooks["request"]
+    hooks.append(capture)
     try:
-        return await client.acall(messages=messages, **params)
+        response = await client.acall(messages=messages, **params)
+        return response, (len(settings_sent) == 1 and all(settings_sent))
     finally:
+        hooks.remove(capture)
         await client.aclose()
 
 
@@ -695,6 +711,7 @@ def diagnostic_prompt(stage: str, entry: dict, checks: dict) -> str:
                 "reasoning_observed",
                 "state_retained",
                 "settings_retained",
+                "settings_sent",
                 "input_tokens",
                 "cached_input_tokens",
                 "finish_reason",
@@ -749,6 +766,7 @@ async def run_steps(
             previous.get("outcome") == "accepted"
             and previous.get("request") == probe.body
             and previous.get("client") == "unifiedllm"
+            and (not probe.name.startswith("level:") or previous.get("settings_sent") is True)
         ):
             if probe.name == "routing" and entry.get("include"):
                 provenance["encrypted_reasoning"]["outcome"] = "accepted"
@@ -797,7 +815,7 @@ async def run_steps(
         yield ProbeUpdate(probe.name, {"outcome": "running"})
         try:
             async with asyncio.timeout(30):
-                response = await _run_probe(proposal.alias, entry, probe, key)
+                response, settings_sent = await _run_probe(proposal.alias, entry, probe, key)
             usage = response.usage
             reasoning = bool(response.reasoning or (usage and usage.reasoning_tokens))
             tool = any(call.name == "probe_tool" for call in response.tool_calls)
@@ -832,6 +850,13 @@ async def run_steps(
             finish_reason=response.finish_reason,
             checked_at=datetime.now(UTC).isoformat(),
         )
+        if probe.name.startswith("level:"):
+            record["settings_sent"] = settings_sent
+            if not settings_sent:
+                record["outcome"] = "not_confirmed"
+                record["reason"] = (
+                    "The client did not send the requested settings; check parameter filtering"
+                )
         spent += max(0, tokens - probe.token_estimate)
         yield ProbeUpdate(probe.name, deepcopy(record))
         if probe.name == "routing" and entry.get("include"):
