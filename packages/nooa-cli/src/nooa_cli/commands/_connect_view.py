@@ -26,7 +26,14 @@ def intro(*, checks, output_tokens, budget_tokens):
     if checks:
         line("API checks may incur charges.", fg="yellow")
         line("Checks use the same model client as your agents.", dim=True)
-        line(f"{output_tokens:,} output tokens / call", dim=True)
+        line(
+            "Up to 3 interface calls, then tools, each proposed reasoning level, and a 3-call conversation check.",
+            dim=True,
+        )
+        line(
+            f"Basic checks: {output_tokens:,} output tokens / call. Cache and reasoning replay: 3 calls, up to 2,048 output tokens each.",
+            dim=True,
+        )
         line(
             f"{budget_tokens:,} shared token budget"
             if budget_tokens is not None
@@ -34,6 +41,10 @@ def intro(*, checks, output_tokens, budget_tokens):
             dim=True,
         )
         line("No retries. Caps are estimates, not billing limits.", dim=True)
+        line(
+            "Includes a longer reusable prompt to measure cache reads. Dollar cost depends on your model; servers can ignore caps. Checks stop when the approved budget is exhausted.",
+            dim=True,
+        )
     else:
         line("No generation calls. Listing and metadata may still be fetched.", dim=True)
     line("Skip paid checks: --no-probe    Help: F1", dim=True)

@@ -97,7 +97,7 @@ def test_enabled_reasoning_without_evidence_warns_once_before_save(
             str(path),
             *(["--no-probe"] if mode == "unprobed" else []),
         ],
-        input="y\n",
+        input="y\ny\n",
     )
     assert result.exit_code == 0, result.output
     warning = "Warning: no reasoning information was returned for: high."
@@ -106,7 +106,7 @@ def test_enabled_reasoning_without_evidence_warns_once_before_save(
     )
     assert "returned for: none" not in result.output
     assert "private reasoning" not in result.output
-    assert len(sent) == (0 if mode == "unprobed" else 4)
+    assert len(sent) == (0 if mode == "unprobed" else 5 if mode == "rejected" else 7)
     if mode == "missing":
         assert result.output.index(warning) < result.output.index("Write model entry")
         assert "Try another API format or review the server's reasoning settings" in result.output
@@ -282,12 +282,12 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
         command,
         [],
         input=(
-            "custom\nhttps://api.test/v1\nCONNECT_WIZARD_KEY\ntemporary-secret\n"
+            "y\ncustom\nhttps://api.test/v1\nCONNECT_WIZARD_KEY\ntemporary-secret\n"
             "example-model\nmy-model\ny\n"
         ),
     )
     assert result.exit_code == 0, result.output
-    assert [r.method for r in requests] == ["GET", "POST", "POST", "POST", "POST"]
+    assert [r.method for r in requests] == ["GET"] + ["POST"] * 7
     entry = yaml.safe_load((tmp_path / "llm_config.yaml").read_text())["models"]["my-model"]
     assert entry["model_name"] == "openai/example-model"
     assert "temporary-secret" not in result.output + yaml.safe_dump(entry)
@@ -339,7 +339,7 @@ def test_interface_menu_only_offers_successes_or_explicit_manual_escape(
             "--output",
             str(path),
         ],
-        input="responses\ny\n" if responses_ok else "",
+        input="y\nresponses\ny\n" if responses_ok else "y\n",
     )
     if responses_ok:
         assert result.exit_code == 0, result.output
@@ -397,7 +397,7 @@ def test_interface_and_later_checks_share_the_cli_budget(tmp_path, monkeypatch):
             "--output",
             str(path),
         ],
-        input="y\n",
+        input="y\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert len(sent) == 3  # All of the budget was spent testing interfaces.
@@ -405,9 +405,9 @@ def test_interface_and_later_checks_share_the_cli_budget(tmp_path, monkeypatch):
     assert provenance["tokens_charged_to_budget"] == 2136
     assert provenance["probes"]["routing"]["outcome"] == "accepted"
     assert provenance["probes"]["tools"]["outcome"] == "not_probed"
-    assert "--budget-tokens is too small" in result.output
+    assert "approved budget is too small" in result.output
     assert "setup is incomplete; budget exhausted before tools" in result.output
-    assert result.output.index("--budget-tokens is too small") < result.output.index(
+    assert result.output.index("approved budget is too small") < result.output.index(
         "routing: accepted"
     )
 
@@ -537,7 +537,7 @@ def test_default_budget_covers_interfaces_tools_and_every_level(tmp_path, monkey
             "--output",
             str(path),
         ],
-        input="y\n",
+        input="y\ny\n",
     )
     assert result.exit_code == 0, result.output
     assert [
@@ -545,7 +545,8 @@ def test_default_budget_covers_interfaces_tools_and_every_level(tmp_path, monkey
     ] == levels.split(",")
     # Two interfaces reach HTTP; the runtime rejects the third before sending.
     # The tool check and all six levels still run; routing is reused.
-    assert len(bodies) == 9
+    # The session seed is also attempted; this minimal mock lacks a finish reason.
+    assert len(bodies) == 10
     probes = yaml.safe_load(path.read_text())["models"]["local"]["provenance"]["probes"]
     assert all(record["outcome"] == "accepted" for record in probes.values())
 
@@ -557,6 +558,18 @@ def test_bare_command_cancel_before_endpoint_does_nothing(tmp_path, monkeypatch)
     result = CliRunner().invoke(command, [], input="")
     assert result.exit_code == 1
     assert not list(tmp_path.iterdir())
+
+
+def test_declining_initial_approval_makes_no_calls_or_writes(tmp_path, monkeypatch):
+    def forbidden(request):
+        raise AssertionError("Approval was declined")
+
+    mock_http(monkeypatch, forbidden)
+    path = tmp_path / "models.yaml"
+    result = CliRunner().invoke(command, ["--output", str(path)], input="n\n")
+    assert result.exit_code == 0, result.output
+    assert "Approve API checks" in result.output
+    assert not path.exists()
 
 
 @pytest.mark.parametrize(

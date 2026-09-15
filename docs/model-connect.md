@@ -1,6 +1,6 @@
 # Configure a model with NOOA Connect
 
-`nooa connect` warns about API-call costs, checks the selected model with small
+`nooa connect` asks for approval of API-call costs upfront, checks the selected model with bounded
 requests, then asks before saving its registry entry. The same `nooa.connect` library is available to
 the TUI: frontends supply consent and display; the library supplies the plan,
 UnifiedLLM checks and registry updates.
@@ -38,7 +38,7 @@ Confirmed edits replace command-line limit/level settings; skipping the details
 keeps any explicit command-line settings. Skip means continue without these
 published details, not cancel. Cancel stops setup without saving.
 It then shows the remaining checks and budget. The initial warning explains that setup
-makes paid API calls; there are no repeated approval prompts for these checks.
+makes paid API calls and asks once for approval before any generation; there are no repeated approval prompts for these checks.
 Each check shows progress and its result as it runs. Saving is a separate
 confirmation; Ctrl-C cancels setup. A pasted key is used only for this session;
 the saved entry names its environment variable, not its value.
@@ -52,6 +52,32 @@ reasoning is off. The saved results keep acceptance and reasoning observation
 separate. The TUI can use `connect.unobserved_reasoning_levels(entry)` for the
 same warning. This does not add calls or prove reasoning quality; the setup
 question remains a small connection check.
+
+Full setup also runs a three-call conversation check through the saved entry's
+UnifiedLLM client and the default cached renderer. It seeds a longer reference
+prompt, replays the actual reply, then repeats that saved history with a different
+final question. It does not execute tools or invent reasoning state. It reports:
+
+- Cache reads as a fraction of input tokens, whether explicit markers were sent,
+  and whether the stable request prefix matched. Confirmation requires cache
+  reads covering at least half of the seed's input; a small tool-schema-only hit
+  is not enough.
+- Whether reasoning appeared in replies, whether its readable/native state reached
+  the follow-up's reasoning fields unchanged, and whether the selected reasoning
+  controls survived on the wire. Ordinary text fallback does not count as retained
+  reasoning. Missing evidence says “not confirmed,” not “reasoning is disabled.”
+
+These calls use up to 2,048 output tokens each and reserve 43,008 estimated tokens
+within the initial shared budget (65,536 by default). Basic checks retain their
+200-token output cap. No retries run; checks stop rather than increase the approved
+budget. These are estimates, not billing limits: servers can ignore caps. Use
+`--budget-tokens` before setup to choose another budget. Small context windows,
+incompatible reply caps, failures or insufficient budget leave the conversation
+check unconfirmed or untested. Results include sanitized counts and flags only;
+raw responses, signatures, encrypted state and captured bodies stay in memory.
+The check uses existing cache/replay defaults without forcing optional fields on.
+`--no-probe` disables these calls too; `--yes` explicitly approves the selected
+checks as well as saving. Library frontends opt in with `plan(..., session_checks=True)`.
 
 If you do not want paid checks, use `--no-probe` or follow
 [manual model configuration](model-configuration.md), optionally with the
@@ -111,9 +137,9 @@ Use `--no-probe` to save without model calls, or `--probe minimal` for routing
 only (up to three interface attempts unless `--api-style` is supplied).
 The default plan also checks tools and each proposed reasoning level. The
 selected interface's successful routing request is reused, not sent twice.
-It uses 200 output tokens per call, no retries, and a 30-second total
-deadline per probe. By default, the CLI reserves enough estimated tokens for
-the interface checks, tools and every proposed level. Each request reserves its
+Basic checks use 200 output tokens per call, no retries, and a 30-second total
+deadline per probe (120 seconds for each conversation-check call). The CLI uses
+the fixed budget approved at the beginning. Each basic request reserves its
 output cap plus 512 estimated input tokens. An explicit `--budget-tokens` limits
 the entire setup, including interface detection; it is never increased. Connect
 warns before the remaining checks if that limit is too small. Larger reported

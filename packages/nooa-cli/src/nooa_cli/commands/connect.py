@@ -43,7 +43,7 @@ import click
 @click.option(
     "--budget-tokens",
     type=click.IntRange(min=1),
-    help="Shared token budget; by default reserve enough for all selected checks.",
+    help="Shared estimated-token budget for all checks (default: 65536); never increased after approval.",
 )
 @click.option("--output-tokens", type=click.IntRange(1, 4096), default=200, show_default=True)
 @click.option(
@@ -51,7 +51,11 @@ import click
     type=click.Path(dir_okay=False),
     help="Registry path; defaults to the user llm_config.yaml.",
 )
-@click.option("--yes", is_flag=True, help="Save without prompting; supply the connection options.")
+@click.option(
+    "--yes",
+    is_flag=True,
+    help="Approve the checks and save without prompting; supply the connection options.",
+)
 def command(
     model,
     provider,
@@ -110,6 +114,12 @@ def command(
                     )
                     if outcome.get("reasoning_observed"):
                         click.echo("  Reasoning included in the response.")
+                    if event.name == "cache" and outcome.get("input_tokens"):
+                        cached = outcome.get("cached_input_tokens") or 0
+                        total = outcome["input_tokens"]
+                        click.echo(
+                            f"  Reused {cached:,} / {total:,} input tokens ({cached / total:.0%})."
+                        )
         raise click.ClickException("Checks ended without a result.")
 
     path = Path(output) if output else get_user_dir("llm_config.yaml")
@@ -128,10 +138,15 @@ def command(
         server_urls = list(dict.fromkeys(server_urls))
         default_style = "chat"
         approval = "none" if no_probe else probe
+        budget_tokens = 65536 if budget_tokens is None else budget_tokens
         interfaces = None
         view.intro(
             checks=approval != "none", output_tokens=output_tokens, budget_tokens=budget_tokens
         )
+        if approval != "none" and not yes:
+            if not confirm("Approve API checks within this budget?", default=False):
+                click.echo("No API checks approved. Run with --no-probe for manual setup.")
+                return
         view.step(1, "Connection")
         if provider and provider not in (*connect.PROVIDERS, "custom"):
             raise click.UsageError(
@@ -378,6 +393,7 @@ def command(
             budget_tokens=budget_tokens if budget_tokens is not None else 4096,
             output_tokens=output_tokens,
             existing_entry=interfaces.results[api_style].entry if interfaces else existing,
+            session_checks=approval == "all",
         )
         if edited_settings:
             for field in (
@@ -402,6 +418,10 @@ def command(
                 and proposal.entry["provenance"]["probes"][p.name].get("request") == p.body
             )
         )
+        if proposal.session_checks:
+            from nooa._connect_session import TOKEN_RESERVATION
+
+            remaining_estimate += TOKEN_RESERVATION
         proposal = replace(
             proposal,
             budget_tokens=remaining_estimate
@@ -435,14 +455,14 @@ def command(
             else f"~${proposal.price_estimate:.6f} at catalogue prices"
         )
         click.echo(
-            f"Plan: {len(proposal.probes)} candidate calls, {output_tokens} output tokens per call; approval: {approval}."
+            f"Plan: {len(proposal.probes) + (3 if proposal.session_checks else 0)} candidate calls; basic checks {output_tokens} output tokens per call, session checks 2048; approval: {approval}."
         )
         click.echo(
             f"Estimated tokens for remaining checks: {remaining_estimate}; remaining budget: {proposal.budget_tokens}; price for the full plan: {price}."
         )
         if remaining_estimate > proposal.budget_tokens:
             click.echo(
-                "Warning: --budget-tokens is too small for all checks. Some will be skipped. Increase it or omit it to check every level.",
+                "Warning: the approved budget is too small for all checks. Some will be skipped. Restart with a larger --budget-tokens value to run them all.",
                 err=True,
             )
         click.echo(

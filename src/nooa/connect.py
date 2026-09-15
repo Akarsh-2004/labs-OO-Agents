@@ -93,6 +93,7 @@ class ConnectPlan:
     budget_tokens: int
     token_estimate: int
     price_estimate: float | None
+    session_checks: bool = False
 
 
 @dataclass(frozen=True)
@@ -368,6 +369,7 @@ def plan(
     budget_tokens: int = 4096,
     output_tokens: int = 200,
     existing_entry: dict | None = None,
+    session_checks: bool = False,
 ) -> ConnectPlan:
     """Prepare requests without reading credentials, files or network resources.
 
@@ -462,8 +464,6 @@ def plan(
         entry["reasoning_default"] = default
     if api_style == "responses":
         entry["store"] = False
-    elif api_style == "anthropic":
-        entry["cache_breakpoint"] = "anthropic"
     token_key = "max_output_tokens" if api_style == "responses" else "max_tokens"
     body = {
         "model": model,
@@ -521,7 +521,12 @@ def plan(
                 price = len(probes) * (512 * rates[0] + output_tokens * rates[1])
         except (ValueError, TypeError, KeyError):
             pass  # Missing catalogue prices are unknown, never zero.
-    return ConnectPlan(alias, entry, tuple(probes), budget_tokens, estimate, price)
+    if session_checks:
+        from nooa._connect_session import TOKEN_RESERVATION
+
+        estimate += TOKEN_RESERVATION
+        price = None  # The longer replay depends on the actual seed response.
+    return ConnectPlan(alias, entry, tuple(probes), budget_tokens, estimate, price, session_checks)
 
 
 async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None):
@@ -688,6 +693,33 @@ async def run_steps(
         name for name, item in records.items() if item.get("reasoning_observed")
     ]
     provenance["tokens_charged_to_budget"] = spent
+    if proposal.session_checks:
+        from nooa._connect_session import session_steps
+
+        checks = {}
+        provenance["session_checks"] = checks
+        if approved != "all" or stopped:
+            checks["session"] = {
+                "outcome": "not_probed",
+                "reason": "not approved or earlier check failed",
+            }
+            yield ProbeUpdate("session", deepcopy(checks["session"]))
+        else:
+            async with aclosing(
+                session_steps(
+                    proposal.alias,
+                    proposal.entry,
+                    api_key=key,
+                    budget_tokens=max(0, proposal.budget_tokens - spent),
+                )
+            ) as steps:
+                async for update in steps:
+                    if update.outcome["outcome"] != "running":
+                        checks[update.name] = update.outcome
+                    yield update
+            provenance["tokens_charged_to_budget"] += checks.get("session", {}).get(
+                "tokens_charged_to_budget", 0
+            )
     yield ConnectResult(proposal.alias, entry)
 
 
