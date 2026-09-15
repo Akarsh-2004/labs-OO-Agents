@@ -131,6 +131,34 @@ def test_declining_final_write_leaves_no_file(tmp_path):
     assert not path.exists()
 
 
+def test_yaml_failure_names_file_and_line_without_echoing_contents(tmp_path):
+    path = tmp_path / "broken.yaml"
+    path.write_text("models: [\n  secret-value: }\n")
+    result = CliRunner().invoke(command, [*args(path), "--yes"])
+    assert result.exit_code == 1
+    assert str(path) in result.output
+    assert "line 2" in result.output
+    assert "secret-value" not in result.output
+    assert "Agent diagnostic prompt" in result.output
+
+
+def test_write_failure_keeps_path_and_actionable_reason(tmp_path, monkeypatch):
+    from nooa import connect
+
+    path = tmp_path / "models.yaml"
+
+    def denied(*args, **kwargs):
+        raise PermissionError(13, "Permission denied", str(path))
+
+    monkeypatch.setattr(connect, "write", denied)
+    result = CliRunner().invoke(command, [*args(path), "--yes"])
+    assert result.exit_code == 1
+    assert str(path) in result.output
+    assert "Permission denied" in result.output
+    assert "Agent diagnostic prompt" in result.output
+    assert not path.exists()
+
+
 def test_explicit_levels_are_written_as_request_blocks(tmp_path):
     path = tmp_path / "connected.yaml"
     result = CliRunner().invoke(

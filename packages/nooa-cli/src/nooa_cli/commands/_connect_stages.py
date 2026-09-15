@@ -52,6 +52,7 @@ def run_stage(
     data = None
     ok = False
     failure_code = 1
+    key = None
     try:
         if invalid_options:
             raise click.UsageError(
@@ -81,7 +82,10 @@ def run_stage(
             if document.get("ok") is False:
                 click.echo("Warning: saving a configuration whose checks did not pass.", err=True)
             path = Path(output)
-            existing = yaml.safe_load(path.read_text()) or {} if path.exists() else {}
+            existing = {}
+            if path.exists():
+                with path.open() as source:
+                    existing = yaml.safe_load(source) or {}
             if alias in existing.get("models", {}):
                 if not yes:
                     raise click.UsageError("Alias exists; --yes explicitly permits replacement")
@@ -99,7 +103,10 @@ def run_stage(
             style = api_style or "chat"
             key_env = api_key_env or ""
             budget = 65536 if budget_tokens is None else budget_tokens
-            levels = yaml.safe_load(Path(levels_file).read_text()) if levels_file else None
+            levels = None
+            if levels_file:
+                with Path(levels_file).open() as source:
+                    levels = yaml.safe_load(source)
             proposal = connect.plan(
                 alias or "candidate",
                 model or "candidate",
@@ -191,15 +198,14 @@ def run_stage(
             failure_code = 2
             error["message"] = exc.message
         else:
-            error["message"] = (
-                "Check the supplied configuration or input file; see the diagnostic prompt."
-            )
+            error["message"] = view.local_failure(exc, api_key=key, api_key_env=api_key_env)
         status = getattr(exc, "status_code", None)
         if isinstance(status, int):
             error["status_code"] = status
         checks["stage"] = {
             "outcome": "failed",
             "error": type(exc).__name__,
+            "detail": error["message"],
             **({"status_code": status} if isinstance(status, int) else {}),
         }
         data = None

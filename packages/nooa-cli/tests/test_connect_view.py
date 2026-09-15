@@ -91,3 +91,17 @@ def test_missing_model_details_stay_unknown_instead_of_becoming_recommendations(
     assert result.exit_code == 0, result.output
     assert result.output.count("Not listed") == 4
     assert "0 tokens" not in result.output.replace("200 tokens", "")
+
+
+def test_local_diagnostics_keep_validation_but_hide_provider_bodies(monkeypatch):
+    import httpx
+
+    monkeypatch.setenv("TEST_ERROR_KEY", "private-key")
+    assert view.local_failure(ValueError("reasoning_levels must be a mapping")) == (
+        "reasoning_levels must be a mapping"
+    )
+    error = ValueError("Invalid file private-key, transient-key")
+    detail = view.local_failure(error, api_key="transient-key", api_key_env="TEST_ERROR_KEY")
+    assert "private-key" not in detail and "transient-key" not in detail
+    detail = view.local_failure(httpx.ConnectError("untrusted server text private-key"))
+    assert "untrusted server text" not in detail and "private-key" not in detail

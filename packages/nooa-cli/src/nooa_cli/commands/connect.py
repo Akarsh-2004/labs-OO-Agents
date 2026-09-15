@@ -175,8 +175,12 @@ def command(
         raise click.ClickException("Checks ended without a result.")
 
     path = Path(output) if output else get_user_dir("llm_config.yaml")
+    api_key = None
     try:
-        data = yaml.safe_load(path.read_text()) or {} if path.exists() else {}
+        data = {}
+        if path.exists():
+            with path.open() as source:
+                data = yaml.safe_load(source) or {}
         if not isinstance(data, dict) or not isinstance(data.get("models", {}), dict):
             raise click.ClickException("Registry must contain a models mapping.")
         server_urls = [p.api_base for p in connect.PROVIDERS.values()]
@@ -496,7 +500,10 @@ def command(
             raise click.UsageError(
                 "Use either --levels-file or --reasoning-template with --levels."
             )
-        patches = yaml.safe_load(Path(levels_file).read_text()) if levels_file else None
+        patches = None
+        if levels_file:
+            with Path(levels_file).open() as source:
+                patches = yaml.safe_load(source)
         if levels or reasoning_template:
             if not reasoning_template or not levels:
                 raise click.UsageError(
@@ -650,13 +657,14 @@ def command(
                     "For a custom path, include it in NEMO_OO_LLM_CONFIG or reload_registry(path)."
                 )
     except (ValueError, OSError, yaml.YAMLError, httpx.HTTPError) as exc:
+        detail = view.local_failure(exc, api_key=api_key, api_key_env=api_key_env)
         click.echo(
             "Agent diagnostic prompt:\n"
             + connect.diagnostic_prompt(
-                "setup", {}, {"setup": {"outcome": "failed", "error": type(exc).__name__}}
+                "setup",
+                {},
+                {"setup": {"outcome": "failed", "error": type(exc).__name__, "detail": detail}},
             ),
             err=True,
         )
-        raise click.ClickException(
-            "Setup could not finish; see the diagnostic prompt above."
-        ) from None
+        raise click.ClickException(detail) from None

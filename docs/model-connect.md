@@ -67,6 +67,11 @@ agent to investigate, repair, and rerun the affected stage within configured
 limits. Wizard failures print the same library-generated handoff; neither
 frontend launches another agent automatically.
 
+`data` contains the full library result, including the synthetic prompts in the
+probe plan/provenance; `checks` omits those request bodies. Neither contains
+returned reasoning or credential values. Local file failures retain their path;
+YAML failures identify the file, line and column without echoing file contents.
+
 ## Library calls from NOOA agents
 
 The CLI is a frontend to `nooa.connect`, not a subprocess requirement. Inside

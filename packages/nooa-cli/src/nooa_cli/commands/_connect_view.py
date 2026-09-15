@@ -40,6 +40,27 @@ def check_failure(outcome):
     return None
 
 
+def local_failure(exc, *, api_key=None, api_key_env=None):
+    """Explain local setup errors without YAML excerpts or provider error bodies."""
+    import yaml
+
+    if isinstance(exc, yaml.YAMLError):
+        mark = getattr(exc, "problem_mark", None)
+        detail = (
+            f"Invalid YAML in {mark.name}, line {mark.line + 1}, column {mark.column + 1}."
+            if mark is not None
+            else "Invalid YAML configuration."
+        )
+    elif isinstance(exc, (OSError, ValueError)):
+        detail = str(exc)
+    else:
+        detail = "Check the connection and credentials; see the diagnostic prompt."
+    for secret in (api_key, os.environ.get(api_key_env) if api_key_env else None):
+        if secret:
+            detail = detail.replace(secret, "[redacted]")
+    return detail[:1000]
+
+
 def line(text, *, fg=None, bold=False, dim=False):
     width = max(24, min(84, shutil.get_terminal_size((80, 24)).columns - 4))
     for part in textwrap.wrap(text, width=width) or [""]:

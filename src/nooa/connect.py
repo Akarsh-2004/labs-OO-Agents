@@ -690,6 +690,7 @@ def diagnostic_prompt(stage: str, entry: dict, checks: dict) -> str:
             for key in (
                 "outcome",
                 "error",
+                "detail",
                 "status_code",
                 "reasoning_observed",
                 "state_retained",
