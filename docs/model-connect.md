@@ -156,8 +156,11 @@ The displayed **reported reply ceiling** is capability metadata saved under
 `provenance.catalogue_limits.max_completion_tokens`, not a request default.
 Every entry also has an actual **reply budget**, saved as `max_tokens` for all
 three interfaces. Responses translates that to `max_output_tokens` on the wire.
-Press Enter to accept the recommendation, choose a smaller 8,192- or 2,048-token
-budget, or choose Custom to edit the number. Smaller options appear only when
+Press Enter to accept the recommendation, choose a higher budget for high reasoning
+(65,536) or extended reasoning (131,072), choose a smaller 8,192- or 2,048-token
+budget, or choose Custom to edit the number. Higher options appear only above the
+recommendation and within known model limits; they do not change the reasoning
+level itself. Smaller options appear only when
 below the recommendation. Connect offers the catalogue's output recommendation when available,
 otherwise 32,768 (labelled NOOA default), bounded by the known ceiling and context
 window. Existing entries keep their current setting. The budget includes thinking

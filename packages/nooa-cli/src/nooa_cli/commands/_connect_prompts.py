@@ -242,19 +242,28 @@ def choose_reply_limit(suggested, ceiling=None, *, source="connect_default"):
         "catalogue_recommendation": "catalogue recommendation",
     }.get(source, "current setting")
     smaller = {name: cap for name, cap in (("smaller", 8192), ("short", 2048)) if cap < suggested}
+    larger = {
+        name: cap
+        for name, cap in (("high", 65536), ("extended", 131072))
+        if cap > suggested and (ceiling is None or cap <= ceiling)
+    }
     selected = prompt(
         "Reply budget",
-        choices=("recommended", *smaller, "custom"),
+        choices=("recommended", *larger, *smaller, "custom"),
         default="recommended",
         open_menu=True,
         labels={
             "recommended": f"Recommended — {suggested:,} tokens ({origin})",
+            **{
+                name: f"{'High' if name == 'high' else 'Extended'} reasoning budget — {cap:,} tokens"
+                for name, cap in larger.items()
+            },
             **{name: f"Smaller budget — {cap:,} tokens" for name, cap in smaller.items()},
             "custom": "Custom…",
         },
     )
     if selected != "custom":
-        return smaller.get(selected, suggested)
+        return {**smaller, **larger}.get(selected, suggested)
     if ceiling is not None:
         click.echo(f"  Known upper limit: {ceiling:,} tokens.")
     while True:

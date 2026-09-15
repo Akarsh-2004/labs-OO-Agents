@@ -12,7 +12,15 @@ from nooa_cli.commands.connect import command
 
 @pytest.mark.parametrize(
     "choice,expected",
-    [("", 32768), ("recommended", 32768), ("smaller", 8192), ("short", 2048), ("custom\n512", 512)],
+    [
+        ("", 32768),
+        ("recommended", 32768),
+        ("high", 65536),
+        ("extended", 131072),
+        ("smaller", 8192),
+        ("short", 2048),
+        ("custom\n512", 512),
+    ],
 )
 def test_wizard_reply_budget_is_a_runtime_cap(tmp_path, monkeypatch, choice, expected):
     from nooa import llm_config
@@ -65,7 +73,8 @@ def test_reply_dialog_offers_recommendation_smaller_and_custom(monkeypatch, caps
         == 16384
     )
     menu = calls[0][1]
-    assert menu["choices"] == ("recommended", "smaller", "short", "custom")
+    assert menu["choices"] == ("recommended", "high", "smaller", "short", "custom")
+    assert menu["labels"]["high"] == "High reasoning budget — 65,536 tokens"
     assert menu["default"] == "recommended"
     assert menu["open_menu"] is True
     assert menu["labels"]["recommended"] == "Recommended — 32,768 tokens (catalogue recommendation)"
@@ -73,6 +82,19 @@ def test_reply_dialog_offers_recommendation_smaller_and_custom(monkeypatch, caps
     output = capsys.readouterr()
     assert "Known upper limit: 65,536 tokens" in output.out
     assert "at most 65,536" in output.err
+
+
+@pytest.mark.parametrize("ceiling", [32768, 64000])
+def test_high_reasoning_options_never_exceed_known_limit(monkeypatch, ceiling):
+    from nooa_cli.commands import _connect_prompts
+
+    def prompt(text, **kwargs):
+        assert "high" not in kwargs["choices"]
+        assert "extended" not in kwargs["choices"]
+        return "recommended"
+
+    monkeypatch.setattr(_connect_prompts, "prompt", prompt)
+    assert _connect_prompts.choose_reply_limit(32768, ceiling) == 32768
 
 
 def test_stage_save_fills_defaults_and_reports_shadow(tmp_path, monkeypatch):
