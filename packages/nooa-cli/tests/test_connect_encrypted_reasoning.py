@@ -140,8 +140,7 @@ async def test_session_field_rejection_is_recorded_without_rerunning_session(mon
 def test_wizard_explains_and_saves_default_without_extra_question(tmp_path):
     import yaml
     from click.testing import CliRunner
-
-    from nooa.unifiedllm.connect.cli import command
+    from nooa_cli.commands.connect import command
 
     target = tmp_path / "models.yaml"
     result = CliRunner().invoke(

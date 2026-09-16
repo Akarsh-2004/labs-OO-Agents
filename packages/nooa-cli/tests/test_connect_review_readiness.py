@@ -71,9 +71,8 @@ async def test_catalogue_rejects_invalid_ids(monkeypatch, identifier):
 def test_no_probe_can_authenticate_model_discovery(monkeypatch, tmp_path):
     import click
     from click.testing import CliRunner
-
-    from nooa.unifiedllm.connect import _prompts as _connect_prompts
-    from nooa.unifiedllm.connect import cli
+    from nooa_cli.commands import _connect_prompts as _connect_prompts
+    from nooa_cli.commands import connect as cli
 
     monkeypatch.delenv("CONNECT_DISCOVERY_KEY", raising=False)
     sent = []

@@ -4,8 +4,9 @@
 
 import shlex
 
+from nooa_cli.commands._connect_registry import diagnostic_context
+
 from nooa.unifiedllm import connect
-from nooa.unifiedllm.connect._registry import diagnostic_context
 
 
 def test_target_and_effective_source_are_distinct(tmp_path, monkeypatch):

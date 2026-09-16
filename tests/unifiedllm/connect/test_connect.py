@@ -453,18 +453,60 @@ def test_entry_loads_through_main_registry(tmp_path, monkeypatch):
 
 def test_library_source_has_no_ui_or_provider_imports():
     import ast
-    import inspect
+    from pathlib import Path
 
     imported = []
-    for node in ast.walk(ast.parse(inspect.getsource(connect))):
-        if isinstance(node, ast.Import):
-            imported.extend(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom):
-            imported.append(node.module or "")
+    for source in Path(connect.__file__).parent.rglob("*.py"):
+        for node in ast.walk(ast.parse(source.read_text())):
+            if isinstance(node, ast.Import):
+                imported.extend(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                imported.append(node.module or "")
     assert all(
-        name.split(".")[0] not in {"nooa_cli", "click", "litellm", "openai", "anthropic", "textual"}
+        name.split(".")[0]
+        not in {
+            "nooa_cli",
+            "click",
+            "prompt_toolkit",
+            "rich",
+            "litellm",
+            "openai",
+            "anthropic",
+            "textual",
+        }
         for name in imported
     )
+
+
+def test_library_plan_and_save_without_cli_dependencies(tmp_path):
+    import subprocess
+    import sys
+
+    code = """
+import importlib.abc
+import sys
+from pathlib import Path
+
+# Isolate Connect's dependency boundary from the existing core runtime imports.
+import nooa.unifiedllm
+
+class NoFrontend(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in {'nooa_cli', 'click', 'prompt_toolkit', 'rich', 'textual'}:
+            raise AssertionError('Connect imported a frontend dependency: ' + fullname)
+
+sys.meta_path.insert(0, NoFrontend())
+from nooa.unifiedllm import connect
+from nooa.unifiedllm.connect import _diagnostics, _session
+
+proposal = connect.plan('local', 'example/model', 'chat', 'https://api.test/v1', '')
+assert proposal.entry['max_tokens'] > 0
+connect.write(proposal.entry, Path(sys.argv[1]), alias='local')
+"""
+    path = tmp_path / "models.yaml"
+    result = subprocess.run([sys.executable, "-c", code, str(path)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert yaml.safe_load(path.read_text())["models"]["local"]["max_tokens"] > 0
 
 
 def test_catalogue_efforts_propose_complete_blocks_and_default():

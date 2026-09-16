@@ -5,14 +5,14 @@ import json
 import pytest
 import yaml
 from click.testing import CliRunner
+from nooa_cli.commands.connect import command
 
-from nooa.unifiedllm.connect.cli import command
 from tests.unifiedllm.connect.connect_http import mock_http, response_body
 
 
 @pytest.fixture(autouse=True)
 def sdk_credentials(monkeypatch):
-    from nooa.unifiedllm.connect import _prompts as _connect_prompts
+    from nooa_cli.commands import _connect_prompts as _connect_prompts
 
     # Reply-budget interaction has its own contract tests.
     monkeypatch.setattr(
@@ -372,8 +372,7 @@ def test_interface_menu_only_offers_successes_or_explicit_manual_escape(
     tmp_path, monkeypatch, responses_ok
 ):
     import httpx
-
-    from nooa.unifiedllm.connect import _prompts as _connect_prompts
+    from nooa_cli.commands import _connect_prompts as _connect_prompts
 
     choices = []
     real_prompt = _connect_prompts.prompt
@@ -912,9 +911,9 @@ def test_server_url_suggestions_include_existing_file_without_credentials(
     tmp_path, monkeypatch, custom_path
 ):
     import click
+    from nooa_cli.commands import _connect_prompts as _connect_prompts
 
     from nooa import paths
-    from nooa.unifiedllm.connect import _prompts as _connect_prompts
 
     path = tmp_path / "models.yaml"
     original = yaml.safe_dump(

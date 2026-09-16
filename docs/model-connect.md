@@ -507,13 +507,17 @@ an explicit `include: []` opts out. Checks use the same client as an agent.
 - `src/nooa/unifiedllm/connect/__init__.py`: plans data first so either frontend can obtain consent;
   runs bounded UnifiedLLM calls through the registry's shared client factory;
   updates one alias while retaining other entries and comments.
-- `src/nooa/unifiedllm/connect/cli.py` and its private helpers: argument parsing,
-  choices, preview and approval. The library does not import these UI modules.
-- `packages/nooa-cli/src/nooa_cli/commands/connect.py`: lazy registration and
-  delegation only; all Connect behavior belongs to UnifiedLLM. The TUI can call
-  the library directly. This is an internal organization, not a separate distribution.
-- `tests/unifiedllm/connect/`: exercise approval, budgets, exact HTTP
-  bodies, key privacy, cancellation, targeted writes and the real registry on main.
+- `packages/nooa-cli/src/nooa_cli/commands/connect.py` and its `_connect_*`
+  helpers: argument parsing, interactive prompts, progress, preview and approval.
+  Click and prompt-toolkit belong to `nooa-cli`, not NOOA core. The CLI imports
+  the framework lazily; the Connect library never imports the CLI. The TUI can
+  call the library directly without these presentation dependencies.
+- `tests/unifiedllm/connect/`: library budgets, exact HTTP bodies, targeted writes
+  and the real registry on main, including a frontend-dependency isolation check.
+- `packages/nooa-cli/tests/test_connect*.py`: wizard approval, prompts, progress,
+  key privacy, cancellation and scripted stages.
+
+This is an internal organization, not a separately installable UnifiedLLM package.
 
 Request-shape references: [OpenAI Responses](https://developers.openai.com/api/reference/python/resources/responses/methods/create)
 and [OpenRouter model metadata](https://openrouter.ai/docs/api/api-reference/models/list-all-models-and-their-properties).

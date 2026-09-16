@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""The NOOA frontend delegates Connect without owning its implementation."""
+"""The Connect CLI stays lazy and preserves its scripted interface."""
 
 import json
 import subprocess
@@ -23,14 +23,14 @@ def test_connect_entrypoint_does_not_import_framework():
     assert result.returncode == 0, result.stderr
 
 
-def test_connect_help_is_delegated():
+def test_connect_help_lists_options():
     result = CliRunner().invoke(command, ["--help"])
     assert result.exit_code == 0, result.output
     assert "--edit-model" in result.output
     assert "--stage" in result.output
 
 
-def test_connect_plan_is_delegated_without_http():
+def test_connect_plan_uses_library_without_http():
     result = CliRunner().invoke(
         command,
         [

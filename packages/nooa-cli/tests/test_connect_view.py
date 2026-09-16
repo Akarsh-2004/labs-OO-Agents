@@ -6,8 +6,7 @@ import os
 
 import click
 from click.testing import CliRunner
-
-from nooa.unifiedllm.connect import _view as view
+from nooa_cli.commands import _connect_view as view
 
 
 def test_intro_is_wrapped_and_keeps_cost_notice_and_manual_routes(monkeypatch):

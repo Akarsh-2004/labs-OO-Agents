@@ -70,7 +70,7 @@ def run_stage(
 
     from nooa.unifiedllm import connect
 
-    from . import _view as view
+    from . import _connect_view as view
 
     entry = {}
     checks = {}
@@ -120,7 +120,7 @@ def run_stage(
                 click.echo(f"Warning: replacing alias {alias!r} in {path}.", err=True)
             connect.write(entry, path, alias=alias)
             data = {"alias": alias, "path": str(path), "entry": entry}
-            from ._registry import shadowing_source
+            from ._connect_registry import shadowing_source
 
             if shadow := shadowing_source(alias, path):
                 data["shadowed_by"] = shadow
@@ -257,7 +257,7 @@ def run_stage(
             **({"status_code": status} if isinstance(status, int) else {}),
         }
         data = None
-    from ._registry import diagnostic_context
+    from ._connect_registry import diagnostic_context
 
     total_budget = connect.DEFAULT_CHECK_BUDGET if budget_tokens is None else budget_tokens
     charged = (
