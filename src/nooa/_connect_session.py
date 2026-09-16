@@ -196,7 +196,9 @@ async def session_steps(alias, entry, *, api_key, budget_tokens):
             ),
             ResolvedBlock(
                 key="task",
-                role=Role.USER,
+                # The cached formatter partitions SYSTEM context blocks and
+                # renders the dynamic half as a trailing USER message.
+                role=Role.SYSTEM,
                 content="Find the sum of item numbers for records 0013 and 0027. Call probe_tool with the sum as a string, or answer briefly.",
                 metadata=BlockMetadata(static=False, user_block=True),
             ),

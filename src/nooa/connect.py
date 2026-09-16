@@ -65,10 +65,14 @@ def _include_rejected(exc: Exception) -> bool:
     wrapped_param = re.search(r"""["']param["']\s*:\s*["']([^"']+)""", message)
     if param is None and wrapped_param:
         param = wrapped_param.group(1)
-    if isinstance(param, str) and not (
-        param == "include" or param.startswith("include[") or param == "reasoning.encrypted_content"
-    ):
-        return False  # Rejected history/model fields are not include-option rejection.
+    if isinstance(param, str):
+        # A structured field rejection is sufficient even when the message is
+        # generic. Rejected history/model fields must never disable include.
+        return (
+            param == "include"
+            or param.startswith("include[")
+            or param == "reasoning.encrypted_content"
+        )
     return bool(
         re.search(r"\b(include|encrypted_content)\b", message)
         and re.search(
@@ -1041,6 +1045,10 @@ async def run_steps(
     spent = 0
     stopped = False
     key = api_key
+    if approved != "none" and key is None and entry["api_key_env"]:
+        key = os.environ.get(entry["api_key_env"])
+        if not key:
+            raise ValueError(f"Set {entry['api_key_env']} before probing, or approve none")
     pending = deque(proposal.probes)
     while pending:
         probe = pending.popleft()
@@ -1099,10 +1107,6 @@ async def run_steps(
             record["reason"] = "declared output cap exceeds the approved probe cap"
             yield ProbeUpdate(probe.name, deepcopy(record))
             continue
-        if key is None and entry["api_key_env"]:
-            key = os.environ.get(entry["api_key_env"])
-            if not key:
-                raise ValueError(f"Set {entry['api_key_env']} before probing, or approve none")
         spent += probe.token_estimate
         yield ProbeUpdate(probe.name, {"outcome": "running"})
         started = time.monotonic()

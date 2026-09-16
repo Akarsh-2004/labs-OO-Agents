@@ -97,13 +97,17 @@ async def test_session_checks_observe_wire_and_usage(monkeypatch, style, mode):
     assert records["session"]["outcome"] == "completed"
     assert records["cache"]["stable_prefix"]
     assert len(records["cache"]["readings"]) == 2
+    if style == "responses":
+        # #341 enables explicit caching from the formatter boundary by default.
+        # A server miss is a warning, not evidence that the runtime lost it.
+        assert records["cache"]["explicit_mode"] is True
+        assert records["cache"]["marker_count"] == 1
+        assert all(body["prompt_cache_options"] == {"mode": "explicit"} for body in sent)
     if mode == "early-hit":
         assert records["cache"]["cached_input_tokens"] == 12
         assert records["cache"]["readings"][1]["cached_input_tokens"] == 0
     assert records["cache"]["outcome"] == (
-        ("not_confirmed" if style == "responses" else "warning")
-        if mode in {"no-cache", "no-usage"}
-        else "confirmed"
+        "warning" if mode in {"no-cache", "no-usage"} else "confirmed"
     )
     assert records["reasoning_retention"]["outcome"] == (
         "not_confirmed" if mode == "no-reasoning" else "confirmed"
@@ -156,6 +160,36 @@ def test_portable_text_does_not_count_as_reasoning_replay():
     )
     assert list(_wire_reasoning({"reasoning_content": "reasoning"})) == ["reasoning"]
     assert list(_wire_reasoning({"tool_calls": [{"id": "call__thought__opaque"}]})) == ["opaque"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key_present", [True, False])
+async def test_reused_probes_resolve_credentials_before_session(monkeypatch, key_present):
+    from dataclasses import replace
+
+    sent = []
+
+    def handle(request):
+        sent.append(request)
+        assert request.headers["authorization"] == "Bearer session-test-key"
+        return httpx.Response(200, json=response_body("chat"))
+
+    mock_http(monkeypatch, handle)
+    monkeypatch.setenv("CONNECT_SESSION_KEY", "session-test-key")
+    proposal = connect.plan("test", "gpt-5.1", "chat", "https://api.test/v1", "CONNECT_SESSION_KEY")
+    checked = await connect.run(proposal, approved="all")
+    assert len(sent) == 2
+    sent.clear()
+    proposal = replace(proposal, entry=checked.entry, session_checks=True)
+    if not key_present:
+        monkeypatch.delenv("CONNECT_SESSION_KEY")
+        with pytest.raises(ValueError, match="Set CONNECT_SESSION_KEY"):
+            await connect.run(proposal, approved="all")
+        assert not sent
+        return
+    result = await connect.run(proposal, approved="all")
+    assert len(sent) == 3  # Routing/tools reused; only the session sends requests.
+    assert result.entry["provenance"]["session_checks"]["session"]["outcome"] == "completed"
 
 
 @pytest.mark.asyncio

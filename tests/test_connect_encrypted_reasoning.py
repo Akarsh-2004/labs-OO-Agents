@@ -60,7 +60,7 @@ async def test_rejection_removes_wire_field_even_on_native_endpoint(
                 400,
                 json={
                     "error": {
-                        "message": "Unsupported parameter include secret-never-persist",
+                        "message": "Unavailable for this deployment secret-never-persist",
                         "param": "include",
                     }
                 },
@@ -121,7 +121,7 @@ async def test_session_field_rejection_is_recorded_without_rerunning_session(mon
                 422,
                 json={
                     "error": {
-                        "message": "reasoning.encrypted_content is not supported",
+                        "message": "Unavailable for this deployment",
                         "param": "include",
                     }
                 },
