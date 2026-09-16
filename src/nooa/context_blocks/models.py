@@ -460,7 +460,7 @@ class ContextWindowStats(BaseModel):
             "Compact history: "
             "self.events.collapse(start_tag, end_tag, summary_text=...); "
             "see doc(self.events).\n"
-            "Manage context blocks: doc(self.context)."
+            "Add, remove, or edit context blocks: doc(self.context)."
         )
         if self.prompt_tokens is None:
             return "Context: awaiting first model response\n" + guidance
