@@ -201,11 +201,16 @@ class EventsApi(Skill):
         """
         return self._manager.get(key) is not None
 
-    def collapse(self, start_tag: str, end_tag: str, summary_text: str | None = None) -> str:
+    def collapse(
+        self, start_tag: str | int, end_tag: str | int, summary_text: str | None = None
+    ) -> str:
         """Archive a range of events into a single Summary marker.
 
         Replaces tags start_tag..end_tag with one summary tag.
         Original events remain accessible by their individual tags.
+        Prefer string tags, including summary tags such as "2..10". Integers
+        are accepted if they identify existing events (including archived ones),
+        with a reminder to use strings. Either endpoint may be an integer.
 
         Args:
             start_tag: First tag to collapse (inclusive), e.g. "2".
@@ -220,7 +225,22 @@ class EventsApi(Skill):
             events.collapse("2", "40", "User discussed X")   # summarize
             summary = events[events.collapse("2", "40")]     # get the Summary event
         """
-        return self._manager.collapse(start_tag, end_tag, summary_text)
+        tags: list[str] = []
+        converted = False
+        for name, tag in (("start_tag", start_tag), ("end_tag", end_tag)):
+            if type(tag) is int:
+                tag = str(tag)
+                if self._manager.get(tag) is None:
+                    raise ValueError(f"{name} does not identify an existing event: {tag!r}")
+                converted = True
+            elif not isinstance(tag, str):
+                raise TypeError(f"{name} must be a string tag or an integer event tag")
+            tags.append(tag)
+
+        result = self._manager.collapse(tags[0], tags[1], summary_text)
+        if converted:
+            print("Please use strings for event tags next time (e.g. '2', not 2).")
+        return result
 
     def keys(self) -> list[str]:
         """Return the list of active event tags in chronological order.

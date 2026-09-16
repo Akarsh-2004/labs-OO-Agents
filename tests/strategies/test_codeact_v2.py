@@ -11,7 +11,7 @@ import pytest
 from nooa import Agent, strategy
 from nooa.config import CodeActConfig
 from nooa.context_blocks import ToolCallEvent
-from nooa.events import PythonOutput
+from nooa.events import PythonOutput, Task
 from nooa.strategies.codeact import CodeActStrategy
 from nooa.strategies.codeact_v2 import CodeActV2
 from nooa.unifiedllm import (
@@ -39,6 +39,34 @@ def _response(code: str, call_id: str = "call_1") -> LLMResponse:
         tool_calls=[_python_cell(code, call_id)],
         finish_reason="tool_calls",
     )
+
+
+@pytest.mark.asyncio
+async def test_integer_collapse_warning_reaches_next_model_turn():
+    llm = FakeLLMClient(
+        scripted_responses=[
+            _response('self.events.collapse("1..2", 3, summary_text="combined recap")'),
+            _response("return_result('done')", "finish"),
+        ]
+    )
+
+    class TestAgent(Agent, llm=llm):
+        @strategy(CodeActV2(config=CodeActConfig(prefill=None)))
+        async def answer(self) -> str:
+            """Compact the earlier work, then finish."""
+            ...
+
+    agent = TestAgent()
+    try:
+        for i in range(3):
+            agent.event_manager.add(Task(prompt=f"earlier work {i}"))
+        agent.events.collapse("1", "2", summary_text="earlier recap")
+        assert await agent.answer() == "done"
+        assert "Please use strings" in str(llm.last_messages)
+        assert agent.events["1..3"].summary_text == "combined recap"
+        assert agent.events["1..3"].children_tags == ["1..2", "3"]
+    finally:
+        await agent.aclose()
 
 
 @pytest.mark.asyncio
