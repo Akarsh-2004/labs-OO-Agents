@@ -339,6 +339,21 @@ async def catalogue() -> list[dict]:
         data = payload.get("data") if isinstance(payload, dict) else None
         if not isinstance(data, list) or any(not isinstance(item, dict) for item in data):
             raise ValueError("Catalogue response must contain a list of model objects")
+        for item in data:
+            if not isinstance(item.get("id"), str) or not item["id"].strip():
+                raise ValueError("Catalogue models must have a non-empty string id")
+            for field in ("top_provider", "reasoning"):
+                if not isinstance(item.get(field), dict):
+                    item[field] = {}
+            reasoning = item["reasoning"]
+            efforts = reasoning.get("supported_efforts")
+            reasoning["supported_efforts"] = (
+                [value for value in efforts if isinstance(value, str) and value.strip()]
+                if isinstance(efforts, list)
+                else []
+            )
+            if not isinstance(reasoning.get("default_effort"), str):
+                reasoning.pop("default_effort", None)
         return data
 
 
@@ -1294,14 +1309,25 @@ def write(entry: dict, path: Path, *, alias: str) -> None:
         data = {}
     if not isinstance(data, dict) or not isinstance(data.get("models", {}), dict):
         raise ValueError("Registry must be a mapping with a models mapping")
-    dumped = yaml.safe_dump({alias: entry}, sort_keys=False, allow_unicode=True).rstrip()
-    indented = "\n".join("  " + line for line in dumped.splitlines()) + "\n"
     document = yaml.compose(source)
     models_node = (
         next((value for key, value in document.value if key.value == "models"), None)
         if document
         else None
     )
+    alias_indent = models_node.start_mark.column if models_node and models_node.value else 2
+    dumped = yaml.safe_dump({alias: entry}, sort_keys=False, allow_unicode=True).rstrip()
+    indented = "\n".join(" " * alias_indent + line for line in dumped.splitlines()) + "\n"
+
+    def content_end(node):
+        # Block mapping end marks include following comments. Descend to the
+        # last value so comments preceding a neighbor stay with that neighbor.
+        if isinstance(node, yaml.MappingNode) and node.value and not node.flow_style:
+            return content_end(node.value[-1][1])
+        if isinstance(node, yaml.SequenceNode) and node.value and not node.flow_style:
+            return content_end(node.value[-1])
+        return node.end_mark
+
     if models_node is None:
         separator = "" if not source or source.endswith("\n") else "\n"
         text = source + separator + "models:\n" + indented
@@ -1316,14 +1342,15 @@ def write(entry: dict, path: Path, *, alias: str) -> None:
         )
     elif alias in data["models"]:
         key, value = next((key, value) for key, value in models_node.value if key.value == alias)
-        lines = dumped.splitlines()
-        replacement = "\n".join([lines[0], *("  " + line for line in lines[1:])])
-        suffix = source[value.end_mark.index :]
-        if suffix and not suffix.startswith("\n"):
-            replacement += "\n" + " " * value.end_mark.column
-        text = source[: key.start_mark.index] + replacement + suffix
+        lines = source.splitlines(keepends=True)
+        end = content_end(value)
+        end_line = end.line + bool(end.column)
+        text = "".join(lines[: key.start_mark.line]) + indented + "".join(lines[end_line:])
     else:
-        insertion = models_node.end_mark.index
+        end = content_end(models_node)
+        insertion = sum(
+            len(line) for line in source.splitlines(keepends=True)[: end.line + bool(end.column)]
+        )
         prefix = "" if insertion == 0 or source[insertion - 1] == "\n" else "\n"
         text = source[:insertion] + prefix + indented + source[insertion:]
     expected = {**data, "models": {**data.get("models", {}), alias: entry}}

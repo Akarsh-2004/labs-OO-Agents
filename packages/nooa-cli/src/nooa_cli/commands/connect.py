@@ -374,7 +374,10 @@ def command(
             alias or "candidate", model or "candidate", discovery_style, endpoint, api_key_env
         )
         needs_key = (
-            not yes and approval != "none" and api_key_env and not os.environ.get(api_key_env)
+            not yes
+            and (approval != "none" or not model)
+            and api_key_env
+            and not os.environ.get(api_key_env)
         )
         api_key = (
             prompt("API key (used only for this setup)", hide_input=True)

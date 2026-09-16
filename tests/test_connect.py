@@ -356,6 +356,10 @@ def test_connect_uses_existing_registry_discovery(tmp_path, monkeypatch):
 )
 @pytest.mark.asyncio
 async def test_real_httpx_serialization_keeps_level_blocks(monkeypatch, style, patch, response):
+    if style == "chat" and "thinking" in patch:
+        # This case specifically exercises LiteLLM's local rejection; direct
+        # compatible transports forward unknown fields to the server.
+        monkeypatch.setenv("NOOA_LLM_TRANSPORT", "litellm")
     monkeypatch.setenv("CONNECT_TEST_KEY", "private-test-key")
     sent = []
 
@@ -555,18 +559,16 @@ async def test_reconnect_keeps_observed_tools_without_spending_again(monkeypatch
 
     async def post(self, url, **kwargs):
         calls.append(kwargs)
-        return httpx.Response(
-            200,
-            json={
-                "choices": [
-                    {
-                        "message": {
-                            "tool_calls": [{"function": {"name": "probe_tool", "arguments": "{}"}}]
-                        }
-                    }
-                ]
-            },
-        )
+        data = response_body("chat")
+        data["choices"][0]["finish_reason"] = "tool_calls"
+        data["choices"][0]["message"]["tool_calls"] = [
+            {
+                "id": "probe-call",
+                "type": "function",
+                "function": {"name": "probe_tool", "arguments": "{}"},
+            }
+        ]
+        return httpx.Response(200, json=data)
 
     mock_post(monkeypatch, post)
     first = await connect.run(make_plan(), approved="all", api_key="test-key")

@@ -232,6 +232,8 @@ async def test_selected_reasoning_level_and_cache_defaults_reach_wire(monkeypatc
 
 @pytest.mark.asyncio
 async def test_missing_settings_are_not_reported_as_missing_replay(monkeypatch):
+    # Regression for legacy parameter filtering, which direct does not perform.
+    monkeypatch.setenv("NOOA_LLM_TRANSPORT", "litellm")
     bodies = []
 
     def handle(request):

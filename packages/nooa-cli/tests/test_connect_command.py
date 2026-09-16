@@ -45,6 +45,9 @@ def args(path):
 def test_enabled_reasoning_without_evidence_warns_once_before_save(
     tmp_path, monkeypatch, style, mode
 ):
+    if style == "anthropic" and mode == "usage":
+        # LiteLLM discards this non-native usage extension; direct can retain it.
+        monkeypatch.setenv("NOOA_LLM_TRANSPORT", "litellm")
     import json
 
     import httpx
@@ -223,11 +226,11 @@ def test_endpoint_first_flow_uses_shared_discovery(tmp_path, monkeypatch):
         return connect.Discovery("https://api.test/v1", ({"id": "wire/model"},))
 
     monkeypatch.setattr(connect, "discover", discover)
-    monkeypatch.delenv("CONNECT_TEST_KEY", raising=False)
+    monkeypatch.setenv("CONNECT_TEST_KEY", "discovery-key")
     path = tmp_path / "models.yaml"
     result = CliRunner().invoke(command, args(path)[1:], input="wire/model\ny\n")
     assert result.exit_code == 0, result.output
-    assert calls == [("https://api.test/v1", {"api_style": "chat", "api_key": None})]
+    assert calls == [("https://api.test/v1", {"api_style": "chat", "api_key": "discovery-key"})]
     assert yaml.safe_load(path.read_text())["models"]["local"]["model_name"] == "openai/wire/model"
 
 
@@ -669,6 +672,8 @@ def test_model_settings_can_be_edited_skipped_or_cancelled(tmp_path, monkeypatch
 
 
 def test_default_budget_covers_interfaces_tools_and_every_level(tmp_path, monkeypatch):
+    # The exact count below includes LiteLLM's pre-HTTP interface rejection.
+    monkeypatch.setenv("NOOA_LLM_TRANSPORT", "litellm")
     import json
 
     import httpx
@@ -882,6 +887,8 @@ def test_provider_flag_supports_scripted_setup(tmp_path):
 
 def test_large_model_list_and_invalid_choice_do_not_flood_terminal(tmp_path, monkeypatch):
     from nooa import connect
+
+    monkeypatch.setenv("CONNECT_TEST_KEY", "discovery-key")
 
     async def discover(endpoint, **kwargs):
         return connect.Discovery(endpoint, tuple({"id": f"vendor/model-{i}"} for i in range(1000)))

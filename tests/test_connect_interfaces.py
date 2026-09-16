@@ -170,7 +170,11 @@ async def test_success_status_without_expected_response_shape_is_inconclusive(
     mock_post(monkeypatch, post)
     proposal = connect.plan("local", "model", style, "https://api.test/v1", "")
     result = await connect.run(proposal, approved="minimal")
-    assert result.entry["provenance"]["probes"]["routing"]["outcome"] == "not_probed"
+    record = result.entry["provenance"]["probes"]["routing"]
+    # SDK validation and NOOA replay validation can fail at different layers;
+    # neither a malformed 200 nor an unreadable reply confirms the interface.
+    assert record["outcome"] in {"not_probed", "not_confirmed"}
+    assert record["error"]
 
 
 @pytest.mark.asyncio
