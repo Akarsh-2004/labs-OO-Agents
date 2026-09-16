@@ -11,6 +11,9 @@ to follow semantic versioning.
   consider both continuations without treating provider misses as setup failures.
   Add puzzle-result feedback and a user-selected 120-second routing retry within
   the original approved budget.
+- Responses clients now honor the cached renderer's stable-prefix boundary by default,
+  without a cache setting in the model registry. Requests without a usable boundary
+  retain provider-default caching; `cache_breakpoint=None` opts out of NOOA markers.
 
 - Security: the sandbox parent no longer unpickles worker bytes. Brokered `self.*`
   arguments, `self.x = value` assignments, cell return values and `return_result`
