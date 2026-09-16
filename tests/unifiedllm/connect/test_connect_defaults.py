@@ -161,7 +161,7 @@ def test_responses_reply_alias_precedence(base_key):
             config = client._prepare_call_config(overrides)
             assert config["max_output_tokens"] == expected
             assert "max_tokens" not in config
-        with pytest.raises(ValueError, match="only one reply limit"):
+        with pytest.raises(ValueError, match="only one reply token limit"):
             client._prepare_call_config({"max_tokens": 100, "max_output_tokens": 200})
 
 
