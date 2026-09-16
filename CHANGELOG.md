@@ -8,6 +8,8 @@ to follow semantic versioning.
 
 - Add `CodeActV2`, the single-`python_cell` strategy with in-cell `return_result`.
   The benchmark agents use it; `CodeActStrategy` remains the default.
+- `CurrentCall` is a mutable invocation record; strategies bind its event ID and
+  live execution namespace with ordinary public-field assignment during setup.
 - Breaking: remove `CodeActLiteStrategy` and its experimental exports. Use
   `CodeActStrategy` for the existing two-tool contract or `CodeActV2` for the
   single-tool contract. The evaluation CLI option is now `codeact_v2`.

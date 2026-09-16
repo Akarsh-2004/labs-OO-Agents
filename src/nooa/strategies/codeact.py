@@ -870,9 +870,7 @@ Standard Python builtins and agent instance (`self`) are available."""
             session.session_locals.update(call.session_locals)
         # Expose this live dictionary to dynamic context renderers. Unlike
         # call.session_locals, this also receives names defined by model cells.
-        # execution_locals is a declared public CurrentCall field. Bind it here
-        # after session creation; the rest of the frozen call metadata stays fixed.
-        object.__setattr__(call, "execution_locals", session.session_locals)
+        call.execution_locals = session.session_locals
 
         # Build builtins for code execution
         _init_hm = get_harness_metrics()
@@ -892,7 +890,7 @@ Standard Python builtins and agent instance (`self`) are available."""
             # before the event lands and assign the returned tag back to call.id.
             task_content = await self._build_task_message(runtime, original_call=call)
             tag = runtime.event_manager.add(Task(prompt=task_content))
-            object.__setattr__(call, "id", tag)
+            call.id = tag
             # Method-local preconditions run before generation and fail fast
             # (raise to abort the call); see nooa.strategy_validation.
             run_preconditions(runtime.agent, call, self.config.preconditions)

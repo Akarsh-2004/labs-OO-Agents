@@ -17,11 +17,13 @@ if TYPE_CHECKING:
     from nooa.config.truncation_config import TruncationConfig
 
 
-@dataclass(frozen=True)
+@dataclass
 class CurrentCall:
     """Represents a method call being generated.
 
-    Call metadata is frozen, but referenced namespace dictionaries remain mutable.
+    This is a mutable per-invocation record: strategies bind its event ID and
+    execution namespace during setup. Do not change ``id`` while using the call
+    as a set member or dictionary key; equality and hashing use that ID.
     ``session_locals`` is the optional caller-owned seed/writeback dictionary for
     carrying names between invocations. CodeAct copies it into a fresh execution
     namespace and writes filtered names back when the call completes.
