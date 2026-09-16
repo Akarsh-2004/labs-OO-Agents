@@ -77,44 +77,44 @@ class CodeActV2(CodeActStrategy):
         ]
 
     async def python_cell_context(self, runtime: RuntimeServices) -> str:
-        """Render one capability block, including the execution namespace's typed stub."""
+        """Render the available namespace once, as commented Python declarations."""
         agent_module = inspect.getmodule(type(runtime.agent))
         if agent_module is None:
             return ""
 
-        from nooa.runtime.restrictions import is_from_blocked_module
-
-        context = self._extract_module_context(agent_module, agent=runtime.agent)
-        modules: list[tuple[str, str]] = []
-        callables: list[tuple[str, str]] = []
-        for name, value in context.items():
-            if is_from_blocked_module(value, self.config.restrictions.blocked_modules):
-                continue
-            if isinstance(value, ModuleType):
-                modules.append((name, value.__name__))
-            elif callable(value):
-                origin = getattr(value, "__module__", type(value).__module__)
-                qualified_name = getattr(value, "__qualname__", type(value).__qualname__)
-                callables.append((name, f"{origin}.{qualified_name}"))
-
-        lines = []
-        for kind, capabilities in (("Module", modules), ("Callable/type", callables)):
-            if capabilities:
-                labels = ", ".join(
-                    f"`{name}`" if name == origin else f"`{name}` → `{origin}`"
-                    for name, origin in sorted(capabilities)
-                )
-                lines.append(f"{kind} capabilities already in scope: {labels}.")
         from nooa.agentdoc.visibility import iter_agent_mro_modules
 
-        stub = self._render_execution_context_stub(
+        context = self._extract_module_context(agent_module, agent=runtime.agent)
+        return self._render_execution_context_stub(
             context,
             {module.__name__ for module in iter_agent_mro_modules(type(runtime.agent))},
             self.config.restrictions.blocked_modules,
         )
-        return "\n".join(
-            [stub.replace("## Execution Context", "## Python cell context", 1), "", *lines]
+
+    def _format_execution_context_stub(self, code: list[str], in_scope_only: list[str]) -> str:
+        """Keep guidance and runtime names inside the same Python-style block."""
+        lines = [
+            "```python",
+            "# Python cell context",
+            "# Already in scope inside python_cell(); state persists across cells.",
+            "# Use these names directly; do not re-import or re-define them.",
+            "# Use doc(name) for details about any type or function.",
+            "",
+            *code,
+        ]
+        if in_scope_only:
+            lines.extend(("", "# Other bound names: " + ", ".join(sorted(in_scope_only))))
+        names = ", ".join(self._always_available_builtins())
+        lines.extend(
+            (
+                "",
+                "# Runtime helpers (already available):",
+                f"# {names}",
+                "# Standard-library modules asyncio and typing are also available.",
+                "```",
+            )
         )
+        return "\n".join(lines)
 
     @staticmethod
     def _python_cell_state_label(value: Any, *, max_chars: int = 160) -> str:

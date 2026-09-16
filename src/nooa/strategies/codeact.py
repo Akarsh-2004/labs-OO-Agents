@@ -563,6 +563,13 @@ Standard Python builtins and agent instance (`self`) are available."""
                 if getattr(sys.modules.get(candidate), name, None) is obj:
                     from_imports.setdefault(candidate, set()).add(name)
                     return
+                original_name = getattr(obj, "__name__", "")
+                if (
+                    original_name.isidentifier()
+                    and getattr(sys.modules.get(candidate), original_name, None) is obj
+                ):
+                    from_imports.setdefault(candidate, set()).add(f"{original_name} as {name}")
+                    return
             in_scope_only.append(name)
 
         for name, obj in context.items():
@@ -615,6 +622,10 @@ Standard Python builtins and agent instance (`self`) are available."""
                 code.append("")
             code.append(self._render_function_specs(functions))
 
+        return self._format_execution_context_stub(code, in_scope_only)
+
+    def _format_execution_context_stub(self, code: list[str], in_scope_only: list[str]) -> str:
+        """Wrap verified namespace declarations in the strategy's context format."""
         parts = [
             "## Execution Context",
             "",
@@ -698,8 +709,12 @@ Standard Python builtins and agent instance (`self`) are available."""
         """Select the value exposed as the cell's Jupyter-style output."""
         return result.returned_value if result.has_return and not result.error else None
 
-    @strategy(TemplateStrategy())
     async def strategy_instructions(self, runtime: RuntimeServices) -> str:
+        """Bind strategy-owned text explicitly; template self refers to the agent."""
+        return await self._strategy_instructions(runtime, restrictions=self._restrictions_text())
+
+    @strategy(TemplateStrategy())
+    async def _strategy_instructions(self, runtime: RuntimeServices, restrictions: str) -> str:
         """
         ## Strategy
 
@@ -754,7 +769,7 @@ Standard Python builtins and agent instance (`self`) are available."""
 
         ## Restrictions (will throw)
 
-        {self._restrictions_text()}
+        {restrictions}
         """
         ...
 

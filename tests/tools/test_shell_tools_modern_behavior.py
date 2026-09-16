@@ -12,6 +12,22 @@ import pytest
 from nooa.tools.shell_tools import Match, ShellResult, ShellTools
 
 
+def test_shell_tools_directs_agents_to_its_file_and_command_methods():
+    doc = ShellTools.__doc__
+    assert doc is not None
+    assert "Always use these four methods rather than Python builtins" in doc
+    assert "For shell commands and file operations" in doc
+
+
+def test_run_stream_documents_standalone_usage():
+    doc = ShellTools.run_stream.__doc__
+    assert doc is not None
+    assert "pyp" not in doc
+    assert "async for event in self.shell.run_stream(" in doc
+    assert "event.returncode" in doc
+    assert "event.timed_out" in doc
+
+
 @pytest.fixture
 def sh(tmp_path):
     return ShellTools(cwd=str(tmp_path))
@@ -76,6 +92,38 @@ async def test_replace_path_ambiguous_errors(sh, tmp_path):
     with pytest.raises(ValueError, match="matched 2 times"):
         # Two matches -> must error rather than guess.
         await sh.replace("f.py", "a = 1", "a = 2")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lines", [None, (2, 2)])
+@pytest.mark.parametrize("replacement", ["return a + b", ""])
+@pytest.mark.parametrize("keyword", [False, True])
+async def test_replace_match_rejects_old_new_without_modifying_file(
+    sh, tmp_path, lines, replacement, keyword
+):
+    """Both whole-file and sliced matches reject the path-form argument pattern."""
+    original = "def calc(a, b):\n    return a * b\n"
+    path = tmp_path / "calc.py"
+    path.write_text(original)
+    match = await sh.read("calc.py", lines)
+    with pytest.raises(ValueError) as error:
+        if keyword:
+            await sh.replace(match, "return a * b", new=replacement)
+        else:
+            await sh.replace(match, "return a * b", replacement)
+    assert path.read_bytes() == original.encode()
+    assert "replace(match, new_text)" in str(error.value)
+    assert "replace(path, old, new)" in str(error.value)
+    assert "no file was changed" in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_replace_match_argument_guard_runs_before_file_access(sh, tmp_path):
+    """An invalid call is rejected even when its old Match points to a missing file."""
+    match = Match("missing.py", 1, 1, "old", resolved_path=tmp_path / "missing.py")
+    with pytest.raises(ValueError, match="ambiguous"):
+        await sh.replace(match, "old", "new")
+    assert not (tmp_path / "missing.py").exists()
 
 
 @pytest.mark.asyncio

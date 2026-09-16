@@ -349,8 +349,13 @@ async def test_python_cell_context_lists_static_module_capabilities():
     finally:
         sys.modules.pop(agent_module.__name__, None)
 
-    assert rendered.startswith("## Python cell context\n")
-    assert "Module capabilities already in scope: `json`, `pd` → `pandas`." in rendered
+    assert rendered.startswith("```python\n# Python cell context\n")
+    assert rendered.endswith("\n```")
+    assert rendered.count("```") == 2
+    assert "capabilities already in scope" not in rendered
+    import ast
+
+    ast.parse(rendered.removeprefix("```python\n").removesuffix("\n```"))
     assert "import pandas as pd" in rendered
     assert "import json" in rendered
     assert "return_result" in rendered
@@ -388,16 +393,14 @@ async def test_python_cell_context_includes_imported_symbols_and_respects_visibi
     agent = leaf.Leaf()
     runtime = type("Runtime", (), {"agent": agent})()
     rendered = await strategy_instance.python_cell_context(runtime)
-    assert "`Number` → `decimal.Decimal`" in rendered
+    assert "from decimal import Decimal as Number" in rendered
     assert "launch" not in rendered
     assert "secret" not in rendered
     assert "math.floor" not in rendered
     if block_math:
-        assert "math.sqrt" not in rendered
-        assert "math.trunc" not in rendered
+        assert "from math import" not in rendered
     else:
-        assert "`root` → `math.sqrt`" in rendered
-        assert "`inherited` → `math.trunc`" in rendered
+        assert "from math import sqrt as root, trunc as inherited" in rendered
 
 
 @pytest.mark.asyncio
@@ -421,7 +424,7 @@ async def test_imported_capability_is_advertised_and_executes_without_generic_co
     agent = module.ImportedAgent(llm=llm)
     try:
         assert await agent.answer() == 9.0
-        assert "`root` → `math.sqrt`" in str(llm.last_messages)
+        assert "from math import sqrt as root" in str(llm.last_messages)
         assert "<execution_context" not in str(llm.last_messages)
         assert "<python_cell_context" in str(llm.last_messages)
     finally:

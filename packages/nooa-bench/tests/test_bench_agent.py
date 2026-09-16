@@ -175,6 +175,23 @@ def test_bench_agent_close_is_hidden_from_model_docs():
     assert "def close(" not in doc(agent)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent_class", [BenchAgent, RLMBenchAgent])
+async def test_merge_error_is_not_advertised_in_python_cell_context(agent_class):
+    """Recovery exceptions remain importable but are not up-front capabilities."""
+    from nooa.strategies import CodeActV2
+
+    agent = agent_class(llm=FakeLLMClient())
+    runtime = type("Runtime", (), {"agent": agent})()
+    try:
+        rendered = await CodeActV2().python_cell_context(runtime)
+        assert "DelegationMergeError" not in rendered
+        assert "TaskResult" in rendered
+        assert issubclass(bench_agent_module.DelegationMergeError, ValueError)
+    finally:
+        await agent.aclose()
+
+
 def test_bench_agent_context_is_minimal_and_automatic():
     """Only actionable live context is exposed; compaction is automatic."""
     agent = BenchAgent(llm=FakeLLMClient())

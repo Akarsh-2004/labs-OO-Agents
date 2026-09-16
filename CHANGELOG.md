@@ -6,10 +6,13 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Reject ambiguous `ShellTools.replace(match, old, new)` calls before file access,
+  with guidance for full-region versus path-based substring replacement.
 - Add `CodeActV2`, the single-`python_cell` strategy with in-cell `return_result`.
   The benchmark agents use it; `CodeActStrategy` remains the default.
   Its cacheable Python-cell context includes the execution namespace's typed
-  stub without a second execution-context block.
+  stub without a second execution-context block. Names and runtime helpers use
+  one Python-style block; internal delegation errors are not advertised there.
 - Trace explorer viewer requests now send configured viewer authentication and
   honor proxy environment settings, including `NO_PROXY` for direct access.
   Authenticated HTTP requests warn that bearer tokens are unencrypted; existing

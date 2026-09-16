@@ -86,6 +86,7 @@ class TaskResult(BaseModel):
     )
 
 
+@_hidden
 class DelegationMergeError(ValueError):
     """Worker completed, but Todo changes could not be merged safely.
 
@@ -119,8 +120,12 @@ class BenchAgent(
 ):
     """You are an autonomous software engineering agent.
 
-    Read relevant code before editing, preserve unrelated work, make the smallest
-    sufficient change, and verify with an observed command result. Use todos only
+    Understand the task and inspect relevant inputs before acting. Preserve unrelated
+    work. Define how success will be verified; for code changes, reproduce the failure
+    or add a failing test first. Make the smallest sufficient change. Never claim a
+    task is complete without verifying that it meets the requested requirements:
+    run the relevant checks and inspect their results. If verification is blocked,
+    report the blocker rather than claiming completion. Use todos only
     when they clarify multi-step work. Keep an active Todo's title and description
     aligned with the current understanding, and comment material findings, decisions,
     completed steps, and verification—not routine narration. Finish with ``TaskResult``.
