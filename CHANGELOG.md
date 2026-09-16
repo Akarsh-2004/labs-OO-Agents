@@ -6,6 +6,23 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Add `nooa connect`: a model-setup wizard, staged JSON interface and reusable
+  `nooa.unifiedllm.connect` library. Prompts remain in `nooa-cli`, without new
+  core dependencies. Configured checks send the saved reply limit, including
+  reasoning-level overrides; insufficient budget skips checks instead of lowering
+  caps. Save-time validation rejects caps that leave no input room. New entries
+  default to `transport: direct`, forward-compatible with the direct SDK runtime;
+  older runtimes ignore it and explicit existing transport choices are preserved.
+  Registry writes follow symlinks and retain mode/newlines. Diagnostic handoffs
+  scrub active keys throughout reports, including model names and mapping keys.
+- Add the dedicated `nooa-model-configuration` coding-agent skill and route
+  Connect help and diagnostic handoffs to it. Agent authoring links to model
+  setup instead of embedding registry and reasoning-configuration instructions.
+- Connect prefers endpoint-reported limits to catalogue values, labels input-only
+  context bounds, and lets staged/offline plans reuse discovery JSON. Cache checks
+  consider both continuations without treating provider misses as setup failures.
+  Add puzzle-result feedback and a user-selected 120-second routing retry within
+  the original approved budget.
 - `ShellTools.run_stream` and the coding activity wrapper now accept
   `command, *, stdin=None, timeout=30.0`, matching `run`. Streaming uses the
   same stdin handling; pass an existing positional timeout as `timeout=...`.
