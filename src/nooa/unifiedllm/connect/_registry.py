@@ -28,7 +28,7 @@ def entries(extra_path=None):
 
 def credential_names(registry, endpoint):
     """Match a server, allowing its root and terminal /v1 forms; never return values."""
-    from nooa.connect import normalize_endpoint
+    from nooa.unifiedllm.connect import normalize_endpoint
 
     def normalized(value):
         return normalize_endpoint(value).removesuffix("/v1")
@@ -102,10 +102,10 @@ def diagnostic_context(
 
     import yaml
 
-    from nooa._connect_diagnostics import installation_context
     from nooa._version import __version__
-    from nooa.connect import normalize_endpoint
     from nooa.llm_config import llm_config_chain
+    from nooa.unifiedllm.connect import normalize_endpoint
+    from nooa.unifiedllm.connect._diagnostics import installation_context
 
     context = {
         **installation_context(),

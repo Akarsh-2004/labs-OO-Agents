@@ -68,7 +68,7 @@ the endpoint's model list. It writes the user `llm_config.yaml`, warning before
 replacing an existing alias; `--output` selects another file. Supply an environment
 variable name for the key; never put credentials in the entry. Probe acceptance
 does not prove the model obeyed a reasoning setting. TUI integrations use the
-same `nooa.connect.discover` / `check_interfaces` / `plan` / `run` / `write` library; see
+same `nooa.unifiedllm.connect.discover` / `check_interfaces` / `plan` / `run` / `write` library; see
 [model onboarding](../../docs/model-connect.md). `--no-probe` makes no generation
 calls. `--yes` skips save/overwrite confirmations, not a requirement for paid
 calls; do not use it to overwrite an alias without the user's authorization.

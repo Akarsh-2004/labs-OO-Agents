@@ -7,9 +7,9 @@ import json
 import httpx
 import pytest
 
-from nooa import connect
-from nooa._connect_session import TOKEN_RESERVATION, _wire_reasoning, session_steps
-from tests.connect_http import mock_http, response_body
+from nooa.unifiedllm import connect
+from nooa.unifiedllm.connect._session import TOKEN_RESERVATION, _wire_reasoning, session_steps
+from tests.unifiedllm.connect.connect_http import mock_http, response_body
 
 
 @pytest.mark.asyncio

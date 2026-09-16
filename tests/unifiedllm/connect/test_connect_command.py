@@ -5,14 +5,14 @@ import json
 import pytest
 import yaml
 from click.testing import CliRunner
-from nooa_cli.commands.connect import command
 
-from tests.connect_http import mock_http, response_body
+from nooa.unifiedllm.connect.cli import command
+from tests.unifiedllm.connect.connect_http import mock_http, response_body
 
 
 @pytest.fixture(autouse=True)
 def sdk_credentials(monkeypatch):
-    from nooa_cli.commands import _connect_prompts
+    from nooa.unifiedllm.connect import _prompts as _connect_prompts
 
     # Reply-budget interaction has its own contract tests.
     monkeypatch.setattr(
@@ -175,7 +175,7 @@ def test_yaml_failure_names_file_and_line_without_echoing_contents(tmp_path):
 
 
 def test_write_failure_keeps_path_and_actionable_reason(tmp_path, monkeypatch):
-    from nooa import connect
+    from nooa.unifiedllm import connect
 
     path = tmp_path / "models.yaml"
 
@@ -217,7 +217,7 @@ def test_existing_hand_written_alias_is_replaced_with_warning(tmp_path):
 
 
 def test_endpoint_first_flow_uses_shared_discovery(tmp_path, monkeypatch):
-    from nooa import connect
+    from nooa.unifiedllm import connect
 
     calls = []
 
@@ -237,7 +237,7 @@ def test_endpoint_first_flow_uses_shared_discovery(tmp_path, monkeypatch):
 def test_masked_key_is_transient_and_cancel_does_not_write(tmp_path, monkeypatch):
     import os
 
-    from nooa import connect
+    from nooa.unifiedllm import connect
 
     calls = []
 
@@ -260,7 +260,7 @@ def test_masked_key_is_transient_and_cancel_does_not_write(tmp_path, monkeypatch
 
 
 def test_declining_replace_after_checks_keeps_original_entry(tmp_path, monkeypatch):
-    from nooa import connect
+    from nooa.unifiedllm import connect
 
     async def forbidden(*args, **kwargs):
         raise AssertionError("Cancelled replacement must not call the endpoint")
@@ -276,7 +276,7 @@ def test_declining_replace_after_checks_keeps_original_entry(tmp_path, monkeypat
 
 
 def test_prompted_key_is_passed_to_probe_but_never_saved(tmp_path, monkeypatch):
-    from nooa import connect
+    from nooa.unifiedllm import connect
 
     calls = []
 
@@ -299,7 +299,8 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
     import click
     import httpx
 
-    from nooa import connect, paths
+    from nooa import paths
+    from nooa.unifiedllm import connect
 
     output, requests = [], []
     real_echo = click.echo
@@ -371,7 +372,8 @@ def test_interface_menu_only_offers_successes_or_explicit_manual_escape(
     tmp_path, monkeypatch, responses_ok
 ):
     import httpx
-    from nooa_cli.commands import _connect_prompts
+
+    from nooa.unifiedllm.connect import _prompts as _connect_prompts
 
     choices = []
     real_prompt = _connect_prompts.prompt
@@ -588,7 +590,7 @@ def test_script_mode_requires_missing_options_without_prompting():
 
 @pytest.mark.parametrize("ambiguous", [False, True])
 def test_model_details_appear_before_accepting_published_settings(tmp_path, monkeypatch, ambiguous):
-    from nooa import connect
+    from nooa.unifiedllm import connect
 
     model_info = {
         "id": "wire/model",
@@ -617,7 +619,7 @@ def test_model_details_appear_before_accepting_published_settings(tmp_path, monk
 
 @pytest.mark.parametrize("action", ["edit", "keep_context", "skip", "cancel"])
 def test_model_settings_can_be_edited_skipped_or_cancelled(tmp_path, monkeypatch, action):
-    from nooa import connect
+    from nooa.unifiedllm import connect
 
     published = {
         "id": "wire/model",
@@ -797,7 +799,8 @@ def test_initial_approval_defaults_to_yes(tmp_path, monkeypatch):
 def test_provider_menu_fills_connection_defaults(
     tmp_path, monkeypatch, provider, base, style, key_env
 ):
-    from nooa import connect, paths
+    from nooa import paths
+    from nooa.unifiedllm import connect
 
     seen = []
 
@@ -886,7 +889,7 @@ def test_provider_flag_supports_scripted_setup(tmp_path):
 
 
 def test_large_model_list_and_invalid_choice_do_not_flood_terminal(tmp_path, monkeypatch):
-    from nooa import connect
+    from nooa.unifiedllm import connect
 
     monkeypatch.setenv("CONNECT_TEST_KEY", "discovery-key")
 
@@ -909,9 +912,9 @@ def test_server_url_suggestions_include_existing_file_without_credentials(
     tmp_path, monkeypatch, custom_path
 ):
     import click
-    from nooa_cli.commands import _connect_prompts
 
     from nooa import paths
+    from nooa.unifiedllm.connect import _prompts as _connect_prompts
 
     path = tmp_path / "models.yaml"
     original = yaml.safe_dump(

@@ -8,9 +8,8 @@ import httpx
 import pytest
 import yaml
 
-from nooa import connect
-from nooa.unifiedllm import registry
-from tests.connect_http import mock_http, response_body
+from nooa.unifiedllm import connect, registry
+from tests.unifiedllm.connect.connect_http import mock_http, response_body
 
 
 @pytest.mark.parametrize("style", ["chat", "responses", "anthropic"])
@@ -169,7 +168,7 @@ def test_responses_reply_alias_precedence(base_key):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("saved,tested", [(1024, 1024), (8192, 2048)])
 async def test_session_reports_the_cap_actually_tested(monkeypatch, saved, tested):
-    from nooa._connect_session import TOKEN_RESERVATION, session_steps
+    from nooa.unifiedllm.connect._session import TOKEN_RESERVATION, session_steps
 
     bodies = []
 

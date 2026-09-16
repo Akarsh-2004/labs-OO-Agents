@@ -21,7 +21,7 @@ def read_discovery(path, endpoint):
     import json
     from pathlib import Path
 
-    from nooa import connect
+    from nooa.unifiedllm import connect
 
     document = json.loads(Path(path).read_text())
     data = document.get("data", document)
@@ -68,9 +68,9 @@ def run_stage(
     import click
     import yaml
 
-    from nooa import connect
+    from nooa.unifiedllm import connect
 
-    from . import _connect_view as view
+    from . import _view as view
 
     entry = {}
     checks = {}
@@ -120,7 +120,7 @@ def run_stage(
                 click.echo(f"Warning: replacing alias {alias!r} in {path}.", err=True)
             connect.write(entry, path, alias=alias)
             data = {"alias": alias, "path": str(path), "entry": entry}
-            from ._connect_registry import shadowing_source
+            from ._registry import shadowing_source
 
             if shadow := shadowing_source(alias, path):
                 data["shadowed_by"] = shadow
@@ -257,7 +257,7 @@ def run_stage(
             **({"status_code": status} if isinstance(status, int) else {}),
         }
         data = None
-    from ._connect_registry import diagnostic_context
+    from ._registry import diagnostic_context
 
     total_budget = connect.DEFAULT_CHECK_BUDGET if budget_tokens is None else budget_tokens
     charged = (

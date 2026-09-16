@@ -7,8 +7,8 @@ import json
 import httpx
 import pytest
 
-from nooa import connect
-from tests.connect_http import mock_http, mock_post, response_body
+from nooa.unifiedllm import connect
+from tests.unifiedllm.connect.connect_http import mock_http, mock_post, response_body
 
 REPLIES = {style: response_body(style) for style in ("chat", "responses", "anthropic")}
 PATHS = {"/v1/chat/completions": "chat", "/v1/responses": "responses", "/v1/messages": "anthropic"}

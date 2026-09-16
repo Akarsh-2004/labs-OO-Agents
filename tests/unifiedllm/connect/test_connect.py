@@ -9,8 +9,8 @@ import httpx
 import pytest
 import yaml
 
-from nooa import connect
-from tests.connect_http import mock_http, mock_post, response_body
+from nooa.unifiedllm import connect
+from tests.unifiedllm.connect.connect_http import mock_http, mock_post, response_body
 
 
 def make_plan(**kwargs):

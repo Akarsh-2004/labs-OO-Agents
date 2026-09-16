@@ -4,7 +4,7 @@
 
 import pytest
 
-from nooa import connect
+from nooa.unifiedllm import connect
 
 
 def plan(**kwargs):
@@ -36,7 +36,7 @@ def test_separate_caps_are_included_in_token_and_price_estimates():
 
 @pytest.mark.asyncio
 async def test_smaller_explicit_budget_skips_before_any_call(monkeypatch):
-    from tests.connect_http import mock_http
+    from tests.unifiedllm.connect.connect_http import mock_http
 
     mock_http(monkeypatch, lambda request: pytest.fail("No budget for this request"))
     proposal = plan(budget_tokens=1024)

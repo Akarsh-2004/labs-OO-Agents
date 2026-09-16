@@ -1,7 +1,7 @@
 # Configure a model with NOOA Connect
 
 `nooa connect` asks for approval of API-call costs upfront, checks the selected model with bounded
-requests, then asks before saving its registry entry. The same `nooa.connect` library is available to
+requests, then asks before saving its registry entry. The same `nooa.unifiedllm.connect` library is available to
 the TUI: frontends supply consent and display; the library supplies the plan,
 UnifiedLLM checks and registry updates.
 
@@ -122,11 +122,11 @@ YAML failures identify the file, line and column without echoing file contents.
 
 ## Library calls from NOOA agents
 
-The CLI is a frontend to `nooa.connect`, not a subprocess requirement. Inside
+The CLI is a frontend to `nooa.unifiedllm.connect`, not a subprocess requirement. Inside
 an async NOOA agent method, use:
 
 ```python
-from nooa import connect
+from nooa.unifiedllm import connect
 
 proposal = connect.plan(
     "work", "your-model", "chat", "https://gateway.example/v1", "MODEL_KEY",
@@ -437,7 +437,7 @@ if a saved entry does not take effect.
 ## Library interface for the TUI
 
 ```python
-from nooa import connect
+from nooa.unifiedllm import connect
 
 # Optional, before selecting the model (no generation calls):
 discovery = await connect.discover("https://gateway.example", api_key=temporary_key)
@@ -498,19 +498,21 @@ calls are inspected as data and never executed. Raw model responses, server erro
 bodies and credential headers are not retained. Limits and defaults keep their
 catalogue source and are explicitly marked as not probed.
 An endpoint speaking Responses does not imply it accepts explicit cache fields;
-Connect leaves OpenAI explicit caching unset until that is established separately.
-Responses checks use `store: false`; any other request defaults come from the
-same client an agent will use. Connect does not add optional encrypted-reasoning
-settings to the saved entry.
+the session checks inspect markers and reuse under the runtime's cache defaults.
+Responses entries use `store: false` and request `reasoning.encrypted_content`;
+an explicit `include: []` opts out. Checks use the same client as an agent.
 
 ## Code walkthrough: what and why
 
-- `src/nooa/connect.py`: plans data first so either frontend can obtain consent;
+- `src/nooa/unifiedllm/connect/__init__.py`: plans data first so either frontend can obtain consent;
   runs bounded UnifiedLLM calls through the registry's shared client factory;
   updates one alias while retaining other entries and comments.
-- `packages/nooa-cli/src/nooa_cli/commands/connect.py`: argument parsing, choices,
-  preview and approval only. The TUI does not need to invoke this command.
-- `tests/test_connect.py` and CLI tests: exercise approval, budgets, exact HTTP
+- `src/nooa/unifiedllm/connect/cli.py` and its private helpers: argument parsing,
+  choices, preview and approval. The library does not import these UI modules.
+- `packages/nooa-cli/src/nooa_cli/commands/connect.py`: lazy registration and
+  delegation only; all Connect behavior belongs to UnifiedLLM. The TUI can call
+  the library directly. This is an internal organization, not a separate distribution.
+- `tests/unifiedllm/connect/`: exercise approval, budgets, exact HTTP
   bodies, key privacy, cancellation, targeted writes and the real registry on main.
 
 Request-shape references: [OpenAI Responses](https://developers.openai.com/api/reference/python/resources/responses/methods/create)

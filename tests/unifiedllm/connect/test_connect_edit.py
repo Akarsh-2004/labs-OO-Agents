@@ -7,14 +7,14 @@ import os
 import pytest
 import yaml
 from click.testing import CliRunner
-from nooa_cli.commands.connect import command
+
+from nooa.unifiedllm.connect.cli import command
 
 
 @pytest.fixture
 def registry(tmp_path, monkeypatch):
-    from nooa_cli.commands import _connect_prompts
-
     from nooa import llm_config
+    from nooa.unifiedllm.connect import _prompts as _connect_prompts
 
     monkeypatch.setattr(
         _connect_prompts, "choose_reply_limit", lambda suggested, ceiling, **kw: suggested
@@ -43,9 +43,8 @@ def registry(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("selector", [[], ["saved"]])
 def test_edit_jumps_to_settings_preserving_custom_fields(registry, monkeypatch, selector):
-    from nooa_cli.commands import _connect_prompts
-
-    from nooa import connect
+    from nooa.unifiedllm import connect
+    from nooa.unifiedllm.connect import _prompts as _connect_prompts
 
     path, original = registry
 
@@ -83,7 +82,7 @@ def test_edit_jumps_to_settings_preserving_custom_fields(registry, monkeypatch, 
 
 
 def test_edit_cancel_preserves_file(registry, monkeypatch):
-    from nooa_cli.commands import _connect_prompts
+    from nooa.unifiedllm.connect import _prompts as _connect_prompts
 
     path, _ = registry
     before = path.read_bytes()
@@ -151,7 +150,7 @@ def test_pasted_key_is_saved_only_with_separate_consent(registry, monkeypatch, c
 
 
 def test_registry_matching_does_not_cross_server_paths(registry):
-    from nooa_cli.commands._connect_registry import credential_names
+    from nooa.unifiedllm.connect._registry import credential_names
 
     path, entry = registry
     assert credential_names({"a": (entry, path)}, "https://api.test") == ["EDIT_TEST_KEY"]
@@ -162,7 +161,7 @@ def test_registry_matching_does_not_cross_server_paths(registry):
 def test_selected_endpoint_key_reaches_runtime_http(registry, monkeypatch):
     import httpx
 
-    from tests.connect_http import mock_http, response_body
+    from tests.unifiedllm.connect.connect_http import mock_http, response_body
 
     sent = []
 

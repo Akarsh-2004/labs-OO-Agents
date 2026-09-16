@@ -814,7 +814,7 @@ def plan(
         except (ValueError, TypeError, KeyError):
             pass  # Missing catalogue prices are unknown, never zero.
     if session_checks:
-        from nooa._connect_session import reply_budget
+        from nooa.unifiedllm.connect._session import reply_budget
 
         estimate += 3 * reply_budget(entry, max(0, budget_tokens - estimate))[2]
         price = None  # The longer replay depends on the actual seed response.
@@ -863,7 +863,7 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
     settings_sent = []
 
     async def capture(request):
-        from nooa._connect_session import settings_on_wire
+        from nooa.unifiedllm.connect._session import settings_on_wire
 
         if probe.name.startswith("level:"):
             settings_sent.append(settings_on_wire(settings, json.loads(request.content)))
@@ -927,7 +927,7 @@ def diagnostic_prompt(
     stage: str, entry: dict, checks: dict, *, run_context: dict | None = None
 ) -> str:
     """Safe, copyable handoff for a person or agent; no credentials or raw bodies."""
-    from nooa._connect_diagnostics import installation_context
+    from nooa.unifiedllm.connect._diagnostics import installation_context
 
     installation = installation_context()
     context = {
@@ -990,7 +990,7 @@ def diagnostic_prompt(
         "Inspect the configuration, credential lookup, and actual request construction. "
         "Model listing alone does not validate credentials. Distinguish rejection, missing "
         "evidence, and unsupported features; do not infer support from an HTTP success alone. "
-        "Use nooa.connect library functions or nooa connect --stage to isolate the failure, "
+        "Use nooa.unifiedllm.connect library functions or nooa connect --stage to isolate the failure, "
         "then rerun the affected checks within configured limits. Never print or copy key "
         "values, reasoning text, opaque state, or raw error bodies. Preserve unrelated aliases "
         "and inspect layer precedence before editing the target file. This handoff does not "
@@ -1140,7 +1140,7 @@ async def run_steps(
             tool = any(call.name == "probe_tool" for call in response.tool_calls)
             tokens = usage.input_tokens + usage.output_tokens if usage else 0
         except Exception as exc:
-            from nooa._connect_diagnostics import timeout_details
+            from nooa.unifiedllm.connect._diagnostics import timeout_details
 
             status = getattr(exc, "status_code", None)
             record["error"] = type(exc).__name__
@@ -1207,7 +1207,7 @@ async def run_steps(
     ]
     provenance["tokens_charged_to_budget"] = spent
     if proposal.session_checks:
-        from nooa._connect_session import session_steps
+        from nooa.unifiedllm.connect._session import session_steps
 
         checks = {}
         provenance["session_checks"] = checks

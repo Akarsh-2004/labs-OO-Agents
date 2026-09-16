@@ -9,10 +9,9 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from nooa import connect
 from nooa.llm_types import LLMResponse, LLMUsage
-from nooa.unifiedllm import registry
-from tests.connect_http import mock_http, response_body
+from nooa.unifiedllm import connect, registry
+from tests.unifiedllm.connect.connect_http import mock_http, response_body
 
 
 @pytest.mark.asyncio

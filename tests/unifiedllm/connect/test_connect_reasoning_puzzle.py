@@ -8,8 +8,8 @@ from itertools import permutations
 import httpx
 import pytest
 
-from nooa import connect
-from tests.connect_http import mock_http, response_body
+from nooa.unifiedllm import connect
+from tests.unifiedllm.connect.connect_http import mock_http, response_body
 
 
 def test_scheduling_puzzle_has_one_solution():

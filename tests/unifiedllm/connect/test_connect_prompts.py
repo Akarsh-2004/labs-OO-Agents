@@ -3,10 +3,11 @@
 """Exercise the real terminal editor, including completion and cursor keys."""
 
 import pytest
-from nooa_cli.commands import _connect_prompts as prompts
 from prompt_toolkit.application import create_app_session
 from prompt_toolkit.input import create_pipe_input
 from prompt_toolkit.output import DummyOutput
+
+from nooa.unifiedllm.connect import _prompts as prompts
 
 
 @pytest.fixture(autouse=True)

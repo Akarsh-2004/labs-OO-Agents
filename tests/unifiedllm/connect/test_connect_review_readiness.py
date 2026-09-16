@@ -6,8 +6,8 @@ import httpx
 import pytest
 import yaml
 
-from nooa import connect
-from tests.connect_http import mock_http
+from nooa.unifiedllm import connect
+from tests.unifiedllm.connect.connect_http import mock_http
 
 
 @pytest.mark.parametrize("indent", [2, 4, 6])
@@ -71,8 +71,9 @@ async def test_catalogue_rejects_invalid_ids(monkeypatch, identifier):
 def test_no_probe_can_authenticate_model_discovery(monkeypatch, tmp_path):
     import click
     from click.testing import CliRunner
-    from nooa_cli.commands import _connect_prompts
-    from nooa_cli.commands import connect as cli
+
+    from nooa.unifiedllm.connect import _prompts as _connect_prompts
+    from nooa.unifiedllm.connect import cli
 
     monkeypatch.delenv("CONNECT_DISCOVERY_KEY", raising=False)
     sent = []

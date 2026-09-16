@@ -123,12 +123,12 @@ def _reasoning_values(response):
 
 async def session_steps(alias, entry, *, api_key, budget_tokens):
     """Three turns, with bounded length-only retries; never execute model tools."""
-    from nooa.connect import ProbeUpdate, _include_rejected
     from nooa.context_blocks.formatter import OpenAIProviderFormatter, ResponsesProviderFormatter
     from nooa.context_blocks.models import BlockMetadata, ResolvedBlock, Role
     from nooa.context_blocks.renderer import render_context
     from nooa.context_blocks.renderers.cached import CachedBlockFormatter
     from nooa.unifiedllm import CacheBoundary, RetryConfig, Tool
+    from nooa.unifiedllm.connect import ProbeUpdate, _include_rejected
     from nooa.unifiedllm.registry import client_from_config
 
     configured_cap, reply_cap, reservation = reply_budget(entry, budget_tokens)

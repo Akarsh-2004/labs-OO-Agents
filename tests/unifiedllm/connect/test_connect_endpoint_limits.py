@@ -7,8 +7,8 @@ from copy import deepcopy
 import httpx
 import pytest
 
-from nooa import connect
-from tests.connect_http import mock_http
+from nooa.unifiedllm import connect
+from tests.unifiedllm.connect.connect_http import mock_http
 
 CATALOGUE = {
     "id": "vendor/model",

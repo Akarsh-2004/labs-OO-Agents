@@ -8,8 +8,8 @@ from copy import deepcopy
 import httpx
 import pytest
 
-from nooa import connect
-from tests.connect_http import mock_http, response_body
+from nooa.unifiedllm import connect
+from tests.unifiedllm.connect.connect_http import mock_http, response_body
 
 
 def proposal(*, api_base="https://api.openai.com/v1", **kwargs):
@@ -140,7 +140,8 @@ async def test_session_field_rejection_is_recorded_without_rerunning_session(mon
 def test_wizard_explains_and_saves_default_without_extra_question(tmp_path):
     import yaml
     from click.testing import CliRunner
-    from nooa_cli.commands.connect import command
+
+    from nooa.unifiedllm.connect.cli import command
 
     target = tmp_path / "models.yaml"
     result = CliRunner().invoke(

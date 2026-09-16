@@ -9,11 +9,11 @@ import httpx
 import pytest
 import yaml
 from click.testing import CliRunner
-from nooa_cli.commands import _connect_view as view
-from nooa_cli.commands.connect import command
 
-from nooa import connect
-from tests.connect_http import mock_http, response_body
+from nooa.unifiedllm import connect
+from nooa.unifiedllm.connect import _view as view
+from nooa.unifiedllm.connect.cli import command
+from tests.unifiedllm.connect.connect_http import mock_http, response_body
 
 
 def test_wizard_saves_endpoint_limits_not_catalogue(tmp_path, monkeypatch):

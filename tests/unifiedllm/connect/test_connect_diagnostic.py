@@ -4,9 +4,8 @@
 
 import shlex
 
-from nooa_cli.commands._connect_registry import diagnostic_context
-
-from nooa import connect
+from nooa.unifiedllm import connect
+from nooa.unifiedllm.connect._registry import diagnostic_context
 
 
 def test_target_and_effective_source_are_distinct(tmp_path, monkeypatch):
@@ -82,7 +81,7 @@ def test_pasted_rerun_uses_masked_prompt_and_proxy_presence(monkeypatch):
 
 def test_wheel_references_pin_version_not_main(monkeypatch, tmp_path):
     from nooa import _version
-    from nooa._connect_diagnostics import installation_context
+    from nooa.unifiedllm.connect._diagnostics import installation_context
 
     monkeypatch.setattr(_version, "__file__", str(tmp_path / "site-packages/nooa/_version.py"))
     monkeypatch.setattr(_version, "__version__", "1.2.3")
@@ -96,7 +95,7 @@ def test_wheel_references_pin_version_not_main(monkeypatch, tmp_path):
 
 
 def test_wrapper_timeout_is_not_claimed_as_server_receipt():
-    from nooa._connect_diagnostics import timeout_details
+    from nooa.unifiedllm.connect._diagnostics import timeout_details
 
     details = timeout_details(TimeoutError("private"), deadline_expired=True)
     assert details["outcome"] == "not_confirmed"

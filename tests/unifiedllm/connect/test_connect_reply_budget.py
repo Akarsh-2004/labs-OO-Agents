@@ -7,7 +7,8 @@ import json
 import pytest
 import yaml
 from click.testing import CliRunner
-from nooa_cli.commands.connect import command
+
+from nooa.unifiedllm.connect.cli import command
 
 
 @pytest.mark.parametrize(
@@ -58,7 +59,7 @@ def test_wizard_reply_budget_is_a_runtime_cap(tmp_path, monkeypatch, choice, exp
 
 
 def test_reply_dialog_offers_recommendation_smaller_and_custom(monkeypatch, capsys):
-    from nooa_cli.commands import _connect_prompts
+    from nooa.unifiedllm.connect import _prompts as _connect_prompts
 
     calls = []
     answers = iter(["custom", "99999", "16384"])
@@ -86,7 +87,7 @@ def test_reply_dialog_offers_recommendation_smaller_and_custom(monkeypatch, caps
 
 @pytest.mark.parametrize("ceiling", [32768, 64000])
 def test_high_reasoning_options_never_exceed_known_limit(monkeypatch, ceiling):
-    from nooa_cli.commands import _connect_prompts
+    from nooa.unifiedllm.connect import _prompts as _connect_prompts
 
     def prompt(text, **kwargs):
         assert "high" not in kwargs["choices"]
@@ -147,7 +148,7 @@ def test_scripted_plan_honours_explicit_reply_cap():
 def test_stage_reasoning_budget_override_reaches_wire(monkeypatch, tmp_path):
     import httpx
 
-    from tests.connect_http import mock_http, response_body
+    from tests.unifiedllm.connect.connect_http import mock_http, response_body
 
     seen = []
 

@@ -8,10 +8,10 @@ import httpx
 import pytest
 import yaml
 from click.testing import CliRunner
-from nooa_cli.commands.connect import command
 
-from nooa import connect
-from tests.connect_http import mock_http, response_body
+from nooa.unifiedllm import connect
+from nooa.unifiedllm.connect.cli import command
+from tests.unifiedllm.connect.connect_http import mock_http, response_body
 
 BASE = [
     "gpt-5.1",
