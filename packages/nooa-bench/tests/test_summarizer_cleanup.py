@@ -17,7 +17,10 @@ from nooa.unifiedllm import FakeLLMClient, LLMResponse, LLMUsage
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("agent_type", [BenchAgent, RLMBenchAgent])
-async def test_close_drains_pending_summary_before_shell_and_shared_client(agent_type, tmp_path):
+@pytest.mark.parametrize("close_method", ["close", "aclose"])
+async def test_close_drains_pending_summary_before_shell_and_shared_client(
+    agent_type, tmp_path, close_method
+):
     """Exercise the installed summarizer's real middleware and cancellation hook."""
     entered, cancelled = asyncio.Event(), asyncio.Event()
     llm = FakeLLMClient()
@@ -67,7 +70,7 @@ async def test_close_drains_pending_summary_before_shell_and_shared_client(agent
     try:
         await agent.event_manager.run_middleware("llm_call", ctx, complete)
         await asyncio.wait_for(entered.wait(), 2)
-        await agent.close()
+        await getattr(agent, close_method)()
         assert cancelled.is_set()
         llm.aclose.assert_not_awaited()  # Only the caller owns the shared client.
         await llm.aclose()

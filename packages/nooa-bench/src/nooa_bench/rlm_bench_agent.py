@@ -12,20 +12,23 @@ from nooa import hidden as _hidden
 _agentdoc_hidden_names = {"_hidden"}
 
 with _hidden:
+    from inspect import cleandoc
+
     from nooa import strategy
     from nooa_bench.bench_agent import _SOLVE_CONTEXT, _SOLVE_STRATEGY, BenchAgent, TaskResult
 
 
 class RLMBenchAgent(BenchAgent):
     __doc__ = (
-        (BenchAgent.__doc__ or "")
-        + """
+        cleandoc(BenchAgent.__doc__ or "")
+        + "\n\n"
+        + cleandoc("""
 
     Use context-isolated subagents deliberately for bounded, context-heavy work.
     Keep planning, integration, final verification, and the final ``TaskResult``
     in this agent. Run independent delegations concurrently and dependent
     delegations sequentially.
-    """
+    """)
     )
 
     @_hidden

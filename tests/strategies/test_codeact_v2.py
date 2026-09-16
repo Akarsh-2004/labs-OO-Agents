@@ -345,11 +345,11 @@ async def test_python_cell_context_lists_static_module_capabilities():
     finally:
         sys.modules.pop(agent_module.__name__, None)
 
-    assert rendered == (
-        "## Python cell context\n\n"
-        "Module capabilities already in scope: `json`, `pd` → `pandas`.\n"
-        "Use them directly; do not re-import them."
-    )
+    assert rendered.startswith("## Python cell context\n")
+    assert "Module capabilities already in scope: `json`, `pd` → `pandas`." in rendered
+    assert "import pandas as pd" in rendered
+    assert "import json" in rendered
+    assert "return_result" in rendered
 
 
 @pytest.mark.asyncio
@@ -408,8 +408,7 @@ async def test_imported_capability_is_advertised_and_executes_without_generic_co
         "from nooa.config import CodeActConfig\n"
         "from nooa.strategies.codeact_v2 import CodeActV2\n"
         "class ImportedAgent(Agent):\n"
-        "    @strategy(CodeActV2(config=CodeActConfig(prefill=None)), "
-        "context={'execution_context': None})\n"
+        "    @strategy(CodeActV2(config=CodeActConfig(prefill=None)))\n"
         "    async def answer(self) -> float:\n"
         "        ...\n",
         vars(module),
@@ -419,8 +418,20 @@ async def test_imported_capability_is_advertised_and_executes_without_generic_co
     try:
         assert await agent.answer() == 9.0
         assert "`root` → `math.sqrt`" in str(llm.last_messages)
+        assert "<execution_context" not in str(llm.last_messages)
+        assert "<python_cell_context" in str(llm.last_messages)
     finally:
         await agent.aclose()
+
+
+def test_python_cell_owns_the_single_static_execution_context():
+    strategy_instance = CodeActV2()
+    assert strategy_instance.get_block_overrides()["execution_context"] is None
+    assert "execution_context" not in strategy_instance.get_static_block_keys()
+    assert "python_cell_context" in strategy_instance.get_static_block_keys()
+    order = strategy_instance.get_block_order()
+    assert "execution_context" not in order
+    assert order.index("python_cell_state") == order.index("python_cell_context") + 1
 
 
 @pytest.mark.asyncio

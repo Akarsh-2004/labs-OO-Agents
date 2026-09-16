@@ -8,6 +8,10 @@ to follow semantic versioning.
 
 - Add `CodeActV2`, the single-`python_cell` strategy with in-cell `return_result`.
   The benchmark agents use it; `CodeActStrategy` remains the default.
+  Its cacheable Python-cell context includes the execution namespace's typed
+  stub without a second execution-context block.
+- Trace explorer viewer requests now send configured viewer authentication and
+  honor proxy environment settings, including `NO_PROXY` for direct access.
 - `CurrentCall` is a mutable invocation record; strategies bind its event ID and
   live execution namespace with ordinary public-field assignment during setup.
 - Breaking: remove `CodeActLiteStrategy` and its experimental exports. Use
@@ -17,6 +21,9 @@ to follow semantic versioning.
   trajectories; make Todo updates/restores atomic and delegation merge failures
   recoverable. Behavior reports use schema version 2; regenerate older reports
   from their trajectories before comparing results.
+- Benchmark agents release resources through `aclose()` as well as `close()`;
+  delegation prepares reference data before allocating a worker. Todo metadata
+  and comment read-back methods are now included in model-facing documentation.
 
 - Responses clients now honor the cached renderer's stable-prefix boundary by default,
   without a cache setting in the model registry. Requests without a usable boundary

@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from nooa.trace_explorer.client import TraceExplorerClient
 
 from nooa.agentdoc import pformat as _pformat
+from nooa.tracing._viewer_auth import apply_viewer_auth
 
 # =============================================================================
 # Module Configuration
@@ -2198,7 +2199,7 @@ class TraceExplorer:
         offset = 0
         page_size = 500
 
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=30, headers=apply_viewer_auth({})) as client:
             while True:
                 url = f"{base_url}/api/trace?session_id={encoded_sid}&limit={page_size}&offset={offset}"
                 try:
@@ -2291,7 +2292,7 @@ class TraceExplorer:
         encoded_exp = urllib.parse.quote(experiment_id, safe="")
         url = f"{base_url}/api/experiment/{encoded_exp}/traces"
 
-        async with httpx.AsyncClient(timeout=60) as client:
+        async with httpx.AsyncClient(timeout=60, headers=apply_viewer_auth({})) as client:
             try:
                 resp = await client.get(url)
                 if resp.status_code == 404:
@@ -5553,7 +5554,7 @@ async def _handle_experiment_errors(
     base_url = base_url.rstrip("/")
     encoded_eid = urllib.parse.quote(experiment_id, safe="")
 
-    async with httpx.AsyncClient(timeout=30) as _client:
+    async with httpx.AsyncClient(timeout=30, headers=apply_viewer_auth({})) as _client:
         try:
             _resp = await _client.get(f"{base_url}/api/eval/experiment/{encoded_eid}/tests")
             if _resp.status_code == 404:
@@ -5618,7 +5619,7 @@ async def _handle_experiment_search(base_url: str, experiment_id: str, pattern: 
     base_url = base_url.rstrip("/")
     encoded_eid = urllib.parse.quote(experiment_id, safe="")
 
-    async with httpx.AsyncClient(timeout=30) as _client:
+    async with httpx.AsyncClient(timeout=30, headers=apply_viewer_auth({})) as _client:
         try:
             _resp = await _client.get(f"{base_url}/api/eval/experiment/{encoded_eid}/tests")
             if _resp.status_code == 404:
@@ -5698,7 +5699,7 @@ async def _handle_experiment_failures(base_url: str, experiment_id: str) -> None
     base_url = base_url.rstrip("/")
     encoded_eid = urllib.parse.quote(experiment_id, safe="")
 
-    async with httpx.AsyncClient(timeout=30) as _client:
+    async with httpx.AsyncClient(timeout=30, headers=apply_viewer_auth({})) as _client:
         try:
             _resp = await _client.get(f"{base_url}/api/eval/experiment/{encoded_eid}/tests")
             if _resp.status_code == 404:
@@ -5800,7 +5801,7 @@ async def _handle_experiment(
     encoded_eid = urllib.parse.quote(experiment_id, safe="")
 
     # Fetch summary
-    async with httpx.AsyncClient(timeout=30) as _client:
+    async with httpx.AsyncClient(timeout=30, headers=apply_viewer_auth({})) as _client:
         try:
             _resp = await _client.get(f"{base_url}/api/eval/experiment/{encoded_eid}/summary")
             if _resp.status_code == 404:
@@ -5816,7 +5817,7 @@ async def _handle_experiment(
             sys.exit(1)
     # Fetch test results
     tests_data: dict = {"tests": []}
-    async with httpx.AsyncClient(timeout=30) as _client:
+    async with httpx.AsyncClient(timeout=30, headers=apply_viewer_auth({})) as _client:
         try:
             _resp = await _client.get(f"{base_url}/api/eval/experiment/{encoded_eid}/tests")
             _resp.raise_for_status()
@@ -5934,7 +5935,7 @@ async def _try_thin_client(viewer_url: str, session_id: str) -> TraceExplorerCli
 
     base = viewer_url.rstrip("/")
     try:
-        async with httpx.AsyncClient(timeout=5) as client:
+        async with httpx.AsyncClient(timeout=5, headers=apply_viewer_auth({})) as client:
             resp = await client.get(
                 f"{base}/api/explorer/summary",
                 params={"session_id": session_id},

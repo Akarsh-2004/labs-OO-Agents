@@ -423,6 +423,40 @@ def test_variants_share_identity_and_document_delegation_hierarchy():
         assert "Inspect and integrate each result" in prompt
 
 
+def test_rlm_identity_is_normalized_independently_of_python_docstring_dedent():
+    import inspect
+
+    prompt = RLMBenchAgent.__doc__
+    assert prompt == inspect.cleandoc(prompt)
+    assert "\nUse context-isolated subagents" in prompt
+    assert prompt.startswith(inspect.cleandoc(BenchAgent.__doc__))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent_type", [BenchAgent, RLMBenchAgent])
+async def test_delegate_render_failure_allocates_no_worker(agent_type, monkeypatch, tmp_path):
+    shells = []
+
+    class CountingShell(_FakeShell):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            shells.append(self)
+
+    def fail_render(_value):
+        raise ValueError("invalid supplied context")
+
+    monkeypatch.setattr(bench_agent_module, "ShellTools", CountingShell)
+    monkeypatch.setattr(bench_agent_module, "RepoTools", _FakeRepo)
+    monkeypatch.setattr(bench_agent_module, "render_delegated_context", fail_render)
+    agent = agent_type(llm=FakeLLMClient(), working_dir=str(tmp_path))
+    try:
+        with pytest.raises(ValueError, match="invalid supplied context"):
+            await agent.delegate("inspect", {"reference": "data"})
+        assert shells == [agent.shell]
+    finally:
+        await agent.aclose()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("agent_type", [BenchAgent, RLMBenchAgent])
 async def test_delegate_launches_isolated_subagent_of_same_type(agent_type, monkeypatch, tmp_path):

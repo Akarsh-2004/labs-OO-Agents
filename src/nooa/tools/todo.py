@@ -480,7 +480,6 @@ class TodoManager(Skill):
             t.vars.pop(key, None)
         return t
 
-    @hidden
     def get_var(self, todo_id: Todo | str, key: str) -> Any | None:
         """Return a metadata value, or ``None`` if the todo or key is missing."""
         t = self.get(todo_id)
@@ -502,7 +501,6 @@ class TodoManager(Skill):
         t.comments.append(c)
         return c
 
-    @hidden
     def comments(self, todo_id: Todo | str) -> list[TodoComment]:
         """Return a chronological copy of comments, or ``[]`` if none exist."""
         t = self.get(todo_id)

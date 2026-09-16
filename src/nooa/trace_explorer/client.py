@@ -20,6 +20,8 @@ from typing import Any
 
 import httpx
 
+from nooa.tracing._viewer_auth import apply_viewer_auth
+
 
 class TraceExplorerClient:
     """Thin client that calls server-side TraceExplorer endpoints.
@@ -58,7 +60,10 @@ class TraceExplorerClient:
         if params:
             all_params.update(params)
 
-        async with httpx.AsyncClient(timeout=self._timeout, trust_env=False) as client:
+        # Honor HTTP(S)_PROXY and NO_PROXY, just like the viewer loaders.
+        async with httpx.AsyncClient(
+            timeout=self._timeout, headers=apply_viewer_auth({})
+        ) as client:
             try:
                 resp = await client.get(url, params=all_params)
                 if resp.status_code == 404:

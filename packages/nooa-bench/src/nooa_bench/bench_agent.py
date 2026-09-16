@@ -177,9 +177,14 @@ class BenchAgent(
 
     @_hidden
     async def close(self) -> None:
+        """Compatibility alias for the standard async cleanup contract."""
+        await self.aclose()
+
+    @_hidden
+    async def aclose(self) -> None:
         """Drain background summaries and close the shell, leaving the LLM to its owner."""
         try:
-            await self.aclose()
+            await super().aclose()
         finally:
             await self.shell.close()
 
@@ -244,15 +249,7 @@ class BenchAgent(
         if self._delegation_depth >= self._max_delegation_depth:
             raise RuntimeError(f"maximum delegation depth ({self._max_delegation_depth}) reached")
         todo_base = self.todo.copy_todo(objective) if isinstance(objective, Todo) else None
-        subagent = type(self)(
-            llm=self.llm,
-            working_dir=str(self.shell.cwd),
-            delegation_depth=self._delegation_depth + 1,
-            max_delegation_depth=self._max_delegation_depth,
-            summarization=self._summarization,
-        )
         if todo_base is not None:
-            subagent.todo = TodoManager.with_todo(todo_base)
             description = (
                 f"{todo_base.title}\n\nWork on active todo {todo_base.id}. Keep its title and "
                 "description aligned with the current understanding. Record material findings, "
@@ -269,7 +266,17 @@ class BenchAgent(
             )
         updated: Todo | None = None
         worker_state: dict = {}
+        # Prepare untrusted reference data before allocating worker resources.
+        subagent = type(self)(
+            llm=self.llm,
+            working_dir=str(self.shell.cwd),
+            delegation_depth=self._delegation_depth + 1,
+            max_delegation_depth=self._max_delegation_depth,
+            summarization=self._summarization,
+        )
         try:
+            if todo_base is not None:
+                subagent.todo = TodoManager.with_todo(todo_base)
             result = await subagent._solve_task(description)
             updated = subagent.todo.get(todo_base) if todo_base is not None else None
             if todo_base is not None:

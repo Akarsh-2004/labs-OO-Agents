@@ -51,6 +51,7 @@ def render_delegated_context(
         return ""
     seen: set[int] = set()
     nodes_remaining = max_nodes
+    exhausted = object()
 
     def clean(item: Any, depth: int, key: str = "") -> Any:
         nonlocal nodes_remaining
@@ -83,14 +84,18 @@ def render_delegated_context(
                                 raw_key, child = next(iterator)
                             except StopIteration:
                                 break
-                            safe_key = (
-                                raw_key
-                                if isinstance(raw_key, str)
-                                else f"<{type(raw_key).__name__}>"
-                            )
+                            if isinstance(raw_key, str):
+                                safe_key = raw_key
+                            elif raw_key is None or type(raw_key) in (bool, int, float):
+                                safe_key = f"<{type(raw_key).__name__}: {json.dumps(raw_key)}>"
+                            else:
+                                safe_key = f"<{type(raw_key).__name__} #{_index}>"
+                            while safe_key in result:
+                                safe_key += f" #{_index}"
                             result[safe_key] = clean(child, depth + 1, safe_key)
                         else:
-                            result["..."] = "items truncated"
+                            if next(iterator, exhausted) is not exhausted:
+                                result["..."] = "items truncated"
                         return result
                     values = []
                     iterator = iter(item)
@@ -104,7 +109,8 @@ def render_delegated_context(
                             break
                         values.append(clean(child, depth + 1))
                     else:
-                        values.append("<items truncated>")
+                        if next(iterator, exhausted) is not exhausted:
+                            values.append("<items truncated>")
                     return values
                 except Exception:
                     return f"<{type(item).__name__}>"

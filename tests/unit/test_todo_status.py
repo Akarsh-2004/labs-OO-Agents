@@ -261,6 +261,8 @@ def test_todo_manager_docs_are_task_focused() -> None:
     assert "def from_dict(" not in output
     assert "def is_blocked(" not in output
     assert "def set_var(" in output
+    assert "def get_var(" in output
+    assert "def comments(" in output
     assert "vars: SnapshotVars" not in output
     assert "class SnapshotVars:" not in output
     assert "def pop(" not in output
@@ -274,8 +276,6 @@ def test_todo_manager_docs_are_task_focused() -> None:
         "add_dep",
         "remove_dep",
         "del_var",
-        "get_var",
-        "comments",
         "attach",
         "detach",
     ):

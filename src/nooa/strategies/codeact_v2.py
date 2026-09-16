@@ -52,6 +52,7 @@ class CodeActV2(CodeActStrategy):
         """Put the execution contract on the tool and keep only runtime context blocks."""
         overrides = super().get_block_overrides()
         overrides["strategy_prompt"] = None
+        overrides["execution_context"] = None
         overrides["python_cell_context"] = DynamicContext("strategy.python_cell_context(runtime)")
         overrides["python_cell_state"] = DynamicContext(
             "strategy.python_cell_state_context(runtime)"
@@ -60,7 +61,9 @@ class CodeActV2(CodeActStrategy):
 
     def get_static_block_keys(self) -> set[str]:
         """Exclude the removed strategy prompt from the cacheable context prefix."""
-        return (super().get_static_block_keys() - {"strategy_prompt"}) | {"python_cell_context"}
+        return (super().get_static_block_keys() - {"strategy_prompt", "execution_context"}) | {
+            "python_cell_context"
+        }
 
     def get_block_order(self) -> list[str] | None:
         """Place live locals immediately after the stable execution context."""
@@ -69,13 +72,12 @@ class CodeActV2(CodeActStrategy):
         return [
             *order[:index],
             "python_cell_context",
-            "execution_context",
             "python_cell_state",
             *order[index + 1 :],
         ]
 
     async def python_cell_context(self, runtime: RuntimeServices) -> str:
-        """Render visible modules and callables from the shared execution namespace."""
+        """Render one capability block, including the execution namespace's typed stub."""
         agent_module = inspect.getmodule(type(runtime.agent))
         if agent_module is None:
             return ""
@@ -103,10 +105,15 @@ class CodeActV2(CodeActStrategy):
                     for name, origin in sorted(capabilities)
                 )
                 lines.append(f"{kind} capabilities already in scope: {labels}.")
-        if not lines:
-            return ""
+        from nooa.agentdoc.visibility import iter_agent_mro_modules
+
+        stub = self._render_execution_context_stub(
+            context,
+            {module.__name__ for module in iter_agent_mro_modules(type(runtime.agent))},
+            self.config.restrictions.blocked_modules,
+        )
         return "\n".join(
-            ["## Python cell context", "", *lines, "Use them directly; do not re-import them."]
+            [stub.replace("## Execution Context", "## Python cell context", 1), "", *lines]
         )
 
     @staticmethod
