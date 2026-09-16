@@ -7,8 +7,8 @@ to follow semantic versioning.
 ## [Unreleased]
 
 - `self.events.collapse()` accepts integer endpoints that identify existing events,
-  including mixed string/integer ranges over prior summaries, and prints a reminder
-  to use string tags. Invalid numeric endpoints leave history unchanged.
+  including mixed string/integer ranges over prior summaries, without warnings.
+  Invalid numeric endpoints leave history unchanged.
 - Rename the benchmark `TaskResult.command_to_verify` field to `how_to_verify`
   ("How to Verify"): concrete verification steps and expected results, not
   necessarily a shell command. Result JSON and runner answers use the new field.

@@ -42,7 +42,7 @@ def _response(code: str, call_id: str = "call_1") -> LLMResponse:
 
 
 @pytest.mark.asyncio
-async def test_integer_collapse_warning_reaches_next_model_turn():
+async def test_integer_collapse_succeeds_without_warning():
     llm = FakeLLMClient(
         scripted_responses=[
             _response('self.events.collapse("1..2", 3, summary_text="combined recap")'),
@@ -62,7 +62,8 @@ async def test_integer_collapse_warning_reaches_next_model_turn():
             agent.event_manager.add(Task(prompt=f"earlier work {i}"))
         agent.events.collapse("1", "2", summary_text="earlier recap")
         assert await agent.answer() == "done"
-        assert "Please use strings" in str(llm.last_messages)
+        assert "Please use strings" not in str(llm.last_messages)
+        assert "Warning: self.events.collapse" not in str(llm.last_messages)
         assert agent.events["1..3"].summary_text == "combined recap"
         assert agent.events["1..3"].children_tags == ["1..2", "3"]
     finally:

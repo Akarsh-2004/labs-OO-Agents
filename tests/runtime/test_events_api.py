@@ -132,11 +132,7 @@ def test_collapse_accepts_existing_integer_tags(start, end, previous, backend, t
         assert agent.events[result].children_tags == children
         assert agent.events[result].summary_text == "combined summary"
         assert all(agent.events.get(tag) is not None for tag in tags)
-        output = capsys.readouterr().out
-        if isinstance(start, int) or isinstance(end, int):
-            assert output.count("Please use strings") == 1
-        else:
-            assert output == ""
+        assert capsys.readouterr().out == ""
     finally:
         if storage is not None:
             storage.close()
