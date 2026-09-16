@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import ast
 import json
-import re
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
@@ -27,8 +26,8 @@ SIGNAL_DESCRIPTIONS: dict[str, str] = {
     "todo_creations": "Calls that create a structured todo.",
     "todo_activations": "Calls that activate a structured todo.",
     "todo_comments": "Calls that record a material todo comment.",
-    "delegations": "Calls to self.delegate or self.spawn.",
-    "parallel_delegations": "Cells using gather with delegation calls.",
+    "delegations": "Syntactic self.delegate call sites, not runtime loop counts.",
+    "parallel_delegations": "Cells containing gather fan-out patterns with delegation calls.",
     "shell_commands": "Calls to self.shell.run or self.shell.run_stream.",
     "shell_argv_commands": "Shell calls whose command is a literal argv list or tuple.",
     "repo_queries": "Calls to self.repo navigation methods.",
@@ -36,8 +35,6 @@ SIGNAL_DESCRIPTIONS: dict[str, str] = {
     "completion_calls": "Observed return_result tool calls.",
     "execution_attempts": "Observed PythonOutput execution attempts.",
     "execution_errors": "PythonOutput events with error execution status.",
-    "restricted_code_errors": "Python outputs containing a stable validator error code.",
-    "path_resolution_errors": "Python outputs containing a structured path-resolution code.",
     "text_only_replies": "Model replies that did not initially use a tool.",
 }
 
@@ -59,7 +56,7 @@ class BehaviorReport:
     change_id: str = "baseline"
     signals: dict[str, int] = field(default_factory=dict)
     rates: dict[str, float] = field(default_factory=dict)
-    schema_version: int = field(default=1, init=False)
+    schema_version: int = field(default=2, init=False)
     content_policy: str = field(default="aggregate-counts-only", init=False)
 
     def to_dict(self) -> dict[str, Any]:
@@ -74,16 +71,54 @@ class _CodeSignals(ast.NodeVisitor):
         self.calls: list[tuple[str, ...]] = []
         self.parallel_delegations = 0
         self.shell_argv_calls = 0
+        self.aliases: dict[str, tuple[str, ...]] = {}
+        self.fanouts: dict[str, tuple[int, bool]] = {}
 
-    @staticmethod
-    def _path(node: ast.AST) -> tuple[str, ...]:
+    def _path(self, node: ast.AST) -> tuple[str, ...]:
         parts: list[str] = []
         while isinstance(node, ast.Attribute):
             parts.append(node.attr)
             node = node.value
         if isinstance(node, ast.Name):
             parts.append(node.id)
-        return tuple(reversed(parts))
+        path = tuple(reversed(parts))
+        if path and path[0] in self.aliases:
+            return self.aliases[path[0]] + path[1:]
+        return path
+
+    def _fanout(self, node: ast.AST) -> tuple[int, bool]:
+        """Recognize source patterns, without claiming runtime cardinality."""
+        if isinstance(node, ast.Name):
+            return self.fanouts.get(node.id, (0, False))
+        if isinstance(node, ast.Call):
+            # Do not inspect arbitrary calls or nested gather scopes.
+            return (int(self._path(node.func) == ("self", "delegate")), False)
+        if isinstance(node, ast.Starred):
+            return self._fanout(node.value)
+        if isinstance(node, (ast.ListComp, ast.SetComp, ast.GeneratorExp)):
+            count, _ = self._fanout(node.elt)
+            return count, bool(count)
+        if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+            children = [self._fanout(child) for child in node.elts]
+            return sum(count for count, _ in children), any(many for _, many in children)
+        return 0, False
+
+    def visit_Assign(self, node: ast.Assign) -> None:
+        path = self._path(node.value)
+        if isinstance(node.value, ast.Call) and self._path(node.value.func) in {
+            ("self", "todo", name) for name in ("add", "get", "active")
+        }:
+            path = ("self", "todo", "item")
+        fanout = self._fanout(node.value)
+        self.generic_visit(node)
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                self.aliases.pop(target.id, None)
+                self.fanouts.pop(target.id, None)
+                if path[:1] == ("self",):
+                    self.aliases[target.id] = path
+                if fanout[0]:
+                    self.fanouts[target.id] = fanout
 
     def visit_Attribute(self, node: ast.Attribute) -> None:
         path = self._path(node)
@@ -95,16 +130,10 @@ class _CodeSignals(ast.NodeVisitor):
         path = self._path(node.func)
         if path:
             self.calls.append(path)
-            if path[-1] == "gather":
-                delegated_args = sum(
-                    1
-                    for child in node.args
-                    if isinstance(child, ast.Call)
-                    and self._path(child.func)[:1] == ("self",)
-                    and self._path(child.func)[-1:] in {("delegate",), ("spawn",)}
-                )
-                if delegated_args >= 2:
-                    self.parallel_delegations += 1
+            if path == ("asyncio", "gather"):
+                shapes = [self._fanout(child) for child in node.args]
+                if sum(count for count, _ in shapes) >= 2 or any(many for _, many in shapes):
+                    self.parallel_delegations = 1
             if (
                 _is_prefix(path, ("self", "shell"))
                 and path[-1] in {"run", "run_stream"}
@@ -138,23 +167,27 @@ def _analyze_code(code: str) -> dict[str, int]:
         out["self_references"] = 1
     if any(_is_prefix(path, ("self", "v")) for path in paths):
         out["persistent_state_uses"] = 1
-    if any("todo" in path and (path[-1] == "v" or path[-1] == "set_var") for path in paths):
+    if any(_is_prefix(path, ("self", "todo")) and path[-1] in {"v", "set_var"} for path in paths):
         out["todo_state_uses"] = 1
 
     call_metrics = {
-        "todo_creations": {"add", "create"},
+        "todo_creations": {"add"},
         "todo_activations": {"activate"},
         "todo_comments": {"comment"},
-        "delegations": {"delegate", "spawn"},
+        "delegations": {"delegate"},
         "shell_commands": {"run", "run_stream"},
-        "repo_queries": {"symbols", "refs", "find", "search"},
+        "repo_queries": {"symbols", "refs"},
         "user_messages": {"message"},
     }
     for metric, names in call_metrics.items():
         if metric.startswith("todo_"):
-            count = sum(1 for path in calls if "todo" in path and path[-1] in names)
+            count = sum(
+                1 for path in calls if _is_prefix(path, ("self", "todo")) and path[-1] in names
+            )
         elif metric == "delegations":
-            count = sum(1 for path in calls if path[:1] == ("self",) and path[-1] in names)
+            count = sum(
+                1 for path in calls if len(path) == 2 and path[0] == "self" and path[-1] in names
+            )
         elif metric == "shell_commands":
             count = sum(
                 1 for path in calls if _is_prefix(path, ("self", "shell")) and path[-1] in names
@@ -164,7 +197,9 @@ def _analyze_code(code: str) -> dict[str, int]:
                 1 for path in calls if _is_prefix(path, ("self", "repo")) and path[-1] in names
             )
         else:
-            count = sum(1 for path in calls if path == ("self", "message"))
+            count = sum(
+                1 for path in calls if len(path) == 2 and path[0] == "self" and path[-1] in names
+            )
         if count:
             out[metric] = count
 
@@ -216,15 +251,6 @@ def analyze_events(
             signals["execution_attempts"] += 1
             status = str(event.get("execution_status", "")).lower()
             is_error = status.endswith("error")
-            diagnostic_text = (
-                f"{event.get('failure_code', '')}\n{event.get('stdout', '')}\n"
-                f"{event.get('stderr', '')}\n{event.get('error', '')}"
-            )
-            if re.search(r"\[E\d{3}\]", diagnostic_text):
-                signals["restricted_code_errors"] += 1
-            if re.search(r"\[PATH_[A-Z_]+\]", diagnostic_text):
-                signals["path_resolution_errors"] += 1
-
             if is_error:
                 signals["execution_errors"] += 1
         elif event_type == "TextOnlyReply":
@@ -301,6 +327,16 @@ def aggregate_reports(reports: Iterable[BehaviorReport]) -> list[dict[str, Any]]
 def load_behavior_report(path: str | Path) -> BehaviorReport:
     """Load one ``behavior.json`` artifact."""
     data = json.loads(Path(path).read_text())
+    if not isinstance(data, dict):
+        raise ValueError("behavior report must be an object")
+    if type(data.get("schema_version")) is not int or data["schema_version"] != 2:
+        raise ValueError("unsupported behavior schema_version; regenerate from trajectory.json")
+    if data.get("content_policy") != "aggregate-counts-only":
+        raise ValueError("unsupported behavior content_policy")
+    for field_name, allowed in (("signals", SIGNAL_DESCRIPTIONS), ("rates", RATE_DESCRIPTIONS)):
+        values = data.get(field_name, {})
+        if not isinstance(values, dict) or values.keys() - allowed.keys():
+            raise ValueError(f"unsupported behavior {field_name}")
     return BehaviorReport(
         task_id=str(data["task_id"]),
         model=str(data.get("model", "unknown")),

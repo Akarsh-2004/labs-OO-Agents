@@ -6,6 +6,16 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Add `CodeActV2`, the single-`python_cell` strategy with in-cell `return_result`.
+  The benchmark agents use it; `CodeActStrategy` remains the default.
+- Breaking: remove `CodeActLiteStrategy` and its experimental exports. Use
+  `CodeActStrategy` for the existing two-tool contract or `CodeActV2` for the
+  single-tool contract. The evaluation CLI option is now `codeact_v2`.
+- Preserve inline completion values in replay and archived events in benchmark
+  trajectories; make Todo updates/restores atomic and delegation merge failures
+  recoverable. Behavior reports use schema version 2; regenerate older reports
+  from their trajectories before comparing results.
+
 - Responses clients now honor the cached renderer's stable-prefix boundary by default,
   without a cache setting in the model registry. Requests without a usable boundary
   retain provider-default caching; `cache_breakpoint=None` opts out of NOOA markers.

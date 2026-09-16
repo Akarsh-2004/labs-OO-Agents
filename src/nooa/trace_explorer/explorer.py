@@ -111,7 +111,7 @@ def _extract_prefill_inputs(content: str) -> str | None:
     """
     try:
         tool_tag = next(
-            (name for name in _PYTHON_TOOL_NAMES if f"<{name}" in content),
+            (name for name in _PYTHON_TOOL_NAMES if re.search(rf"<{name}(?=[\s>])", content)),
             None,
         )
         if tool_tag is None or "Stdout:" not in content:
@@ -3830,7 +3830,10 @@ class TraceExplorer:
                     m
                     for m in context_llm_turn.messages
                     if m.role in ("system", "user")
-                    and not any(f"<{name}" in (m.content or "") for name in _PYTHON_TOOL_NAMES)
+                    and not any(
+                        re.search(rf"<{name}(?=[\s>])", m.content or "")
+                        for name in _PYTHON_TOOL_NAMES
+                    )
                     and "<tool_result" not in (m.content or "")
                 ]
 

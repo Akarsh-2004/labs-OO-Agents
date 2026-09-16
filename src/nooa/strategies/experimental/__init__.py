@@ -9,15 +9,11 @@ This module exists for backward compatibility.
 """
 
 from nooa.experimental import (
-    CodeActExperimental,
-    CodeActLiteStrategy,
     PurePythonStrategy,
     ReflexionStrategy,
 )
 
 __all__ = [
-    "CodeActExperimental",
-    "CodeActLiteStrategy",
     "PurePythonStrategy",
     "ReflexionStrategy",
 ]

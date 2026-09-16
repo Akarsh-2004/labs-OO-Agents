@@ -9,6 +9,39 @@ import pytest
 from nooa_bench import runner
 
 
+@pytest.mark.asyncio
+async def test_circular_debug_value_does_not_prevent_success_or_verifier_answer(
+    monkeypatch, tmp_path
+):
+    from nooa.events import PythonOutput
+    from nooa.runtime.event_manager import EventManager
+    from nooa.unifiedllm import FakeLLMClient
+
+    circular = {}
+    circular["self"] = circular
+    answers = []
+
+    class FinishedAgent:
+        def __init__(self, llm):
+            self.event_manager = EventManager()
+            self.event_manager.add(
+                PythonOutput(
+                    tool_call_id="c", execution_count=1, execution_status="complete", value=circular
+                )
+            )
+
+        async def _run_evaluation(self, task_input):
+            return {"success": True, "response": "verification-command"}
+
+    monkeypatch.setattr(runner, "LOGS_DIR", tmp_path)
+    monkeypatch.setattr(runner, "_import_agent_class", lambda _: FinishedAgent)
+    monkeypatch.setattr("nooa.unifiedllm.get_llm_client", lambda *args, **kwargs: FakeLLMClient())
+    monkeypatch.setattr(runner, "_write_answer", lambda result: answers.append(result["response"]))
+    assert await runner._run("task", "model", "bench", None) == 0
+    assert answers == ["verification-command"]
+    assert (tmp_path / "result.json").exists()
+
+
 @pytest.mark.parametrize("agent_async", [False, True])
 @pytest.mark.parametrize("client_async", [False, True])
 @pytest.mark.parametrize(

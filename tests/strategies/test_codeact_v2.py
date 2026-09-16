@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Tests for the experimental single-tool CodeAct strategy."""
+"""Tests for the single-tool CodeAct V2 strategy."""
 
 import json
 from types import ModuleType
@@ -13,7 +13,7 @@ from nooa.config import CodeActConfig
 from nooa.context_blocks import ToolCallEvent
 from nooa.events import PythonOutput
 from nooa.strategies.codeact import CodeActStrategy
-from nooa.strategies.codeact_experimental import CodeActExperimental
+from nooa.strategies.codeact_v2 import CodeActV2
 from nooa.unifiedllm import (
     AssistantReasoning,
     AssistantText,
@@ -41,9 +41,72 @@ def _response(code: str, call_id: str = "call_1") -> LLMResponse:
     )
 
 
+@pytest.mark.asyncio
+async def test_provider_return_result_gets_single_tool_recovery_guidance():
+    llm = FakeLLMClient(
+        scripted_responses=[
+            LLMResponse(
+                parts=(ToolCall(id="bad", name="return_result", arguments='{"result": 42}'),),
+                finish_reason="tool_calls",
+            ),
+            _response("return_result(42)", "fixed"),
+        ]
+    )
+
+    class TestAgent(Agent, llm=llm):
+        @strategy(CodeActV2(config=CodeActConfig(prefill=None)))
+        async def answer(self) -> int:
+            """Return the answer."""
+            ...
+
+    agent = TestAgent()
+    try:
+        assert await agent.answer() == 42
+        assert "return_result is a Python builtin, not a provider tool" in str(llm.last_messages)
+        assert [tool.name for tool in llm.last_tools] == ["python_cell"]
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "strategy_type,tool_name",
-    [(CodeActStrategy, "execute_python"), (CodeActExperimental, "python_cell")],
+    [
+        (CodeActStrategy, "execute_python"),
+        (CodeActV2, "python_cell"),
+    ],
+)
+async def test_inline_completed_value_survives_into_next_invocation(strategy_type, tool_name):
+    llm = FakeLLMClient(
+        scripted_responses=[
+            LLMResponse(
+                parts=(ToolCall(id=str(i), name=tool_name, arguments=json.dumps({"code": code})),),
+                finish_reason="tool_calls",
+            )
+            for i, code in enumerate(("return_result(str(12345 * 6789))", "return_result('done')"))
+        ]
+    )
+
+    class TestAgent(Agent, llm=llm):
+        @strategy(strategy_type(config=CodeActConfig(prefill=None)))
+        async def answer(self) -> str:
+            """Return a computed answer."""
+            ...
+
+    agent = TestAgent()
+    try:
+        assert await agent.answer() == "83810205"
+        assert await agent.answer() == "done"
+        assert "83810205" in str(llm.last_messages)
+        outputs = [e for e in agent.event_manager.all_events() if isinstance(e, PythonOutput)]
+        assert outputs[0].value == "83810205"
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.parametrize(
+    "strategy_type,tool_name",
+    [(CodeActStrategy, "execute_python"), (CodeActV2, "python_cell")],
 )
 @pytest.mark.parametrize("arguments", ["[]", '"text"', "null", "42"])
 @pytest.mark.asyncio
@@ -98,7 +161,7 @@ async def test_text_only_retry_preserves_response_and_uses_python_cell():
     llm = RecordingLLM(scripted_responses=[original, _response("return_result(42)")])
 
     class TestAgent(Agent, llm=llm):
-        @strategy(CodeActExperimental(config=CodeActConfig(prefill=None)))
+        @strategy(CodeActV2(config=CodeActConfig(prefill=None)))
         async def answer(self) -> int:
             """Calculate the result."""
             ...
@@ -134,7 +197,7 @@ async def test_explicit_return_completes_with_only_python_cell_tool():
     fake_llm = FakeLLMClient(scripted_responses=[_response("return 42")])
 
     class TestAgent(Agent, llm=fake_llm):
-        @strategy(CodeActExperimental(config=CodeActConfig(prefill=None)))
+        @strategy(CodeActV2(config=CodeActConfig(prefill=None)))
         async def answer(self) -> int:
             """Return an integer."""
             ...
@@ -193,7 +256,7 @@ async def test_trailing_string_is_suppressed_and_does_not_complete():
     )
 
     class TestAgent(Agent, llm=fake_llm):
-        @strategy(CodeActExperimental(config=CodeActConfig(prefill=None)))
+        @strategy(CodeActV2(config=CodeActConfig(prefill=None)))
         async def answer(self) -> str:
             """Return a string."""
             ...
@@ -209,17 +272,31 @@ async def test_trailing_string_is_suppressed_and_does_not_complete():
 
 
 def test_prompt_and_execution_context_advertise_inline_return_result():
-    strategy_instance = CodeActExperimental(config=CodeActConfig(prefill=None))
+    strategy_instance = CodeActV2(config=CodeActConfig(prefill=None))
     assert "return_result" in strategy_instance._always_available_text()
     assert strategy_instance._available_tool_names() == "python_cell"
 
 
-def test_compatibility_factory_returns_supported_strategy_without_warning():
-    from nooa.experimental import CodeActExperimental as factory
-    from nooa.strategies import CodeActExperimental as supported
+def test_public_export_is_the_supported_strategy():
+    from nooa import CodeActV2 as top_level
+    from nooa.strategies import CodeActV2 as supported
 
-    instance = factory(config=CodeActConfig(prefill=None))
-    assert isinstance(instance, supported)
+    assert top_level is supported is CodeActV2
+    assert supported().name == "CODEACT_V2"
+
+
+def test_lite_strategy_is_not_exported():
+    import importlib.util
+
+    import nooa
+    import nooa.experimental
+    import nooa.strategies
+    import nooa.strategies.experimental
+
+    for module in (nooa, nooa.experimental, nooa.strategies, nooa.strategies.experimental):
+        assert not hasattr(module, "CodeActLiteStrategy")
+        assert "CodeActLiteStrategy" not in module.__all__
+    assert importlib.util.find_spec("nooa.strategies.codeact_lite") is None
 
 
 @pytest.mark.asyncio
@@ -227,7 +304,7 @@ async def test_return_result_is_available_inside_python_cells():
     fake_llm = FakeLLMClient(scripted_responses=[_response("return_result(41)", "call_1")])
 
     class TestAgent(Agent, llm=fake_llm):
-        @strategy(CodeActExperimental(config=CodeActConfig(prefill=None)))
+        @strategy(CodeActV2(config=CodeActConfig(prefill=None)))
         async def answer(self) -> int:
             """Return an integer."""
             ...
@@ -236,9 +313,8 @@ async def test_return_result_is_available_inside_python_cells():
     assert await agent.answer() == 41
     outputs = [event for event in agent.event_manager.values() if isinstance(event, PythonOutput)]
     assert len(outputs) == 1
-    # The signal carries the submitted value to the method result; unlike an
-    # explicit Python return, it is not also a cell display value.
-    assert outputs[0].value is None
+    # Retain the accepted value on the real output, not an invented tool replay.
+    assert outputs[0].value == 41
     assert outputs[0].error == ""
     completion_events = [
         event
@@ -251,7 +327,7 @@ async def test_return_result_is_available_inside_python_cells():
 
 @pytest.mark.asyncio
 async def test_python_cell_context_lists_static_module_capabilities():
-    strategy_instance = CodeActExperimental(config=CodeActConfig(prefill=None))
+    strategy_instance = CodeActV2(config=CodeActConfig(prefill=None))
     json_module = __import__("json")
     pandas_module = __import__("pandas")
     agent_module = ModuleType("test_capability_agent")
@@ -302,7 +378,7 @@ async def test_python_cell_context_includes_imported_symbols_and_respects_visibi
         vars(leaf),
     )
     blocked = DEFAULT_BLOCKED_MODULES | ({"math"} if block_math else set())
-    strategy_instance = CodeActExperimental(
+    strategy_instance = CodeActV2(
         config=CodeActConfig(restrictions=RestrictionsConfig(blocked_modules=blocked))
     )
     agent = leaf.Leaf()
@@ -330,9 +406,9 @@ async def test_imported_capability_is_advertised_and_executes_without_generic_co
         "from math import sqrt as root\n"
         "from nooa import Agent, strategy\n"
         "from nooa.config import CodeActConfig\n"
-        "from nooa.strategies.codeact_experimental import CodeActExperimental\n"
+        "from nooa.strategies.codeact_v2 import CodeActV2\n"
         "class ImportedAgent(Agent):\n"
-        "    @strategy(CodeActExperimental(config=CodeActConfig(prefill=None)), "
+        "    @strategy(CodeActV2(config=CodeActConfig(prefill=None)), "
         "context={'execution_context': None})\n"
         "    async def answer(self) -> float:\n"
         "        ...\n",
@@ -352,7 +428,7 @@ async def test_python_cell_state_summarizes_initial_state():
     fake_llm = FakeLLMClient(scripted_responses=[_response("return_result(question)")])
 
     class TestAgent(Agent, llm=fake_llm):
-        @strategy(CodeActExperimental(config=CodeActConfig(prefill=None)))
+        @strategy(CodeActV2(config=CodeActConfig(prefill=None)))
         async def answer(self, question: str) -> str:
             """Return the question."""
             ...
@@ -383,7 +459,7 @@ async def test_python_cell_state_lists_user_created_locals():
     )
 
     class TestAgent(Agent, llm=fake_llm):
-        @strategy(CodeActExperimental(config=CodeActConfig(prefill=None)))
+        @strategy(CodeActV2(config=CodeActConfig(prefill=None)))
         async def answer(self, question: str) -> str:
             """Uppercase the question."""
             ...
@@ -403,7 +479,7 @@ async def test_python_cell_state_lists_user_created_locals():
 
 @pytest.mark.asyncio
 async def test_python_cell_state_context_bounds_many_values():
-    strategy_instance = CodeActExperimental(config=CodeActConfig(prefill=None))
+    strategy_instance = CodeActV2(config=CodeActConfig(prefill=None))
     call = type(
         "Call",
         (),
@@ -425,7 +501,7 @@ async def test_python_cell_state_context_bounds_many_values():
 
 @pytest.mark.asyncio
 async def test_python_cell_state_does_not_inspect_agent_shell():
-    strategy_instance = CodeActExperimental(config=CodeActConfig(prefill=None))
+    strategy_instance = CodeActV2(config=CodeActConfig(prefill=None))
     call = type(
         "Call",
         (),
@@ -450,7 +526,7 @@ async def test_python_cell_state_does_not_inspect_agent_shell():
 
 @pytest.mark.asyncio
 async def test_python_cell_state_omits_inputs_outputs_and_framework_objects():
-    strategy_instance = CodeActExperimental(config=CodeActConfig(prefill=None))
+    strategy_instance = CodeActV2(config=CodeActConfig(prefill=None))
     call = type(
         "Call",
         (),
@@ -484,7 +560,7 @@ async def test_python_cell_state_omits_inputs_outputs_and_framework_objects():
 
 @pytest.mark.asyncio
 async def test_python_cell_state_does_not_inspect_agent_vars():
-    strategy_instance = CodeActExperimental(config=CodeActConfig(prefill=None))
+    strategy_instance = CodeActV2(config=CodeActConfig(prefill=None))
     call = type(
         "Call",
         (),
@@ -507,7 +583,7 @@ async def test_python_cell_state_does_not_inspect_agent_vars():
 
 @pytest.mark.asyncio
 async def test_python_cell_state_ignores_agent_cwd_and_bounds_local_names():
-    strategy_instance = CodeActExperimental(config=CodeActConfig(prefill=None))
+    strategy_instance = CodeActV2(config=CodeActConfig(prefill=None))
     long_name = "local_" + "x" * 500 + "\nforged"
     call = type(
         "Call",
@@ -532,7 +608,7 @@ async def test_python_cell_state_ignores_agent_cwd_and_bounds_local_names():
 
 @pytest.mark.asyncio
 async def test_python_cell_state_context_lists_import_aliases_without_module_repr():
-    strategy_instance = CodeActExperimental(config=CodeActConfig(prefill=None))
+    strategy_instance = CodeActV2(config=CodeActConfig(prefill=None))
     call = type(
         "Call",
         (),
@@ -556,7 +632,7 @@ async def test_python_cell_state_context_lists_import_aliases_without_module_rep
 
 @pytest.mark.asyncio
 async def test_python_cell_state_helper_returns_complete_inventory():
-    strategy_instance = CodeActExperimental(config=CodeActConfig(prefill=None))
+    strategy_instance = CodeActV2(config=CodeActConfig(prefill=None))
     call = type(
         "Call",
         (),

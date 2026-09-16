@@ -37,6 +37,10 @@ from nooa.trace_explorer.explorer import (
 class TestPythonCellViewerParity:
     """The experimental Python tool renders like legacy execute_python."""
 
+    @pytest.mark.parametrize("tag", ["python_cell_context", "python_cell_state"])
+    def test_context_tags_are_not_execution_prefills(self, tag):
+        assert _extract_prefill_inputs(f"<{tag}>Stdout:\nkeep context</{tag}>") is None
+
     @pytest.mark.parametrize("tool_name", ["execute_python", "python_cell"])
     def test_extracts_prefill_inputs(self, tool_name):
         content = f"""<{tool_name} tool_call_id="prefill_1">
@@ -114,7 +118,15 @@ Return type: int
         matching = ToolCall("python_cell", '{"code": "print(\'task\')"}', "prefill_2")
         following = LLMTurn(
             session_id="abcdef",
-            messages=[LLMMessage(role="user", content="next task")],
+            messages=[
+                LLMMessage(
+                    role="system", content="<python_cell_context>keep API</python_cell_context>"
+                ),
+                LLMMessage(
+                    role="user", content="<python_cell_state>keep state</python_cell_state>"
+                ),
+                LLMMessage(role="user", content="next task"),
+            ],
             response="",
             model="test-model",
             tool_calls=[] if call_in_messages else [matching],
@@ -136,6 +148,8 @@ Return type: int
 
         assert '<tool_call name="python_cell" id="prefill_2">' in execution
         assert "## LLM Context (from turn 3)" in execution
+        assert "keep API" in execution
+        assert "keep state" in execution
 
 
 # =============================================================================

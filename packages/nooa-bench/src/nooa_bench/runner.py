@@ -181,7 +181,7 @@ def _write_trajectory(agent: Any) -> None:
     try:
         events = [
             {
-                "event_id": event_id,
+                "event_id": event.id,
                 "event_type": type(event).__name__,
                 # Opaque provider replay state belongs only in the durable event
                 # backend and compatible provider requests, never debug exports.
@@ -191,7 +191,7 @@ def _write_trajectory(agent: Any) -> None:
                 "prefill": bool(event.metadata.get("prefill")),
                 "synthetic": bool(event.metadata.get("synthetic")),
             }
-            for event_id, event in manager.items()
+            for event in manager.all_events()
         ]
     except Exception as e:  # never fail the task over a debug artifact
         logger.warning("Could not serialise trajectory: %s", e)
@@ -200,7 +200,7 @@ def _write_trajectory(agent: Any) -> None:
     out = LOGS_DIR / "trajectory.json"
     try:
         out.write_text(json.dumps(events, indent=2, default=_public_json_default))
-    except OSError as e:
+    except Exception as e:  # debug serialization must not invalidate a completed task
         logger.warning("Could not write %s: %s", out, e)
         return
     logger.info("Trajectory written → %s (%d events)", out, len(events))

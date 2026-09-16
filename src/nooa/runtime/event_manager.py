@@ -496,6 +496,14 @@ class EventManager:
 
     # === Dict-like Methods (active events) ===
 
+    def all_events(self) -> list[EventBase]:
+        """Return recorded events in insertion order, including archived history.
+
+        Use for exports and analysis, not prompt rendering. ``items()`` and
+        ``values()`` deliberately expose only the active, summarized view.
+        """
+        return list(self._backend.all_events())
+
     def items(self) -> list[tuple[str, EventBase]]:
         """Return (tag, event) pairs for active events.
 

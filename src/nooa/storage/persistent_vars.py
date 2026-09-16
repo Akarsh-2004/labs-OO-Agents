@@ -36,6 +36,9 @@ class PersistentVars:
     numbers, or Pydantic models); unsupported live objects are not stored.
     This facade does not install ``self.v`` on agents or enable disk persistence;
     an application must supply the owner and configure its snapshot storage.
+    Names used by helpers (``keys``, ``items``, ``get``, ``set``, ``clear``) must
+    be read with ``get(name)`` and written with ``set(name, value)``. Attribute
+    access to those names refers to the method, not the stored value.
     """
 
     def __init__(self, owner: Any):
@@ -48,12 +51,12 @@ class PersistentVars:
             raise AttributeError(f"No var {key!r}") from None
 
     def __setattr__(self, key: str, value: Any) -> None:
-        if any(key in cls.__dict__ for cls in type(self).__mro__):
+        if key.startswith("_") or any(key in cls.__dict__ for cls in type(self).__mro__):
             raise AttributeError(f"{key!r} is reserved by PersistentVars; use set({key!r}, value)")
         self._owner.vars[key] = value
 
     def __delattr__(self, key: str) -> None:
-        if any(key in cls.__dict__ for cls in type(self).__mro__):
+        if key.startswith("_") or any(key in cls.__dict__ for cls in type(self).__mro__):
             raise AttributeError(f"{key!r} is reserved by PersistentVars")
         try:
             del self._owner.vars[key]

@@ -162,20 +162,23 @@ class TodoManager(Skill):
 
     @hidden
     def from_dict(self, data: dict) -> None:
-        """Replace current todos with snapshot state produced by ``to_dict()``."""
-        self._todos.clear()
-        self._order.clear()
+        """Atomically restore a snapshot; legacy non-done statuses become open."""
+        todos: dict[str, Todo] = {}
+        order: list[str] = []
         for raw in data.get("todos", []):
             if isinstance(raw, dict):
                 raw = dict(raw)
-                raw["status"] = {"blocked": "open"}.get(
-                    raw.get("status"), raw.get("status", "open")
-                )
+                # Older snapshots accepted arbitrary status strings (and null).
+                # Only an explicit done value is evidence of completion.
+                raw["status"] = "done" if raw.get("status") == "done" else "open"
             t = Todo.model_validate(raw)
-            self._todos[t.id] = t
-            self._order.append(t.id)
+            if t.id in todos:
+                raise ValueError(f"duplicate todo id {t.id!r} in snapshot")
+            todos[t.id] = t
+            order.append(t.id)
         active_id = data.get("active_id")
-        active = self._todos.get(active_id) if isinstance(active_id, str) else None
+        active = todos.get(active_id) if isinstance(active_id, str) else None
+        self._todos, self._order = todos, order
         self._active_id = active_id if active is not None and active.status != "done" else None
 
     # ── CRUD ──────────────────────────────────────
@@ -220,6 +223,12 @@ class TodoManager(Skill):
         if current is None:
             raise ValueError(f"todo {updated.id!r} is not managed by this TodoManager")
 
+        missing = set(updated.deps) - set(base.deps) - self._todos.keys()
+        if missing:
+            raise ValueError(
+                "delegated dependencies are not in the parent workspace: "
+                + ", ".join(sorted(missing))
+            )
         candidate = current.model_copy(deep=True)
         for field in ("title", "status", "deps", "description"):
             before = getattr(base, field)
@@ -374,6 +383,7 @@ class TodoManager(Skill):
         Keep title and description aligned with the current understanding of the
         task. Use ``comment()`` to append material progress and evidence. Returns
         ``None`` if the todo is missing; other keyword names are ignored.
+        Invalid values raise ValueError without changing any field.
         """
         t = self.get(todo_id)
         if t is None:
@@ -381,9 +391,13 @@ class TodoManager(Skill):
         if "notes" in kwargs and "description" not in kwargs:
             kwargs["description"] = kwargs["notes"]
         allowed = {"title", "status", "description"}
-        for k, v in kwargs.items():
-            if k in allowed:
-                setattr(t, k, v)
+        changes = {k: v for k, v in kwargs.items() if k in allowed}
+        candidate = t.model_copy(deep=True)
+        for k, v in changes.items():
+            setattr(candidate, k, v)
+        # Validation must succeed for every field before touching the live Todo.
+        for k in changes:
+            setattr(t, k, getattr(candidate, k))
         if t.status == "done" and t.id == self._active_id:
             self._active_id = None
         return t
@@ -450,6 +464,8 @@ class TodoManager(Skill):
         """Store durable metadata and return the todo, or ``None`` if it is missing.
 
         Values that cannot be snapshot-serialized are not stored.
+        For keys matching proxy methods (such as ``keys`` or ``get``), read back
+        with ``todo.v.get(key)`` or ``todo.vars[key]``, not attribute access.
         """
         t = self.get(todo_id)
         if t:
@@ -505,6 +521,7 @@ class TodoManager(Skill):
 
         Use ``"open"``, ``"blocked"``, or ``"done"``. Effective blocking is
         derived from unfinished dependencies and updates automatically.
+        ``blocked`` is a query filter, not an assignable Todo.status value.
         """
         todos = [self._todos[i] for i in self._order if i in self._todos]
         if status is None:

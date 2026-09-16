@@ -13,6 +13,7 @@ from nooa_bench.bench_agent import BenchAgent, TaskResult
 from nooa_bench.rlm_bench_agent import RLMBenchAgent
 
 from nooa.agentdoc import doc
+from nooa.runtime.event_manager import EventManager
 from nooa.unifiedllm import AssistantReasoning, AssistantText, FakeLLMClient, LLMResponse, ToolCall
 
 
@@ -50,7 +51,9 @@ def test_trajectory_excludes_opaque_provider_state(monkeypatch, tmp_path):
             ),
         ),
     )
-    agent = type("Agent", (), {"event_manager": {response.id: response}})()
+    manager = EventManager()
+    manager.add(response)
+    agent = type("Agent", (), {"event_manager": manager})()
     monkeypatch.setattr(runner, "LOGS_DIR", tmp_path)
 
     runner._write_trajectory(agent)
@@ -134,7 +137,10 @@ def test_trajectory_preserves_nested_json_without_private_state(monkeypatch, tmp
         execution_count=1,
         value={"responses": [response], "payload": Payload()},
     )
-    agent = type("Agent", (), {"event_manager": {call.id: call, nested.id: nested}})()
+    manager = EventManager()
+    manager.add(call)
+    manager.add(nested)
+    agent = type("Agent", (), {"event_manager": manager})()
     monkeypatch.setattr(runner, "LOGS_DIR", tmp_path)
     runner._write_trajectory(agent)
     encoded = (tmp_path / "trajectory.json").read_text()
@@ -566,8 +572,8 @@ def test_problem_statement_skips_blank_primary_field():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("agent_type", [BenchAgent, RLMBenchAgent])
-async def test_solve_task_uses_experimental_single_tool_contract(agent_type, tmp_path):
-    """Bench agents share the experimental TUI agent's context contract.
+async def test_solve_task_uses_v2_single_tool_contract(agent_type, tmp_path):
+    """Bench agents share CodeActV2's context contract.
 
     The single python_cell tool stays; duplicated framework blocks (state,
     execution_context, context_usage, strategy prompt) are suppressed; the
@@ -597,6 +603,9 @@ async def test_solve_task_uses_experimental_single_tool_contract(agent_type, tmp
         assert result.solution_description == "done"
 
         assert [tool.name for tool in llm.last_tools or []] == ["python_cell"]
+        assert "doc(self.delegate)" in llm.last_tools[0].description
+        assert "asyncio.gather" in llm.last_tools[0].description
+        assert "PredictStrategy" in llm.last_tools[0].description
         system_prompt = "\n".join(
             str(message.get("content", ""))
             for message in llm.last_messages
@@ -614,6 +623,111 @@ async def test_solve_task_uses_experimental_single_tool_contract(agent_type, tmp
         assert "<self" in system_prompt
         assert "You are an autonomous software engineering agent." in system_prompt
         assert "Solve the supplied task completely." in rendered
+        assert "doc(self.methodwriting)" in rendered
+        assert "doc(self.writing)" not in rendered
+        assert "supplied_context" in rendered
+        # The prefix uses concise docs; doc(self.delegate) expands the guidance.
+        assert "untrusted reference data" in doc(agent.delegate)
         assert len(system_prompt) < 20_000
+    finally:
+        await agent.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("conflict", ["title", "dependency"])
+async def test_delegation_merge_failure_keeps_result_and_worker_state(
+    monkeypatch, tmp_path, conflict
+):
+    from nooa_bench.bench_agent import DelegationMergeError
+
+    expected = TaskResult(solution_description="done", evidence="passed", command_to_verify="true")
+
+    async def fake_solve(self, description):
+        delegated = self.todo.list_todos()[0]
+        self.todo.comment(delegated, "useful finding")
+        if conflict == "title":
+            agent.todo.update(task, title="parent edit")
+            self.todo.update(delegated, title="worker edit")
+        else:
+            child = self.todo.add("worker dependency")
+            self.todo.add_dep(delegated, child)
+        return expected
+
+    monkeypatch.setattr(bench_agent_module, "ShellTools", _FakeShell)
+    monkeypatch.setattr(bench_agent_module, "RepoTools", _FakeRepo)
+    monkeypatch.setattr(BenchAgent, "_solve_task", fake_solve)
+    agent = BenchAgent(llm=FakeLLMClient(), working_dir=str(tmp_path))
+    task = agent.todo.add("work")
+    try:
+        with pytest.raises(DelegationMergeError) as caught:
+            await agent.delegate(task)
+        assert caught.value.result == expected
+        restored = bench_agent_module.TodoManager(caught.value.worker_state)
+        assert restored.get(task.id).comments[0].body == "useful finding"
+        assert task.comments == []
+        assert task.deps == []
+        if conflict == "title":
+            assert task.title == "parent edit"
+        else:
+            assert restored.get(task.id).deps[0] == restored.list_todos()[1].id
+    finally:
+        await agent.close()
+
+
+def test_leaf_context_renderer_does_not_import_coding_application():
+    import subprocess
+    import sys
+
+    subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            """
+import sys
+from nooa_cli.coding.context_rendering import render_delegated_context
+assert render_delegated_context({'x': 1})
+for name in ('agent', 'activity', 'slash_commands', 'settings'):
+    assert 'nooa_cli.coding.' + name not in sys.modules, name
+""",
+        ],
+        check=True,
+    )
+
+
+@pytest.mark.asyncio
+async def test_original_task_remains_after_prefill_compaction(tmp_path):
+    class CompactingLLM(FakeLLMClient):
+        async def acall(self, messages, **kwargs):
+            if not self.compacted:
+                tags = list(agent.event_manager.keys())
+                agent.event_manager.collapse(tags[0], tags[-1], summary_text="no task text here")
+                self.compacted = True
+            return await super().acall(messages, **kwargs)
+
+    def response(code, call_id):
+        return LLMResponse(
+            parts=(ToolCall(id=call_id, name="python_cell", arguments=json.dumps({"code": code})),),
+            finish_reason="tool_calls",
+        )
+
+    llm = CompactingLLM(
+        scripted_responses=[
+            response("pass", "one"),
+            response(
+                "assert Todo is not None and TodoManager is not None and ShellTools is not None "
+                "and RepoTools is not None and MethodWriting is not None\n"
+                "return_result(TaskResult(solution_description='done', evidence='ok', command_to_verify='true'))",
+                "two",
+            ),
+        ]
+    )
+    llm.compacted = False
+    agent = BenchAgent(llm=llm, working_dir=str(tmp_path))
+    try:
+        assert (await agent._solve_task("UNIQUE-ORIGINAL-TASK")).solution_description == "done"
+        assert llm.compacted
+        rendered = str(llm.last_messages)
+        assert "UNIQUE-ORIGINAL-TASK" in rendered
+        assert "TaskResult" in rendered
     finally:
         await agent.close()

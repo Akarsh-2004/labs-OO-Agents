@@ -870,6 +870,8 @@ Standard Python builtins and agent instance (`self`) are available."""
             session.session_locals.update(call.session_locals)
         # Expose this live dictionary to dynamic context renderers. Unlike
         # call.session_locals, this also receives names defined by model cells.
+        # execution_locals is a declared public CurrentCall field. Bind it here
+        # after session creation; the rest of the frozen call metadata stays fixed.
         object.__setattr__(call, "execution_locals", session.session_locals)
 
         # Build builtins for code execution
@@ -1412,8 +1414,18 @@ Standard Python builtins and agent instance (`self`) are available."""
                         tool_call_event_id,
                         result=ToolResult(
                             tool_call_id=tool_call.id,
-                            content=f"Unknown tool `{tool_call.name}`. "
-                            f"Available tools: {self._available_tool_names()}",
+                            content=(
+                                f"Unknown tool `{tool_call.name}`. "
+                                f"Available tools: {self._available_tool_names()}"
+                                + (
+                                    ". To finish, call python_cell with code "
+                                    "`return_result(value)`; return_result is a Python builtin, "
+                                    "not a provider tool."
+                                    if tool_call.name == "return_result"
+                                    and not self._supports_return_result()
+                                    else ""
+                                )
+                            ),
                             result_status=ResultStatus.ERROR,
                         ),
                     )
@@ -1650,7 +1662,9 @@ Standard Python builtins and agent instance (`self`) are available."""
                     stdout=result.stdout,
                     stderr=stderr,
                     error=error_text,
-                    value=result.returned_value if result.has_return else None,
+                    # The trace-only completion marker is not replayed. Keep the
+                    # accepted value on this real execution output for later turns.
+                    value=validated if validation_error is None else None,
                     explicit_return=result.explicit_return,
                     execution_status=ResultStatus.ERROR if validation_error else final_status,
                     images=result.images,

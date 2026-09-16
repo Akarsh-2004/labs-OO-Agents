@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Experimental single-tool CodeAct strategy."""
+"""Single-tool CodeAct V2 strategy."""
 
 import inspect
 from html import escape
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from nooa.strategies.current_call import CurrentCall
 
 
-class CodeActExperimental(CodeActStrategy):
+class CodeActV2(CodeActStrategy):
     """Single-provider-tool CodeAct variant with in-cell completion.
 
     The model receives only ``python_cell`` as a provider tool. ``return_result``
@@ -46,7 +46,7 @@ class CodeActExperimental(CodeActStrategy):
 
     @property
     def name(self) -> str:
-        return "CODEACT_EXPERIMENTAL"
+        return "CODEACT_V2"
 
     def get_block_overrides(self) -> dict[str, Any]:
         """Put the execution contract on the tool and keep only runtime context blocks."""
@@ -248,6 +248,11 @@ when you want to inspect prose before submitting it.
 Use Python for arithmetic, iteration, transforms, and batches rather than manually
 constructing large outputs. Define reusable helpers at the top of a cell. Existing
 methods on `self` may be called with `await` when async.
+
+If `self` exposes delegation, inspect its documentation with `doc(self.delegate)`.
+Use bounded objectives when an independent context helps; run independent work
+with `asyncio.gather` and inspect each result. For single-shot extraction or
+classification, use a documented `@strategy(PredictStrategy())` helper.
 
 Restrictions (will throw):
 - `eval`, `exec`, `compile`, `__import__`, `input`, `breakpoint`

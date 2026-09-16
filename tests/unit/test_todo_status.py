@@ -7,6 +7,68 @@ import pytest
 from nooa.tools.todo import TodoManager
 
 
+@pytest.mark.parametrize("status_first", [False, True])
+def test_invalid_update_is_atomic(status_first):
+    manager = TodoManager()
+    todo = manager.add("original", description="keep")
+    before = manager.to_dict()
+    fields = {"title": "changed", "description": "lost", "status": "blocked"}
+    if status_first:
+        fields = dict(reversed(list(fields.items())))
+    with pytest.raises(ValueError):
+        manager.update(todo, **fields)
+    assert manager.to_dict() == before
+
+
+@pytest.mark.parametrize("status", ["in_progress", "blocked", None, "custom", "done"])
+def test_legacy_status_restores_as_open_unless_done(status):
+    manager = TodoManager()
+    todo = manager.add("old snapshot")
+    snapshot = manager.to_dict()
+    snapshot["todos"][0]["status"] = status
+    manager.from_dict(snapshot)
+    assert manager.get(todo.id).status == ("done" if status == "done" else "open")
+
+
+def test_failed_restore_keeps_existing_workspace():
+    manager = TodoManager()
+    manager.add("original")
+    before = manager.to_dict()
+    broken = {**before, "todos": [*before["todos"], {"title": 42}]}
+    with pytest.raises(ValueError):
+        manager.from_dict(broken)
+    assert manager.to_dict() == before
+
+
+def test_worker_local_dependency_does_not_leave_dangling_parent_id():
+    manager = TodoManager()
+    task = manager.add("work")
+    base = manager.copy_todo(task)
+    worker = TodoManager.with_todo(base)
+    dependency = worker.add("worker-only")
+    worker.add_dep(task.id, dependency)
+    before = manager.to_dict()
+    with pytest.raises(ValueError, match="dependencies are not in the parent"):
+        manager.merge_todo(worker.get(task.id), base=base)
+    assert manager.to_dict() == before
+
+
+@pytest.mark.parametrize("name", ["keys", "items", "get", "set", "clear", "_owner"])
+def test_reserved_var_names_have_explicit_access_and_cannot_replace_proxy(name):
+    manager = TodoManager()
+    todo = manager.add("work")
+    proxy = todo.v
+    manager.set_var(todo, name, "stored")
+    assert proxy.get(name) == "stored"
+    with pytest.raises(AttributeError, match="reserved"):
+        setattr(proxy, name, "replacement")
+    with pytest.raises(AttributeError, match="reserved"):
+        delattr(proxy, name)
+    assert proxy.get(name) == "stored"
+    proxy.set("ordinary", 42)
+    assert todo.vars["ordinary"] == 42
+
+
 def test_empty_status_is_minimal() -> None:
     assert TodoManager().status() == "(no todos)"
 
