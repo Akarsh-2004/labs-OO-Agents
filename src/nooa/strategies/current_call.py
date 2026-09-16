@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 class CurrentCall:
     """Represents a method call being generated.
 
-    This is a mutable per-invocation record: strategies bind its event ID and
+    This is a mutable per-invocation record: strategies bind its task tag and
     execution namespace during setup. Do not change ``id`` while using the call
     as a set member or dictionary key; equality and hashing use that ID.
     ``session_locals`` is the optional caller-owned seed/writeback dictionary for
@@ -86,6 +86,8 @@ class CurrentCall:
     # avoids re-parsing the stringified signature (which can't reliably split on
     # commas inside Annotated[...]/defaults).
     param_names: list[str] | None = None
+    # Display tag of CodeAct's Task event, separate from the correlation UUID.
+    task_tag: str | None = None
 
     def __hash__(self) -> int:
         """Hash by id for use in sets/dicts."""

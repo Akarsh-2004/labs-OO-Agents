@@ -37,9 +37,13 @@ async def test_circular_debug_value_does_not_prevent_success_or_verifier_answer(
     monkeypatch.setattr(runner, "_import_agent_class", lambda _: FinishedAgent)
     monkeypatch.setattr("nooa.unifiedllm.get_llm_client", lambda *args, **kwargs: FakeLLMClient())
     monkeypatch.setattr(runner, "_write_answer", lambda result: answers.append(result["response"]))
+    (tmp_path / "trajectory.json").write_text("[]")
+    (tmp_path / "behavior.json").write_text('{"task_id": "previous-task"}')
     assert await runner._run("task", "model", "bench", None) == 0
     assert answers == ["verification-command"]
     assert (tmp_path / "result.json").exists()
+    assert not (tmp_path / "trajectory.json").exists()
+    assert not (tmp_path / "behavior.json").exists()
 
 
 @pytest.mark.parametrize("agent_async", [False, True])
@@ -263,5 +267,5 @@ async def test_runner_executes_delegation_and_preserves_provider_turns(
     assert not any(
         isinstance(message, LLMResponse) and message.id == first.id for message in llm.requests[1]
     )
-    assert "private-sentinel" not in str(llm.requests[1])
+    assert "private-sentinel" in str(llm.requests[1])  # Ordinary input, no custom redaction.
     assert "fixture-provider-state" not in (tmp_path / "logs/trajectory.json").read_text()

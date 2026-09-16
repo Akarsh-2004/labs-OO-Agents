@@ -130,7 +130,10 @@ class CodeActV2(CodeActStrategy):
         live_locals = None if call is None else (call.execution_locals or call.session_locals)
         inputs = {} if call is None else call.bound_parameters()
         input_names = set(inputs)
-        local_types = {str(name): type(value).__name__ for name, value in inputs.items()}
+        local_types = {
+            str(name): type((live_locals or {}).get(name, value)).__name__
+            for name, value in inputs.items()
+        }
         import_names: dict[str, str] = {}
         if live_locals:
             names = sorted(name for name in live_locals if isinstance(name, str))

@@ -909,12 +909,9 @@ Standard Python builtins and agent instance (`self`) are available."""
 
             tools = self._build_tools(return_type, call.method_name)
 
-            # Use the task event's tag as the call ID so the LLM sees a stable reference.
-            # _build_task_message reads only method_name/docstring, so it's safe to build
-            # before the event lands and assign the returned tag back to call.id.
+            # Keep the display tag separate from the event-correlation call ID.
             task_content = await self._build_task_message(runtime, original_call=call)
-            tag = runtime.event_manager.add(Task(prompt=task_content))
-            call.id = tag
+            call.task_tag = runtime.event_manager.add(Task(prompt=task_content))
             # Method-local preconditions run before generation and fail fast
             # (raise to abort the call); see nooa.strategy_validation.
             run_preconditions(runtime.agent, call, self.config.preconditions)
@@ -1384,7 +1381,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                         tool_call_id=tool_call.id,
                         content=f"Invalid result: {error_msg}\n"
                         f"Please call return_result again with valid arguments. "
-                        f"Tip: if you computed the result in execute_python(), you can call "
+                        f"Tip: if you computed the result in {self._python_tool_name()}(), you can call "
                         f"return_result(variable) from within the code instead.",
                         result_status=ResultStatus.ERROR,
                     ),
@@ -1917,7 +1914,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     raise TypeError(
                         f"Expected an instance of {type_name}, "
                         f"but got {type(validated).__name__}.\n"
-                        f"Hint: Use execute_python() to construct the {type_name} object, "
+                        f"Hint: Use {self._python_tool_name()}() to construct the {type_name} object, "
                         f"then call return_result(variable) from within the code."
                     )
 
@@ -2565,7 +2562,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     f"Call this ONLY when you have computed the final answer. "
                     f"Expected return type: {type_name}. "
                     f"IMPORTANT: This type cannot be passed directly via this tool. "
-                    f"Construct the object in execute_python() and call "
+                    f"Construct the object in {self._python_tool_name()}() and call "
                     f"return_result(variable) from within the code instead."
                 )
                 # Opaque types (pd.DataFrame, np.ndarray, custom classes) carry no JSON
@@ -2581,7 +2578,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                     f"Return the final result for the task. "
                     f"Call this ONLY when you have computed the final answer. "
                     f"Expected return type: {type_name}. "
-                    f"Tip: prefer calling return_result(variable) from within execute_python() "
+                    f"Tip: prefer calling return_result(variable) from within {self._python_tool_name()}() "
                     f"to pass computed results directly."
                 )
 

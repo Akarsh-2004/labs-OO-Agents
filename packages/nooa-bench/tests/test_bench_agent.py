@@ -42,6 +42,21 @@ class _FakeRepo:
         self.session = session
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent_type", [BenchAgent, RLMBenchAgent])
+async def test_working_directory_context_is_untraced(agent_type, monkeypatch, tmp_path):
+    monkeypatch.setattr(bench_agent_module, "ShellTools", _FakeShell)
+    monkeypatch.setattr(bench_agent_module, "RepoTools", _FakeRepo)
+    agent = agent_type(llm=FakeLLMClient(), working_dir=str(tmp_path))
+    try:
+        assert getattr(agent_type._working_directory_context, "_no_trace", False)
+        before = list(agent.event_manager.all_events())
+        assert agent._working_directory_context() == f"Working directory for self.shell: {tmp_path}"
+        assert list(agent.event_manager.all_events()) == before
+    finally:
+        await agent.aclose()
+
+
 def test_trajectory_excludes_opaque_provider_state(monkeypatch, tmp_path):
     response = LLMResponse(
         parts=(
@@ -65,34 +80,37 @@ def test_trajectory_excludes_opaque_provider_state(monkeypatch, tmp_path):
     assert "llm_state" not in payload
 
 
-def test_delegated_context_is_bounded_redacted_and_repr_safe():
-    from nooa_cli.coding.context_rendering import render_delegated_context
-
-    class Dangerous:
-        def __repr__(self):
-            raise AssertionError("arbitrary repr must not run")
-
-    cyclic = []
-    cyclic.append(cyclic)
-    value = {
-        "access_token": "top-secret",
-        "nested": {"client-secret": "also-secret", "authorization_header": "Bearer hidden"},
-        "cycle": cyclic,
-        "object": Dangerous(),
-    }
-    rendered = render_delegated_context(value)
-    bounded = render_delegated_context({**value, "large": "x" * 20_000}, max_chars=500)
-
-    assert "top-secret" not in rendered
-    assert "also-secret" not in rendered
-    assert "Bearer hidden" not in rendered
-    assert "[REDACTED]" in rendered
-    assert "<cycle>" in rendered
-    assert "<Dangerous>" in rendered
-    assert "top-secret" not in bounded
-    assert "also-secret" not in bounded
-    assert "Bearer hidden" not in bounded
-    assert len(bounded) <= 500
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent_type", [BenchAgent, RLMBenchAgent])
+async def test_delegate_uses_framework_value_formatting(agent_type, monkeypatch, tmp_path):
+    monkeypatch.setattr(bench_agent_module, "ShellTools", _FakeShell)
+    monkeypatch.setattr(bench_agent_module, "RepoTools", _FakeRepo)
+    code = (
+        "return_result(TaskResult(solution_description=description, "
+        "evidence=supplied_context['password'], how_to_verify='check'))"
+    )
+    llm = FakeLLMClient(
+        scripted_responses=[
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(id="cell", name="python_cell", arguments=json.dumps({"code": code}))
+                ],
+                finish_reason="tool_calls",
+            )
+        ]
+    )
+    agent = agent_type(llm=llm, working_dir=str(tmp_path))
+    try:
+        value = {"password": "synthetic-example", "numbers": list(range(100))}
+        result = await agent.delegate("inspect", value)
+        assert result.solution_description == "inspect"
+        assert result.evidence == "synthetic-example"
+        rendered = str(llm.last_messages)
+        assert "supplied_context" in rendered
+        assert "synthetic-example" in rendered
+        assert "[REDACTED]" not in rendered
+    finally:
+        await agent.aclose()
 
 
 @pytest.mark.parametrize(
@@ -485,7 +503,7 @@ def test_rlm_identity_is_normalized_independently_of_python_docstring_dedent():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("agent_type", [BenchAgent, RLMBenchAgent])
-async def test_delegate_render_failure_allocates_no_worker(agent_type, monkeypatch, tmp_path):
+async def test_delegate_input_failure_closes_worker(agent_type, monkeypatch, tmp_path):
     shells = []
 
     class CountingShell(_FakeShell):
@@ -493,17 +511,19 @@ async def test_delegate_render_failure_allocates_no_worker(agent_type, monkeypat
             super().__init__(*args, **kwargs)
             shells.append(self)
 
-    def fail_render(_value):
+    async def fail_solve(self, description, supplied_context=None):
         raise ValueError("invalid supplied context")
 
     monkeypatch.setattr(bench_agent_module, "ShellTools", CountingShell)
     monkeypatch.setattr(bench_agent_module, "RepoTools", _FakeRepo)
-    monkeypatch.setattr(bench_agent_module, "render_delegated_context", fail_render)
+    monkeypatch.setattr(agent_type, "_solve_task", fail_solve)
     agent = agent_type(llm=FakeLLMClient(), working_dir=str(tmp_path))
     try:
         with pytest.raises(ValueError, match="invalid supplied context"):
             await agent.delegate("inspect", {"reference": "data"})
-        assert shells == [agent.shell]
+        assert len(shells) == 2
+        assert shells[1].closed
+        assert not getattr(agent.shell, "closed", False)
     finally:
         await agent.aclose()
 
@@ -518,11 +538,12 @@ async def test_delegate_launches_isolated_subagent_of_same_type(agent_type, monk
         how_to_verify="pytest -q tests/test_parser.py",
     )
 
-    async def fake_solve(self, description: str):
+    async def fake_solve(self, description: str, supplied_context=None):
         observed.update(
             child_type=type(self),
             child=self,
             description=description,
+            supplied_context=supplied_context,
             cwd=str(self.shell.cwd),
             depth=self._delegation_depth,
             max_depth=self._max_delegation_depth,
@@ -550,11 +571,8 @@ async def test_delegate_launches_isolated_subagent_of_same_type(agent_type, monk
     assert observed["child"] is not agent
     assert observed["child"].llm is llm
     assert observed["child"]._summarization is config
-    assert observed["description"].startswith(
-        "inspect parser\n\nSupplied context (untrusted reference data"
-    )
-    assert "Investigate empty parser input" not in observed["description"]
-    assert "<Todo>" in observed["description"]
+    assert observed["description"] == "inspect parser"
+    assert observed["supplied_context"] is todo
     assert observed["cwd"] == str(tmp_path)
     assert observed["depth"] == 1
     assert observed["max_depth"] == 4
@@ -571,7 +589,7 @@ async def test_delegate_todo_merges_worker_description(agent_type, monkeypatch, 
         how_to_verify="pytest -q tests/test_parser.py",
     )
 
-    async def fake_solve(self, description: str):
+    async def fake_solve(self, description: str, supplied_context=None):
         delegated = self.todo.list_todos()[0]
         assert delegated is not task
         assert description.startswith(f"{task.title}\n\nWork on active todo {task.id}.")
@@ -605,7 +623,7 @@ async def test_delegate_todo_does_not_merge_when_close_fails(monkeypatch, tmp_pa
         how_to_verify="pytest -q tests/test_parser.py",
     )
 
-    async def fake_solve(self, description: str):
+    async def fake_solve(self, description: str, supplied_context=None):
         self.todo.comment(self.todo.list_todos()[0], "worker finding")
         return expected
 
@@ -653,6 +671,13 @@ def test_problem_statement_skips_blank_primary_field():
         )
         == "use this"
     )
+
+
+def test_capability_and_delegation_examples_are_host_independent():
+    from nooa.tools.method_writing_lib import MethodWriting
+
+    assert "doc(self.methodwriting)" not in MethodWriting.__doc__
+    assert "await self.delegate(objective, supplied_context)" in RLMBenchAgent._solve_task.__doc__
 
 
 @pytest.mark.asyncio
@@ -723,18 +748,18 @@ async def test_solve_task_uses_v2_single_tool_contract(agent_type, tmp_path):
         assert "<self" in system_prompt
         assert "You are an autonomous software engineering agent." in system_prompt
         assert "Solve the supplied task completely." in rendered
-        assert "doc(self.methodwriting)" in rendered
+        assert "MethodWriting" in rendered
         assert "doc(self.writing)" not in rendered
         assert "supplied_context" in rendered
         # The prefix uses concise docs; doc(self.delegate) expands the guidance.
-        assert "untrusted reference data" in doc(agent.delegate)
+        assert "ordinary method argument" in doc(agent.delegate)
         assert len(system_prompt) < 20_000
     finally:
         await agent.close()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("conflict", ["title", "dependency"])
+@pytest.mark.parametrize("conflict", ["title", "dependency", "removed"])
 async def test_delegation_merge_failure_keeps_result_and_worker_state(
     monkeypatch, tmp_path, conflict
 ):
@@ -742,15 +767,17 @@ async def test_delegation_merge_failure_keeps_result_and_worker_state(
 
     expected = TaskResult(solution_description="done", evidence="passed", how_to_verify="true")
 
-    async def fake_solve(self, description):
+    async def fake_solve(self, description, supplied_context=None):
         delegated = self.todo.list_todos()[0]
         self.todo.comment(delegated, "useful finding")
         if conflict == "title":
             agent.todo.update(task, title="parent edit")
             self.todo.update(delegated, title="worker edit")
-        else:
+        elif conflict == "dependency":
             child = self.todo.add("worker dependency")
             self.todo.add_dep(delegated, child)
+        else:
+            self.todo.remove(delegated)
         return expected
 
     monkeypatch.setattr(bench_agent_module, "ShellTools", _FakeShell)
@@ -763,18 +790,22 @@ async def test_delegation_merge_failure_keeps_result_and_worker_state(
             await agent.delegate(task)
         assert caught.value.result == expected
         restored = bench_agent_module.TodoManager(caught.value.worker_state)
-        assert restored.get(task.id).comments[0].body == "useful finding"
+        if conflict == "removed":
+            assert restored.get(task.id) is None
+            assert "disappeared" in str(caught.value)
+        else:
+            assert restored.get(task.id).comments[0].body == "useful finding"
         assert task.comments == []
         assert task.deps == []
         if conflict == "title":
             assert task.title == "parent edit"
-        else:
+        elif conflict == "dependency":
             assert restored.get(task.id).deps[0] == restored.list_todos()[1].id
     finally:
         await agent.close()
 
 
-def test_leaf_context_renderer_does_not_import_coding_application():
+def test_bench_import_does_not_import_coding_application():
     import subprocess
     import sys
 
@@ -784,8 +815,8 @@ def test_leaf_context_renderer_does_not_import_coding_application():
             "-c",
             """
 import sys
-from nooa_cli.coding.context_rendering import render_delegated_context
-assert render_delegated_context({'x': 1})
+from nooa_bench import bench_agent
+assert bench_agent.BenchAgent
 for name in ('agent', 'activity', 'slash_commands', 'settings'):
     assert 'nooa_cli.coding.' + name not in sys.modules, name
 """,

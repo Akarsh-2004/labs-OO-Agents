@@ -164,7 +164,7 @@ def _public_json_default(value: Any) -> Any:
     return str(value)
 
 
-def _write_trajectory(agent: Any) -> None:
+def _write_trajectory(agent: Any) -> bool:
     """Dump the agent's full event history to LOGS_DIR/trajectory.json.
 
     The OTLP spans under ``agent/traces/`` remain the canonical record, but
@@ -173,10 +173,18 @@ def _write_trajectory(agent: Any) -> None:
     the final response.  Anyone looking there for the turn-by-turn trajectory
     previously found nothing.
     """
+    # Reused log directories must not label a previous task's data as this run.
+    out = LOGS_DIR / "trajectory.json"
+    try:
+        out.unlink(missing_ok=True)
+        (LOGS_DIR / "behavior.json").unlink(missing_ok=True)
+    except OSError as e:
+        logger.warning("Could not invalidate old trajectory artifacts: %s", e)
+        return False
     manager = getattr(agent, "event_manager", None)
     if manager is None:
         logger.warning("Agent exposes no event_manager — no trajectory written")
-        return
+        return False
 
     try:
         events = [
@@ -195,15 +203,15 @@ def _write_trajectory(agent: Any) -> None:
         ]
     except Exception as e:  # never fail the task over a debug artifact
         logger.warning("Could not serialise trajectory: %s", e)
-        return
+        return False
 
-    out = LOGS_DIR / "trajectory.json"
     try:
         out.write_text(json.dumps(events, indent=2, default=_public_json_default))
     except Exception as e:  # debug serialization must not invalidate a completed task
         logger.warning("Could not write %s: %s", out, e)
-        return
+        return False
     logger.info("Trajectory written → %s (%d events)", out, len(events))
+    return True
 
 
 def _write_behavior_report(model: str, agent_type: str) -> None:
@@ -287,8 +295,8 @@ async def _run(
         result = await agent._run_evaluation(task_input)
         result.update(get_task_tokens())
         _write_result(result, model, agent_type)
-        _write_trajectory(agent)
-        _write_behavior_report(model, agent_type)
+        if _write_trajectory(agent):
+            _write_behavior_report(model, agent_type)
         _write_answer(result)
 
         if result.get("success"):

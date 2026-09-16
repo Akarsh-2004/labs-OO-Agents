@@ -42,6 +42,81 @@ def _response(code: str, call_id: str = "call_1") -> LLMResponse:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "strategy_type,tool_name", [(CodeActStrategy, "execute_python"), (CodeActV2, "python_cell")]
+)
+async def test_current_call_id_matches_events(strategy_type, tool_name):
+    code = (
+        "call = self.runtime.current_call\n"
+        "events = self.runtime.event_manager.filter(call_id=call.id)\n"
+        "return_result({'count': len(events), 'id': call.id, "
+        "'tag': getattr(call, 'task_tag', None)})"
+    )
+    llm = FakeLLMClient(
+        scripted_responses=[
+            LLMResponse(
+                tool_calls=[
+                    ToolCall(id="cell", name=tool_name, arguments=json.dumps({"code": code}))
+                ],
+                finish_reason="tool_calls",
+            )
+        ]
+    )
+
+    class TestAgent(Agent, llm=llm):
+        @strategy(strategy_type(config=CodeActConfig(prefill=None)))
+        async def answer(self) -> dict:
+            """Inspect this invocation's events."""
+            ...
+
+    agent = TestAgent()
+    try:
+        result = await agent.answer()
+        assert result["count"] > 0
+        task = next(event for event in agent.events.query(type="Task"))
+        assert task.metadata["call_id"] == result["id"]
+        assert task.tag == result["tag"]
+        assert result["id"] != result["tag"]
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.parametrize("replacement", [42, [1, 2], json])
+def test_cell_state_uses_rebound_input_type(replacement):
+    from nooa.strategies.current_call import CurrentCall
+
+    call = CurrentCall(id="id", method_name="answer", decorator="strategy", kwargs={"value": "old"})
+    call.execution_locals = {"value": replacement}
+    state = CodeActV2._cell_state(call)
+    assert state["cell_locals"]["value"] == type(replacement).__name__
+
+
+@pytest.mark.asyncio
+async def test_opaque_return_validation_hint_names_python_cell():
+    llm = FakeLLMClient(
+        scripted_responses=[
+            _response("return_result(42)"),
+            _response("return_result(json)", "fixed"),
+        ]
+    )
+
+    class TestAgent(Agent, llm=llm):
+        @strategy(CodeActV2(config=CodeActConfig(prefill=None)))
+        async def answer(self) -> ModuleType:
+            """Return the json module."""
+            ...
+
+    agent = TestAgent()
+    try:
+        assert await agent.answer() is json
+        errors = "\n".join(event.stderr for event in agent.events.query(type="PythonOutput"))
+        assert "Hint: Use python_cell()" in errors
+        assert "Hint: Use execute_python()" not in errors
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
 async def test_integer_collapse_succeeds_without_warning():
     llm = FakeLLMClient(
         scripted_responses=[

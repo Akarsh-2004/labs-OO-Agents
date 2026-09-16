@@ -42,3 +42,40 @@ async def test_repeated_cancellation_and_concurrent_close_wait_for_all_callbacks
     assert calls == ["second", "first"]
     await manager.aclose()
     assert calls == ["second", "first"]
+
+
+async def test_close_callback_can_reenter_via_a_child_task():
+    manager = EventManager()
+    children = []
+    completed_inside_callback = []
+
+    async def callback():
+        child = asyncio.create_task(manager.aclose())
+        children.append(child)
+        done, _ = await asyncio.wait([child], timeout=0.2)
+        completed_inside_callback.append(child in done)
+
+    manager.on_close(callback)
+    await manager.aclose()
+    await asyncio.gather(*children)
+    assert completed_inside_callback == [True]
+
+
+async def test_cancelled_callback_does_not_drop_remaining_cleanup():
+    manager = EventManager()
+    calls = []
+
+    async def first():
+        calls.append("first")
+
+    async def second():
+        calls.append("second")
+        raise asyncio.CancelledError
+
+    manager.on_close(first)
+    manager.on_close(second)
+    results = await asyncio.gather(manager.aclose(), manager.aclose(), return_exceptions=True)
+    assert results == [None, None]
+    assert calls == ["second", "first"]
+    await manager.aclose()
+    assert calls == ["second", "first"]

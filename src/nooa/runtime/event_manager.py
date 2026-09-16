@@ -16,6 +16,7 @@ import logging
 import re
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any
 
 from nooa.agentdoc import pformat
@@ -49,6 +50,10 @@ EventHandler = Callable[[EventBase], None]
 
 # Monotonic counter for stable EventManager identity (middleware re-entry guard).
 _em_id_counter = itertools.count(1)
+
+# Cleanup descendants inherit this context, even when a callback uses create_task.
+# Track drain tasks rather than managers so a stale child cannot skip a later drain.
+_close_drains: ContextVar[tuple[asyncio.Task, ...]] = ContextVar("nooa_close_drains", default=())
 
 # Old rows are migrated at the persistence boundary, but subscriptions are
 # executable application code and should be updated instead of silently going
@@ -262,8 +267,8 @@ class EventManager:
         owner from interrupting a component while it still uses shared resources.
         This does not close storage.
         """
-        if asyncio.current_task() is self._close_task:
-            return  # A cleanup callback may close its owner recursively.
+        if self._close_task is not None and self._close_task in _close_drains.get():
+            return  # A cleanup callback (or its child) may close its owner recursively.
         if self._close_task is None:
             self._close_task = asyncio.create_task(self._drain_close_callbacks())
         task = self._close_task
@@ -283,12 +288,21 @@ class EventManager:
 
     async def _drain_close_callbacks(self) -> None:
         """Own callbacks until their reverse-order cleanup has finished."""
-        callbacks, self._close_callbacks = self._close_callbacks, []
-        for callback in reversed(callbacks):
-            try:
-                await callback()
-            except Exception:
-                logger.warning("Background component cleanup failed", exc_info=True)
+        task = asyncio.current_task()
+        assert task is not None
+        token = _close_drains.set((*_close_drains.get(), task))
+        try:
+            callbacks, self._close_callbacks = self._close_callbacks, []
+            for callback in reversed(callbacks):
+                try:
+                    await callback()
+                except asyncio.CancelledError:
+                    # Component cancellation is not cancellation of its owners.
+                    logger.warning("Background component cleanup was cancelled")
+                except Exception:
+                    logger.warning("Background component cleanup failed", exc_info=True)
+        finally:
+            _close_drains.reset(token)
 
     def set_backend(self, backend: EventBackend) -> None:
         """Swap the persistence backend; handlers and middleware are preserved."""

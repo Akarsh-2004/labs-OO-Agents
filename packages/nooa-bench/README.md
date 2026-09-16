@@ -26,6 +26,10 @@ Both delegate through an awaited call returning a `TaskResult`; neither exposes
 the interactive coding agent's background `spawn()` / job-handle API.
 The strategy allows ten retries, uses a 1,800-second cell timeout, and has no
 fixed iteration cap; configure the enclosing benchmark's time/token budget.
+Awaited delegation runs inside that same parent cell deadline. A timeout cancels
+the worker and merges no partial Todo state; the parent receives a cell timeout
+error and may try again. Cell timeouts do not consume the strategy's retry counter,
+so the enclosing harness budget is the overall limit on repeated delegations.
 Workers use the same agent type, model client and working directory, with their
 own execution context and shell. Delegation defaults to a maximum depth of four.
 Passing a Todo gives the worker an independent task copy; successful worker
@@ -52,8 +56,9 @@ sites, not actual runtime loop iterations; fan-out recognizes direct and starred
 Simple same-cell aliases of Todo, shell and repo objects are recognized; this is
 not general cross-cell dataflow analysis. Reports with another schema, content
 policy or unknown metrics are rejected; regenerate them from `trajectory.json`.
-Delegation context redaction
-uses credential-like mapping keys; arbitrary free text is not scrubbed.
+Supplied delegation context is an ordinary worker-method argument, displayed by
+NOOA's standard parameter formatting. There is no delegation-specific renderer
+or redaction policy; pass only the data the worker needs.
 Failure to generate the behavior report does not fail an otherwise completed
 task. Agents close their shells; the runner closes the shared model client.
 

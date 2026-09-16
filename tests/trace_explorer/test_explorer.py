@@ -37,6 +37,19 @@ from nooa.trace_explorer.explorer import (
 class TestPythonCellViewerParity:
     """The experimental Python tool renders like legacy execute_python."""
 
+    @pytest.mark.asyncio
+    async def test_no_id_execution_does_not_borrow_the_next_turn_context(self):
+        before = LLMTurn(
+            "s", [LLMMessage(role="user", content="original request")], "pass", "model"
+        )
+        execution = ExecutionTurn("pass", "", None, None)
+        after = LLMTurn("s", [LLMMessage(role="user", content="different request")], "", "model")
+        session = AgentSession("s", "Agent", "answer", None, turns=[before, execution, after])
+        rendered = await TraceExplorer([session], "trace.jsonl").get_turn("s", 1)
+        assert "## LLM Context (from turn 0)" in rendered
+        assert "original request" in rendered
+        assert "different request" not in rendered
+
     @pytest.mark.parametrize("tag", ["python_cell_context", "python_cell_state"])
     def test_context_tags_are_not_execution_prefills(self, tag):
         assert _extract_prefill_inputs(f"<{tag}>Stdout:\nkeep context</{tag}>") is None

@@ -3782,31 +3782,31 @@ class TraceExplorer:
                     break
         if adjacent_turns:
             context_turn_idx, context_llm_turn, context_source = adjacent_turns[0]
-        if (
-            not turn.tool_call_id
-            and turn_index + 1 < len(session.turns)
-            and isinstance(session.turns[turn_index + 1], LLMTurn)
-        ):
-            context_turn_idx = turn_index + 1
-            context_llm_turn = session.turns[context_turn_idx]
-            context_source = "following"
-        if turn.tool_call_id:
-            for i, candidate, source in adjacent_turns:
-                calls = candidate.tool_calls + [
-                    tc for message in candidate.messages for tc in message.tool_calls
-                ]
-                matching_call = next(
-                    (
-                        tc
-                        for tc in calls
-                        if _is_python_tool(tc.function_name)
-                        and tc.tool_call_id == turn.tool_call_id
-                    ),
-                    None,
-                )
-                if matching_call is not None:
-                    context_turn_idx, context_llm_turn, context_source = i, candidate, source
+        for i, candidate, source in adjacent_turns:
+            calls = candidate.tool_calls + [
+                tc for message in candidate.messages for tc in message.tool_calls
+            ]
+            for tc in calls:
+                if not _is_python_tool(tc.function_name):
+                    continue
+                if turn.tool_call_id:
+                    matches = tc.tool_call_id == turn.tool_call_id
+                else:
+                    # Missing IDs alone are not evidence of a prefill. Require
+                    # matching code before borrowing a later turn's context.
+                    try:
+                        args = json.loads(tc.arguments)
+                    except (TypeError, ValueError):
+                        continue
+                    matches = (
+                        bool(turn.code) and isinstance(args, dict) and args.get("code") == turn.code
+                    )
+                if matches:
+                    matching_call = tc
                     break
+            if matching_call is not None:
+                context_turn_idx, context_llm_turn, context_source = i, candidate, source
+                break
 
         # Add self-documenting header
         lines.append(f"# Turn {turn_index}: Execution Turn")

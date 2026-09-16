@@ -39,7 +39,7 @@ class TodoComment(BaseModel):
     created_at: str = Field(default_factory=lambda: datetime.now().strftime("%Y-%m-%d %H:%M"))
 
 
-# Backward-compatible import name; both agent.v and todo.v use PersistentVars.
+# Backward-compatible import name for the task-scoped variable proxy.
 TodoVars = PersistentVars
 
 
@@ -68,6 +68,17 @@ class Todo(BaseModel):
         default_factory=list,
         description="Append-only chronological progress journal",
     )
+
+    @classmethod
+    def __restore_snapshot__(cls, data: dict[str, Any]) -> "Todo":
+        """Migrate saved tasks before the generic loader filters legacy fields."""
+        migrated = dict(data)
+        if "description" not in migrated and "notes" in migrated:
+            migrated["description"] = migrated.pop("notes")
+        # Legacy snapshots allowed arbitrary status strings (and null).
+        # Only an explicit done value is evidence of completion.
+        migrated["status"] = "done" if migrated.get("status") == "done" else "open"
+        return cls.model_validate(migrated)
 
     @property
     @hidden
@@ -168,12 +179,11 @@ class TodoManager(Skill):
         todos: dict[str, Todo] = {}
         order: list[str] = []
         for raw in data.get("todos", []):
-            if isinstance(raw, dict):
-                raw = dict(raw)
-                # Older snapshots accepted arbitrary status strings (and null).
-                # Only an explicit done value is evidence of completion.
-                raw["status"] = "done" if raw.get("status") == "done" else "open"
-            t = Todo.model_validate(raw)
+            t = (
+                Todo.__restore_snapshot__(raw)
+                if isinstance(raw, dict)
+                else Todo.model_validate(raw)
+            )
             if t.id in todos:
                 raise ValueError(f"duplicate todo id {t.id!r} in snapshot")
             todos[t.id] = t

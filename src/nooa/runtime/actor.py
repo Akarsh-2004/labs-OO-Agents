@@ -2663,10 +2663,8 @@ class ActorRuntime:
 
                 # Use the call_id already pushed by the wrapper so events added
                 # during this call have metadata["call_id"] matching the agent
-                # call stack.  NOTE: strategies may later mutate call.id (e.g.
-                # CodeActStrategy sets it to the task event tag), so
-                # _prepare_context uses _agent_call_id (the stack value) for
-                # EventQuery.current_call() filtering, not current_call.id.
+                # call stack and runtime.current_call.id. CodeAct stores its
+                # display-only Task event tag separately on call.task_tag.
                 call_id = self._agent_call_id or str(uuid4())
                 call = CurrentCall(
                     id=call_id,

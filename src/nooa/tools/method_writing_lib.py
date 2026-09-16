@@ -55,8 +55,6 @@ class MethodWriting(Skill):
     interpretation). These tasks need LLM reasoning — delegate to a
     ``@strategy(PredictStrategy())`` standalone function.
 
-    Load this skill:
-        doc(self.methodwriting)
     """
 
     pass

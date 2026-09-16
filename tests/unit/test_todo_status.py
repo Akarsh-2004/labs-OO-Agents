@@ -7,6 +7,55 @@ import pytest
 from nooa.tools.todo import TodoManager
 
 
+@pytest.mark.parametrize("status", ["open", "blocked", "in_progress", "done", None])
+def test_legacy_todo_restores_through_snapshot_deserializer(status):
+    from copy import deepcopy
+
+    from nooa.storage.serialization import deserialize, serialize
+
+    manager = TodoManager()
+    dependency = manager.add("dependency")
+    task = manager.add("restore me", deps=[dependency], description="legacy notes to preserve")
+    task.v.checked = {"count": 3}
+    manager.comment(task, "legacy comment")
+    blob, allowlist = serialize(manager)
+    # Main snapshots contain nested typed Todo envelopes, not to_dict() output.
+    data = blob["data"]["_todos"][task.id]["data"]
+    data["notes"] = data.pop("description")
+    data["status"] = status
+    data["comments"][0]["data"].pop("id")
+    blob["data"].pop("_active_id")
+    original = deepcopy(blob)
+
+    restored = deserialize(blob, allowlist)
+
+    result = restored.get(task.id)
+    assert result.description == "legacy notes to preserve"
+    assert result.status == ("done" if status == "done" else "open")
+    assert result.deps == [dependency.id]
+    assert result.v.checked == {"count": 3}
+    assert result.comments[0].body == "legacy comment"
+    assert result.comments[0].id
+    assert result.created_at == task.created_at
+    assert blob == original
+    current_blob, current_allowlist = serialize(restored)
+    assert deserialize(current_blob, current_allowlist).to_dict() == restored.to_dict()
+
+
+def test_todo_snapshot_prefers_description_and_keeps_live_status_validation():
+    from nooa.storage.serialization import deserialize, serialize
+    from nooa.tools.todo import Todo
+
+    todo = Todo(description="current")
+    blob, allowlist = serialize(todo)
+    blob["data"]["notes"] = "obsolete"
+    assert deserialize(blob, allowlist).description == "current"
+    with pytest.raises(ValueError):
+        Todo(status="blocked")
+    with pytest.raises(ValueError):
+        todo.status = "blocked"
+
+
 def test_usage_example_activates_each_task_before_work():
     import inspect
     import textwrap

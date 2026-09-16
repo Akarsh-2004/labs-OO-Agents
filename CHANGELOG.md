@@ -6,6 +6,15 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Restore legacy Todo notes and statuses through the stored-session deserializer,
+  and retain completed worker results when a delegated Todo disappears.
+  Cleanup handles child-task re-entry and continues after a callback is cancelled,
+  without cancelling unrelated callers.
+- Keep CodeAct call correlation IDs separate from task display tags, report live
+  input types after reassignment, and correct V2 tool/delegation hints. Benchmark
+  working-directory context is untraced; failed trajectory exports no longer
+  reuse a previous task's metrics. No-ID trace attribution requires matching code
+  before selecting a later LLM turn.
 - `self.events.collapse()` accepts integer endpoints that identify existing events,
   including mixed string/integer ranges over prior summaries, without warnings.
   Invalid numeric endpoints leave history unchanged.
@@ -25,7 +34,7 @@ to follow semantic versioning.
   Authenticated HTTP requests warn that bearer tokens are unencrypted; existing
   HTTP viewer/exporter setups remain supported. Use HTTPS or a trusted local
   connection/tunnel. The warning includes neither the token nor the URL.
-- `CurrentCall` is a mutable invocation record; strategies bind its event ID and
+- `CurrentCall` is a mutable invocation record; strategies bind its task tag and
   live execution namespace with ordinary public-field assignment during setup.
 - Breaking: remove `CodeActLiteStrategy` and its experimental exports. Use
   `CodeActStrategy` for the existing two-tool contract or `CodeActV2` for the
@@ -34,8 +43,9 @@ to follow semantic versioning.
   trajectories; make Todo updates/restores atomic and delegation merge failures
   recoverable. Behavior reports use schema version 2; regenerate older reports
   from their trajectories before comparing results.
-- Benchmark agents release resources through `aclose()` as well as `close()`;
-  delegation prepares reference data before allocating a worker. Todo metadata
+- Benchmark agents release resources through `aclose()` as well as `close()`.
+  Supplied delegation context uses ordinary method-argument formatting, without
+  a custom renderer or redaction policy. Todo metadata
   and comment read-back methods are now included in model-facing documentation.
   Cancellation during shutdown is propagated only after background cleanup drains.
 - `CodeActStrategy` remains the default strategy, but its model-facing behavior
