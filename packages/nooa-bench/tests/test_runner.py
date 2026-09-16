@@ -209,7 +209,7 @@ async def test_runner_executes_delegation_and_preserves_provider_turns(
                 "self.todo.comment(task, 'Observed verification')\n"
                 "self.todo.set_var(task, 'checked', True)\n"
                 "return_result(TaskResult(solution_description='Verified workspace', "
-                "evidence=checked.stdout, command_to_verify='true'))",
+                "evidence=checked.stdout, how_to_verify='true'))",
                 "worker-check",
             ),
             response(

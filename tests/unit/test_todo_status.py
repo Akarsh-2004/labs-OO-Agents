@@ -7,6 +7,21 @@ import pytest
 from nooa.tools.todo import TodoManager
 
 
+def test_usage_example_activates_each_task_before_work():
+    import inspect
+    import textwrap
+    from types import SimpleNamespace
+
+    example = textwrap.dedent(inspect.getdoc(TodoManager).split("Example::", 1)[1])
+    assert "self.todo.activate(explore)" in example
+    assert "self.todo.activate(fix)" in example
+    manager = TodoManager()
+    scope = {"self": SimpleNamespace(todo=manager)}
+    exec(example, scope)
+    assert scope["explore"].status == "done"
+    assert manager.active() is scope["fix"]
+
+
 @pytest.mark.parametrize("status_first", [False, True])
 def test_invalid_update_is_atomic(status_first):
     manager = TodoManager()

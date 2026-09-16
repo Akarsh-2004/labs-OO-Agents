@@ -95,15 +95,21 @@ def test_delegated_context_is_bounded_redacted_and_repr_safe():
     assert len(bounded) <= 500
 
 
-def test_task_result_model():
+@pytest.mark.parametrize(
+    "how_to_verify", ["pytest tests/ -x", "Compare the totals in the report with the source table."]
+)
+def test_task_result_model(how_to_verify):
     """TaskResult validates required fields with solution_description."""
     r = TaskResult(
         solution_description="Fixed missing URL-encoding in auth.py with quote_plus().",
         evidence="pytest tests/ passed: 5 passed in 1.2s",
-        command_to_verify="pytest tests/ -x",
+        how_to_verify=how_to_verify,
     )
     assert "URL-encoding" in r.solution_description
-    assert "pytest" in r.command_to_verify
+    assert r.how_to_verify == how_to_verify
+    properties = TaskResult.model_json_schema()["properties"]
+    assert properties["how_to_verify"]["title"] == "How to Verify"
+    assert "command_to_verify" not in properties
 
 
 def test_trajectory_preserves_nested_json_without_private_state(monkeypatch, tmp_path):
@@ -248,7 +254,10 @@ async def test_run_evaluation_handles_non_task_result(monkeypatch, tmp_path, val
 
 
 @pytest.mark.asyncio
-async def test_run_evaluation_returns_structured_task_result(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "how_to_verify", ["pytest -q", "Compare the report totals with the source table."]
+)
+async def test_run_evaluation_returns_structured_task_result(monkeypatch, tmp_path, how_to_verify):
     shells: list[_FakeShell] = []
 
     def fake_make_shell(cwd: str, init_command=None):
@@ -261,7 +270,7 @@ async def test_run_evaluation_returns_structured_task_result(monkeypatch, tmp_pa
         return TaskResult(
             solution_description="Fixed the bug.",
             evidence="pytest passed",
-            command_to_verify="pytest -q",
+            how_to_verify=how_to_verify,
         )
 
     monkeypatch.setattr(bench_agent_module, "ShellTools", fake_make_shell)
@@ -274,12 +283,12 @@ async def test_run_evaluation_returns_structured_task_result(monkeypatch, tmp_pa
     )
 
     assert result == {
-        "response": "pytest -q",
+        "response": how_to_verify,
         "success": True,
         "result": {
             "solution_description": "Fixed the bug.",
             "evidence": "pytest passed",
-            "command_to_verify": "pytest -q",
+            "how_to_verify": how_to_verify,
         },
     }
     assert shells[-1].cwd == str(tmp_path)
@@ -315,7 +324,7 @@ async def test_run_evaluation_clears_optional_context_between_tasks(monkeypatch,
 
     async def fake_solve_task(description: str):
         return TaskResult(
-            solution_description="Fixed.", evidence="check passed", command_to_verify="true"
+            solution_description="Fixed.", evidence="check passed", how_to_verify="true"
         )
 
     monkeypatch.setattr(bench_agent_module, "ShellTools", fake_make_shell)
@@ -425,7 +434,7 @@ async def test_run_evaluation_clears_stale_todos(monkeypatch, tmp_path):
     async def fake_solve_task(description: str):
         assert agent.todo.list_todos() == []
         return TaskResult(
-            solution_description="Fixed.", evidence="check passed", command_to_verify="true"
+            solution_description="Fixed.", evidence="check passed", how_to_verify="true"
         )
 
     monkeypatch.setattr(bench_agent_module, "ShellTools", fake_make_shell)
@@ -505,7 +514,7 @@ async def test_delegate_launches_isolated_subagent_of_same_type(agent_type, monk
     expected = TaskResult(
         solution_description="Inspected parser.",
         evidence="Focused check passed.",
-        command_to_verify="pytest -q tests/test_parser.py",
+        how_to_verify="pytest -q tests/test_parser.py",
     )
 
     async def fake_solve(self, description: str):
@@ -558,7 +567,7 @@ async def test_delegate_todo_merges_worker_description(agent_type, monkeypatch, 
     expected = TaskResult(
         solution_description="Inspected parser.",
         evidence="Focused check passed.",
-        command_to_verify="pytest -q tests/test_parser.py",
+        how_to_verify="pytest -q tests/test_parser.py",
     )
 
     async def fake_solve(self, description: str):
@@ -592,7 +601,7 @@ async def test_delegate_todo_does_not_merge_when_close_fails(monkeypatch, tmp_pa
     expected = TaskResult(
         solution_description="Inspected parser.",
         evidence="Focused check passed.",
-        command_to_verify="pytest -q tests/test_parser.py",
+        how_to_verify="pytest -q tests/test_parser.py",
     )
 
     async def fake_solve(self, description: str):
@@ -657,7 +666,7 @@ async def test_solve_task_uses_v2_single_tool_contract(agent_type, tmp_path):
     """
     code = (
         "return_result(TaskResult(solution_description='done', evidence='ran true', "
-        "command_to_verify='true'))"
+        "how_to_verify='true'))"
     )
     llm = FakeLLMClient(
         scripted_responses=[
@@ -715,7 +724,7 @@ async def test_delegation_merge_failure_keeps_result_and_worker_state(
 ):
     from nooa_bench.bench_agent import DelegationMergeError
 
-    expected = TaskResult(solution_description="done", evidence="passed", command_to_verify="true")
+    expected = TaskResult(solution_description="done", evidence="passed", how_to_verify="true")
 
     async def fake_solve(self, description):
         delegated = self.todo.list_todos()[0]
@@ -791,7 +800,7 @@ async def test_original_task_remains_after_prefill_compaction(tmp_path):
             response(
                 "assert Todo is not None and TodoManager is not None and ShellTools is not None "
                 "and RepoTools is not None and MethodWriting is not None\n"
-                "return_result(TaskResult(solution_description='done', evidence='ok', command_to_verify='true'))",
+                "return_result(TaskResult(solution_description='done', evidence='ok', how_to_verify='true'))",
                 "two",
             ),
         ]

@@ -6,6 +6,9 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Rename the benchmark `TaskResult.command_to_verify` field to `how_to_verify`
+  ("How to Verify"): concrete verification steps and expected results, not
+  necessarily a shell command. Result JSON and runner answers use the new field.
 - Reject ambiguous `ShellTools.replace(match, old, new)` calls before file access,
   with guidance for full-region versus path-based substring replacement.
 - Add `CodeActV2`, the single-`python_cell` strategy with in-cell `return_result`.

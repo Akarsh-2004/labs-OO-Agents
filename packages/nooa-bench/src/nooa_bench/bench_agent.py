@@ -12,7 +12,7 @@ Core contract:
 - ``self.repo`` for code navigation that returns ShellTools Match anchors
 - ``self.todo`` for optional structured progress tracking
 - Structured return: the agent must declare solution_description, evidence,
-  and command_to_verify when finishing -- forcing reflection before return.
+  and how_to_verify when finishing -- forcing reflection before return.
 """
 
 from __future__ import annotations
@@ -78,11 +78,15 @@ class TaskResult(BaseModel):
         description=(
             "Concrete evidence that the task is done: what tests passed, "
             "what output was produced, what behavior changed. Not a guess -- "
-            "cite the actual shell output you observed."
+            "cite the actual results you observed."
         )
     )
-    command_to_verify: str = Field(
-        description="A shell command a verifier can run to confirm correctness (exit 0 on success)."
+    how_to_verify: str = Field(
+        title="How to Verify",
+        description=(
+            "How a verifier can confirm correctness: concrete checks or steps and their "
+            "expected results. Include commands when appropriate; a shell command is not required."
+        ),
     )
 
 
@@ -217,7 +221,7 @@ class BenchAgent(
             result = await self._solve_task(description)
             if isinstance(result, TaskResult):
                 return {
-                    "response": result.command_to_verify,
+                    "response": result.how_to_verify,
                     "success": bool(result.solution_description),
                     "result": result.model_dump(),
                 }
@@ -308,6 +312,6 @@ class BenchAgent(
         Inspect before editing. Plan with ``self.todo`` only when useful. Make the
         minimum sufficient change, preserve unrelated work, and run relevant tests.
         Then call ``return_result(TaskResult(...))`` with the root cause and fix,
-        concrete observed evidence, and one verifier command that exits zero.
+        concrete observed evidence, and how to verify the result.
         """
         ...

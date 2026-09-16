@@ -132,8 +132,10 @@ class TodoManager(Skill):
 
         explore = self.todo.add("Explore the repository")
         fix = self.todo.add("Implement the fix", deps=[explore])
+        self.todo.activate(explore)
         self.todo.comment(explore, "Found the relevant code in parser.py")
         self.todo.complete(explore)
+        self.todo.activate(fix)
         print(self.todo.status())
     """
 
