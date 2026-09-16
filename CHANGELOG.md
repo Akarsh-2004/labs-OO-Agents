@@ -12,8 +12,9 @@ to follow semantic versioning.
   stub without a second execution-context block.
 - Trace explorer viewer requests now send configured viewer authentication and
   honor proxy environment settings, including `NO_PROXY` for direct access.
-  Authenticated requests require HTTPS; cleartext URLs fail before sending a
-  bearer token. Unauthenticated local HTTP access remains supported.
+  Authenticated HTTP requests warn that bearer tokens are unencrypted; existing
+  HTTP viewer/exporter setups remain supported. Use HTTPS or a trusted local
+  connection/tunnel. The warning includes neither the token nor the URL.
 - `CurrentCall` is a mutable invocation record; strategies bind its event ID and
   live execution namespace with ordinary public-field assignment during setup.
 - Breaking: remove `CodeActLiteStrategy` and its experimental exports. Use

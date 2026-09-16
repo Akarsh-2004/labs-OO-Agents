@@ -16,6 +16,7 @@ Usage:
 
 from __future__ import annotations
 
+import warnings
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -25,10 +26,15 @@ from nooa.tracing._viewer_auth import apply_viewer_auth
 
 
 def _viewer_headers(url: str) -> dict[str, str]:
-    """Refuse cleartext bearer authentication before constructing an HTTP client."""
+    """Keep viewer/exporter HTTP compatibility while warning about cleartext auth."""
     headers = apply_viewer_auth({})
     if headers and urlsplit(url).scheme != "https":
-        raise ValueError("Authenticated viewer requests require an HTTPS endpoint.")
+        warnings.warn(
+            "Viewer bearer authentication over HTTP is unencrypted. "
+            "Use HTTPS or a trusted local connection/tunnel.",
+            UserWarning,
+            stacklevel=2,
+        )
     return headers
 
 
@@ -39,9 +45,9 @@ class TraceExplorerClient:
     analysis server-side, avoiding the need to download and parse
     all spans locally.
 
-    Configured bearer authentication requires an HTTPS base URL. HTTP remains
-    available for unauthenticated local viewers. Proxy and NO_PROXY settings
-    follow httpx's environment handling.
+    HTTPS is recommended for bearer authentication. HTTP remains supported for
+    compatibility with the viewer and exporters, with an unencrypted-auth warning.
+    Proxy and NO_PROXY settings follow httpx's environment handling.
     """
 
     def __init__(self, base_url: str, session_id: str, *, timeout: float = 60.0):

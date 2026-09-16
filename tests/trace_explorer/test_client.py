@@ -295,11 +295,12 @@ async def test_client_honors_env_proxy_and_no_proxy(monkeypatch, no_proxy):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("token", [None, "   ", " test-viewer-token "])
 @pytest.mark.parametrize("scheme", ["http", "https"])
+@pytest.mark.parametrize("host", ["viewer.example", "localhost:5001", "[::1]:5001"])
 @pytest.mark.parametrize(
     "operation",
     ["thin", "detect", "trace", "experiment", "errors", "search", "failures", "summary"],
 )
-async def test_all_viewer_requests_use_configured_auth(monkeypatch, token, operation, scheme):
+async def test_all_viewer_requests_use_configured_auth(monkeypatch, token, operation, scheme, host):
     """Every viewer entry point authenticates, without adding a header when unset."""
     from nooa.trace_explorer import explorer
 
@@ -322,9 +323,9 @@ async def test_all_viewer_requests_use_configured_auth(monkeypatch, token, opera
         )
 
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", handle)
-    url = f"{scheme}://viewer.example"
-    blocked = bool(token and token.strip() and scheme == "http")
-    with pytest.raises(ValueError, match="HTTPS") if blocked else nullcontext():
+    url = f"{scheme}://{host}"
+    unencrypted = bool(token and token.strip() and scheme == "http")
+    with pytest.warns(UserWarning, match="unencrypted") if unencrypted else nullcontext():
         if operation == "thin":
             assert await TraceExplorerClient(url, "test-session").get_overview() == "ok"
         elif operation == "detect":
@@ -341,12 +342,23 @@ async def test_all_viewer_requests_use_configured_auth(monkeypatch, token, opera
             await explorer._handle_experiment_failures(url, "experiment")
         else:
             await explorer._handle_experiment(url, "experiment")
-    if blocked:
-        assert not requests
-        return
     assert requests
     expected = "Bearer test-viewer-token" if token and token.strip() else None
     assert all(request.headers.get("Authorization") == expected for request in requests)
+
+
+def test_http_auth_warning_contains_no_credentials_or_endpoint(monkeypatch):
+    """The compatibility warning is actionable without disclosing connection details."""
+    from nooa.trace_explorer.client import _viewer_headers
+
+    monkeypatch.setenv("NOOA_VIEWER_AUTH_TOKEN", "offline-secret-sentinel")
+    with pytest.warns(UserWarning, match="unencrypted") as captured:
+        headers = _viewer_headers("http://private-viewer.example:5001")
+    assert headers == {"Authorization": "Bearer offline-secret-sentinel"}
+    text = str(captured[0].message)
+    assert "offline-secret-sentinel" not in text
+    assert "private-viewer" not in text
+    assert "HTTPS" in text
 
 
 @pytest.mark.asyncio
