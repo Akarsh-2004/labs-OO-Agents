@@ -98,17 +98,20 @@ presets and `--no-probe` do not apply. Stages normally never prompt; explicitly
 passing `--prompt-key` enables one masked credential prompt on stderr, leaving
 JSON on stdout. Pasted keys are not persisted or included in reproduction commands.
 `--budget-tokens` defaults to
-131,072; `--output-tokens` controls connection/tool check caps, while
-`--reasoning-output-tokens` controls reasoning checks (4,096 by default). Session checks retain their
-separate documented cap. Redirect stdout to keep stage reports; `--output` is
+131,072. `--output-tokens` controls only initial interface discovery.
+Configured routing, tools, reasoning and conversation checks send the saved
+`--max-tokens` value, or the selected level's cap. `--reasoning-output-tokens`
+is retained for command compatibility but no longer overrides configured caps.
+Redirect stdout to keep stage reports; `--output` is
 the registry target for `save` only. Replacing an existing alias requires `--yes`
 and prints a warning to stderr. Saving an untested plan does not validate it.
 
-Reports have `version`, `stage`, `ok`, `data`, `checks`, `error`, `run_context`, and
+Reports have `version`, `stage`, `ok`, `data`, `checks`, `error`, `run_context`, `warnings`, and
 `diagnostic_prompt`. Exit 0 means the stage met its criterion; 1 means failure
 or missing evidence, not proof of unsupported features; 2 means invalid stage
 options. Request acceptance alone is not success for tools or enabled reasoning
-checks. A session requires both substantial cache reuse and retained reasoning.
+checks. A session requires retained reasoning; a provider cache miss with a stable
+prefix is a warning, not a broken connection.
 The diagnostic prompt includes safe route/credential-variable names and outcomes,
 not key values, raw provider error bodies, or returned reasoning. It asks an
 agent to investigate, repair, and rerun the affected stage within configured
@@ -209,12 +212,14 @@ budget, or choose Custom to edit the number. Higher options appear only above th
 recommendation and within known model limits; they do not change the reasoning
 level itself. Smaller options appear only when
 below the recommendation. Connect offers the catalogue's output recommendation when available,
-otherwise 32,768 (labelled NOOA default), bounded by the known ceiling and context
-window. Existing entries keep their current setting. The budget includes thinking
+otherwise 32,768 (labelled NOOA default), bounded by the known ceiling and half the
+known context window. Explicit caps may exceed half the window but must leave
+room for input: a cap at or above the window is rejected before saving.
+Existing entries keep their current setting. The budget includes thinking
 and the final answer; short replies use fewer tokens. The custom editor shows the
 known upper limit as a constraint, not as a suggested allocation.
 `--max-tokens N` (also `--reply-tokens N`) sets it in scripted or interactive
-mode; `--output-tokens` still controls only the small setup probes.
+mode; `--output-tokens` controls only initial interface discovery.
 The library's `configure_entry()` and `write()` enforce the same defaults,
 including on stage-save input created before these fields were required.
 Keep reply caps, and Responses `store`/`include`, at the entry's top level:
@@ -252,19 +257,18 @@ final question. It does not execute tools or invent reasoning state. It reports:
   controls survived on the wire. Ordinary text fallback does not count as retained
   reasoning. Missing evidence says “not confirmed,” not “reasoning is disabled.”
 
-These calls use the saved reply cap when the shared budget permits. Otherwise
-they start at at most 2,048 output tokens each and reserve up to 43,008 estimated tokens
-within the initial shared budget (131,072 by default). Connection/tool checks retain their
-200-token output cap; reasoning checks have 4,096 tokens each. Only a conversation
-reply with stop reason `length` may retry: twice per turn, doubling the reply cap
-each time, never above the saved limit or a reasoning level's fixed cap. The same
-input is resent; truncated replies are never added to history. All attempts are
-charged, and a retry must leave enough approved budget for the remaining turns.
-The approval therefore covers up to nine conversation calls. Errors and filtered
-replies do not retry. Checks stop rather than increase the approved budget.
-Successful rows hide the test cap; retry rows explain the increase, and detailed
-JSON retains per-attempt caps, stop reasons and usage. Testing with a reduced cap
-confirms only cache/replay behaviour, not that the full saved cap is accepted.
+These calls send the configured reply cap, including the selected reasoning
+level's override. The three-turn reservation is `3 * (8192 + 3 * cap)`, accounting
+for reusable input and earlier replies. If that does not fit the remaining approved
+budget, the conversation check is skipped; Connect never silently lowers the cap.
+For example, a 32,768 cap requires a 319,488-token conversation reservation,
+more than the default shared budget. Choose a larger approved budget explicitly
+to run it. Routing/tool/level checks each reserve their configured cap plus 512.
+There are no automatic length retries: truncation at the configured cap is
+inconclusive, and the partial response is never replayed. To try a larger cap,
+edit the configuration and rerun the affected checks within your allowance.
+Detailed JSON retains configured/tested caps, stop reasons and usage. A saved cap
+without an accepted wire-verified check is labelled unverified.
 These are estimates, not billing limits: servers can ignore caps. Use
 `--budget-tokens` before setup to choose another budget. Small context windows,
 incompatible reply caps, failures or insufficient budget leave the conversation
@@ -349,10 +353,10 @@ Use `--no-probe` to save without model calls, or `--probe minimal` for routing
 only (up to three interface attempts unless `--api-style` is supplied).
 The default plan also checks tools and each proposed reasoning level. The
 selected interface's successful routing request is reused, not sent twice.
-Connection/tool checks use 200 output tokens per call and a 30-second total
-deadline. Reasoning checks use 4,096 output tokens and a 120-second deadline;
+Initial interface discovery uses 200 output tokens and a 30-second deadline.
+Configured checks use the saved cap and a 120-second deadline;
 conversation-check calls also have 120 seconds per attempt. Only truncated
-conversation replies have the bounded retries described above. The CLI uses
+conversation replies do not retry automatically. The CLI uses
 the fixed budget approved at the beginning. Each basic request reserves its
 output cap plus 512 estimated input tokens. An explicit `--budget-tokens` limits
 the entire setup, including interface detection; it is never increased. Connect
@@ -424,7 +428,14 @@ asks for confirmation before replacing it. All selected checks run before the
 local alias is chosen. Names are reread at this step to catch entries added while
 checks ran. `--yes` skips save/overwrite confirmation;
 it still prints the overwrite warning. Other aliases and surrounding
-comments stay intact. Writes replace the file atomically.
+comments stay intact. Writes replace the file atomically, follow existing symlinks,
+and retain an existing registry's mode and CRLF newlines. Flow-style mappings may
+lose internal comments when rewritten; other alias values remain unchanged.
+Cooperating writers serialize the complete update through a retained adjacent
+`.FILENAME.lock` file. Files containing YAML anchors/aliases are refused with
+instructions to expand them first; Connect does not silently flatten them and
+discard comments. Literal credential fields are rejected at any nesting depth
+by the shared library, not only the JSON frontend.
 
 Unchanged accepted UnifiedLLM probes are reused when reconnecting. Older direct-HTTP
 checks are repeated: they did not test the runtime. Changing the route or
@@ -432,7 +443,26 @@ level declarations changes which probe requests can be reused; unchanged request
 on the same route remain reusable. `--output` chooses another
 file; load custom paths with `NEMO_OO_LLM_CONFIG` or `reload_registry(path)`.
 Later configuration layers can override the alias; inspect `llm_config_chain()`
-if a saved entry does not take effect.
+if a saved entry does not take effect. The wizard and save stage warn when a
+higher-priority file shadows the saved alias.
+
+### Saved routing and evidence fields
+
+New entries include `transport: direct`, selecting the SDK transport once direct
+support (#337) is installed. Earlier runtimes ignore this field and continue using
+LiteLLM; checks on those runtimes are not evidence of direct-transport behavior.
+Each completed check records the runtime's actual `transport` separately.
+If the runtime bypasses Connect's owned HTTP pool (for example an unauthenticated
+legacy fallback), accepted requests are labelled unobserved, not as settings
+proven missing from the wire.
+Edits preserve explicit `transport: litellm` choices. `api_style` identifies the
+wire interface for Connect and the forthcoming direct runtime. Connect does not
+infer a `replay_vendor` from an interface or model name.
+
+`provenance` contains diagnostic evidence and metadata, not runtime request
+settings. Catalogue identity belongs under `provenance.catalogue.id`, not
+`underlying_model`. Successful tools are recorded in `provenance.probes.tools`;
+Connect does not write an unused `tools: true` capability switch.
 
 ## Library interface for the TUI
 
@@ -486,8 +516,8 @@ final order. `answer_correct` scores that public answer independently of
 `reasoning_observed`; a correct answer alone does not prove reasoning was enabled.
 Per-call input, output and reasoning-token counts are included when usage is
 available. The final answer and reasoning text are not saved. The default
-reasoning-check cap is 4,096 tokens; a `length` finish is inconclusive, and an agent
-can explicitly rerun `--stage reasoning --reasoning-output-tokens 8192` within its approved
+reasoning-check cap is the configured reply limit; a `length` finish is inconclusive.
+An agent can explicitly revise it with `--stage reasoning --max-tokens 65536` within its approved
 `--budget-tokens` limit if more room is needed. There is no automatic retry.
 HTTP 400 is recorded as rejected, not unsupported. Auth, timeout and transient
 failures remain untested; failed routing or auth stops subsequent calls within
@@ -512,6 +542,13 @@ an explicit `include: []` opts out. Checks use the same client as an agent.
   Click and prompt-toolkit belong to `nooa-cli`, not NOOA core. The CLI imports
   the framework lazily; the Connect library never imports the CLI. The TUI can
   call the library directly without these presentation dependencies.
+- `_connect_wizard.py` separates connection, model selection, interfaces,
+  metadata, configuration, checks and save steps. Both frontends use the library's
+  `verdict(entry)` policy; `ProbeRecord` in `connect/_records.py` documents optional
+  evidence fields. Missing fields mean unknown evidence, not zero or unsupported.
+  `public_record()` excludes private requests from public check summaries.
+  After changing an entry in a plan, call `refresh_plan()` to rebuild detached
+  requests and reservations before running checks.
 - `tests/unifiedllm/connect/`: library budgets, exact HTTP bodies, targeted writes
   and the real registry on main, including a frontend-dependency isolation check.
 - `packages/nooa-cli/tests/test_connect*.py`: wizard approval, prompts, progress,

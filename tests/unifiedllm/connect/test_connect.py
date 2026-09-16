@@ -159,7 +159,7 @@ def test_plan_is_data_without_credentials_or_network(monkeypatch):
     assert "context_window" not in proposal.entry
     assert proposal.price_estimate is None
     assert [p.name for p in proposal.probes] == ["routing", "tools", "level:high"]
-    assert [p.body["max_tokens"] for p in proposal.probes] == [200, 200, 4096]
+    assert [p.body["max_tokens"] for p in proposal.probes] == [32768, 32768, 32768]
     assert proposal.probes[-1].body["reasoning_effort"] == "high"
 
 
@@ -207,7 +207,7 @@ async def test_minimal_approval_posts_exact_plan_once(monkeypatch, style, suffix
             {"type": "text", "text": expected["messages"][0]["content"]}
         ]
     assert kwargs["json"] == expected
-    assert kwargs["json"][token_key] == 200
+    assert kwargs["json"][token_key] == 32768
     assert kwargs["json"]["model"] == "wire/model"
     assert result.entry["provenance"]["probes"]["routing"]["outcome"] == "accepted"
     assert "secret-test-key" not in json.dumps(result.entry)
@@ -248,7 +248,7 @@ async def test_budget_stops_before_second_call_and_reconnect_skips_accepted(monk
         )
 
     mock_post(monkeypatch, post)
-    first = await connect.run(make_plan(budget_tokens=712), approved="all")
+    first = await connect.run(make_plan(budget_tokens=33280), approved="all")
     assert len(bodies) == 1
     assert first.entry["provenance"]["probes"]["tools"]["outcome"] == "not_probed"
     assert first.entry["provenance"]["probes"]["tools"]["reason"] == "budget exhausted"
@@ -391,7 +391,7 @@ async def test_real_httpx_serialization_keeps_level_blocks(monkeypatch, style, p
     assert len(sent) == 3, result.entry["provenance"]["probes"]
     assert all(
         body.get("max_output_tokens", body.get("max_tokens", body.get("max_completion_tokens")))
-        == (4096 if i == 2 else 200)
+        == proposal.entry["max_tokens"]
         for i, body in enumerate(sent)
     )
     assert all(sent[-1][key] == value for key, value in patch.items())
@@ -618,8 +618,8 @@ async def test_reconnect_keeps_observed_tools_without_spending_again(monkeypatch
         make_plan(existing_entry=first.entry), approved="all", api_key="test-key"
     )
     assert len(calls) == 2
-    assert first.entry["tools"] is True
-    assert second.entry["tools"] is True
+    assert first.entry["provenance"]["probes"]["tools"]["tool_observed"] is True
+    assert second.entry["provenance"]["probes"]["tools"]["tool_observed"] is True
 
 
 @pytest.mark.asyncio

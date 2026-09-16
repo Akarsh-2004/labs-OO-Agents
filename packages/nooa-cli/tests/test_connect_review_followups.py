@@ -90,6 +90,8 @@ def test_stage_cache_miss_does_not_fail_working_entry(monkeypatch, cached):
             "--api-style",
             "chat",
             "--prompt-key",
+            "--max-tokens",
+            "2048",
         ],
         input="test-key\n",
     )
@@ -133,7 +135,7 @@ def test_stage_plan_reuses_discovery_without_http(tmp_path, monkeypatch):
     entry = json.loads(result.stdout)["data"]["entry"]
     assert entry["context_window"] == 100000
     assert entry["max_tokens"] == 16000
-    assert not json.loads(result.stdout)["warnings"]
+    assert "unverified" in json.loads(result.stdout)["warnings"][0]
     result = CliRunner().invoke(
         command,
         [
@@ -188,13 +190,13 @@ def test_wizard_retries_only_selected_interface_at_120_seconds(tmp_path, monkeyp
         input="y\nmodel\nlonger\nchat\ny\n",
     )
     assert result.exit_code == 0, result.output
-    assert len(posts) == 4
+    assert len(posts) == 5  # Configured-cap routing is distinct from interface discovery.
     assert result.output.count("Approve API checks") == 1
     assert result.output.count("Results ·") == 1
     assert "route may be slow" in result.output
     assert "private server detail" not in result.output
     entry = yaml.safe_load(target.read_text())["models"]["local"]
-    assert entry["provenance"]["tokens_charged_to_budget"] == 4 * 712
+    assert entry["provenance"]["tokens_charged_to_budget"] == 4 * 712 + 8192 + 512
 
 
 @pytest.mark.parametrize("correct", [True, False])

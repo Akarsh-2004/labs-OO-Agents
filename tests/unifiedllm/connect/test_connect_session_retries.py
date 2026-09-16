@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Length recovery retries identical input within consent, never partial history."""
+"""Configured-cap checks stop on length; never replay partial history or raise caps."""
 
 import json
 from copy import deepcopy
@@ -16,7 +16,9 @@ from tests.unifiedllm.connect.connect_http import mock_http, response_body
 @pytest.mark.asyncio
 @pytest.mark.parametrize("style", ["chat", "responses", "anthropic"])
 @pytest.mark.parametrize("truncated_turn", [0, 1, 2])
-async def test_length_retry_preserves_input_and_replay_evidence(monkeypatch, style, truncated_turn):
+async def test_length_at_configured_cap_stops_without_replaying_partial_reply(
+    monkeypatch, style, truncated_turn
+):
     sent = []
     counts = [0, 0, 0]
     failed_pair = []
@@ -72,37 +74,35 @@ async def test_length_retry_preserves_input_and_replay_evidence(monkeypatch, sty
     ).entry
     original = deepcopy(entry)
     updates = [
-        u async for u in session_steps("test", entry, api_key="test-key", budget_tokens=200000)
+        u async for u in session_steps("test", entry, api_key="test-key", budget_tokens=400000)
     ]
     records = {u.name: u.outcome for u in updates}
-    assert len(sent) == 4
+    assert len(sent) == truncated_turn + 1
     assert entry == original
-    assert records["session"]["outcome"] == "completed"
-    assert records["cache"]["outcome"] == "confirmed"
-    assert records["reasoning_retention"]["outcome"] == "confirmed"
+    assert records["session"]["outcome"] == "not_confirmed"
+    assert "cache" not in records
+    assert "reasoning_retention" not in records
     cap_key = next(
         k
         for k in ("max_tokens", "max_output_tokens", "max_completion_tokens")
         if k in failed_pair[0]
     )
-    assert [b.pop(cap_key) for b in failed_pair] == [2048, 4096]
-    assert failed_pair[0] == failed_pair[1]
+    assert [b[cap_key] for b in failed_pair] == [32768]
     name = ("seed", "replay", "repeat")[truncated_turn]
     assert [a["finish_reason"] for a in records[f"session:{name}"]["attempts"]] == [
         "length",
-        "stop",
     ]
-    assert len([u for u in updates if u.outcome["outcome"] == "retrying"]) == 1
+    assert not any(u.outcome["outcome"] == "retrying" for u in updates)
     assert "private-reasoning-state" not in repr(records)
-    assert records["session"]["tokens_charged_to_budget"] <= 200000
+    assert records["session"]["tokens_charged_to_budget"] <= 400000
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "mode,expected_calls",
     [
-        ("length", 3),
-        ("budget", 1),
+        ("length", 1),
+        ("budget", 0),
         ("saved-cap", 1),
         ("http", 1),
         ("filter", 1),
@@ -135,12 +135,14 @@ async def test_retry_stops_at_explicit_bounds_and_never_retries_errors(
     if mode == "fixed-level":
         entry["reasoning_levels"] = {"fixed": {"max_tokens": 2048}}
         entry["reasoning_default"] = "fixed"
-    budget = 43008 if mode == "budget" else 200000
+    budget = 43008 if mode == "budget" else 400000
     updates = [
         u async for u in session_steps("test", entry, api_key="test-key", budget_tokens=budget)
     ]
     assert len(caps) == expected_calls
-    assert caps == [2048, 4096, 8192][:expected_calls]
-    assert updates[-1].outcome["outcome"] == "not_confirmed"
-    assert updates[-1].outcome["tokens_charged_to_budget"] <= budget
+    assert caps == (
+        [2048 if mode in {"fixed-level", "saved-cap"} else 32768] if expected_calls else []
+    )
+    assert updates[-1].outcome["outcome"] == ("not_probed" if mode == "budget" else "not_confirmed")
+    assert updates[-1].outcome.get("tokens_charged_to_budget", 0) <= budget
     assert not any(u.name in {"cache", "reasoning_retention"} for u in updates)

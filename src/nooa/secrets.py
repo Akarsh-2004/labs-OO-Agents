@@ -85,7 +85,7 @@ def write_secret_env(path, name: str, value: str) -> None:
         raise ValueError("Secret variable must be a valid environment variable name")
     if not isinstance(value, str) or not value:
         raise ValueError("Secret value cannot be empty")
-    path = Path(path)
+    path = Path(path).resolve()
     original = path.read_text() if path.exists() else None
     try:
         with path.open() as source:
@@ -94,6 +94,8 @@ def write_secret_env(path, name: str, value: str) -> None:
         data = {}
     except yaml.YAMLError:
         raise ValueError(f"Secrets file {path} contains invalid YAML; no changes made") from None
+    if isinstance(data, dict) and data.get("env") is None:
+        data["env"] = {}
     if not isinstance(data, dict) or not isinstance(data.get("env", {}), dict):
         raise ValueError(f"Secrets file {path} must contain an env mapping")
     data.setdefault("env", {})[name] = value

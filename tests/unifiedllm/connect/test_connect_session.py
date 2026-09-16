@@ -78,6 +78,7 @@ async def test_session_checks_observe_wire_and_usage(monkeypatch, style, mode):
         style,
         "https://api.test/v1",
         "",
+        reply_tokens=2048,
     )
     updates = [
         u
@@ -124,7 +125,7 @@ async def test_session_requires_budget_before_any_call(monkeypatch):
         raise AssertionError("No HTTP is approved")
 
     mock_http(monkeypatch, forbidden)
-    proposal = connect.plan("test", "gpt-5.1", "chat", "https://api.test/v1", "")
+    proposal = connect.plan("test", "gpt-5.1", "chat", "https://api.test/v1", "", reply_tokens=2048)
     updates = [
         u
         async for u in session_steps(
@@ -138,7 +139,7 @@ async def test_session_requires_budget_before_any_call(monkeypatch):
 @pytest.mark.asyncio
 async def test_plan_and_run_include_session_reservation(monkeypatch):
     mock_http(monkeypatch, lambda request: httpx.Response(200, json=response_body("chat")))
-    basic = connect.plan("test", "gpt-5.1", "chat", "https://api.test/v1", "")
+    basic = connect.plan("test", "gpt-5.1", "chat", "https://api.test/v1", "", reply_tokens=2048)
     proposal = connect.plan(
         "test",
         "gpt-5.1",
@@ -147,6 +148,7 @@ async def test_plan_and_run_include_session_reservation(monkeypatch):
         "",
         session_checks=True,
         budget_tokens=65536,
+        reply_tokens=2048,
     )
     assert proposal.token_estimate == basic.token_estimate + TOKEN_RESERVATION
     result = await connect.run(proposal, approved="all", api_key="key")
@@ -176,7 +178,9 @@ async def test_reused_probes_resolve_credentials_before_session(monkeypatch, key
 
     mock_http(monkeypatch, handle)
     monkeypatch.setenv("CONNECT_SESSION_KEY", "session-test-key")
-    proposal = connect.plan("test", "gpt-5.1", "chat", "https://api.test/v1", "CONNECT_SESSION_KEY")
+    proposal = connect.plan(
+        "test", "gpt-5.1", "chat", "https://api.test/v1", "CONNECT_SESSION_KEY", reply_tokens=2048
+    )
     checked = await connect.run(proposal, approved="all")
     assert len(sent) == 2
     sent.clear()
@@ -213,6 +217,7 @@ async def test_selected_reasoning_level_and_cache_defaults_reach_wire(monkeypatc
         "https://api.test/v1",
         "",
         reasoning_levels={"high": {"reasoning_effort": "high"}},
+        reply_tokens=2048,
     )
     before = deepcopy(proposal.entry)
     updates = [
@@ -250,6 +255,7 @@ async def test_missing_settings_are_not_reported_as_missing_replay(monkeypatch):
         "https://api.test/v1",
         "",
         reasoning_levels={"max": {"reasoning_effort": "max"}},
+        reply_tokens=2048,
     )
     proposal.entry.pop("allowed_openai_params", None)  # A pre-fix saved entry.
     updates = [
@@ -286,6 +292,7 @@ async def test_unlisted_model_declared_effort_reaches_level_and_session_requests
         reasoning_levels={"max": {"reasoning_effort": "max"}},
         session_checks=True,
         budget_tokens=65536,
+        reply_tokens=2048,
     )
     result = await connect.run(proposal, approved="all", api_key="test-key")
     assert result.entry["provenance"]["probes"]["level:max"]["settings_sent"] is True
@@ -304,7 +311,7 @@ async def test_small_cache_hit_is_not_a_success(monkeypatch):
         return httpx.Response(200, json=data)
 
     mock_http(monkeypatch, handle)
-    proposal = connect.plan("test", "gpt-5.1", "chat", "https://api.test/v1", "")
+    proposal = connect.plan("test", "gpt-5.1", "chat", "https://api.test/v1", "", reply_tokens=2048)
     updates = [
         u
         async for u in session_steps(
@@ -334,6 +341,7 @@ async def test_library_session_never_runs_without_full_approval(monkeypatch, app
         "",
         session_checks=True,
         budget_tokens=65536,
+        reply_tokens=2048,
     )
     result = await connect.run(proposal, approved=approval, api_key="key")
     assert len(bodies) == (1 if approval == "minimal" else 0)
@@ -370,7 +378,7 @@ async def test_real_tool_reply_is_replayed_without_execution(monkeypatch):
         return httpx.Response(200, json=data)
 
     mock_http(monkeypatch, handle)
-    proposal = connect.plan("test", "gpt-5.1", "chat", "https://api.test/v1", "")
+    proposal = connect.plan("test", "gpt-5.1", "chat", "https://api.test/v1", "", reply_tokens=2048)
     updates = [
         u
         async for u in session_steps(
@@ -396,7 +404,7 @@ async def test_closing_progress_iterator_closes_owned_client(monkeypatch):
 
     monkeypatch.setattr(registry, "client_from_config", track)
     mock_http(monkeypatch, lambda request: httpx.Response(200, json=response_body("chat")))
-    proposal = connect.plan("test", "gpt-5.1", "chat", "https://api.test/v1", "")
+    proposal = connect.plan("test", "gpt-5.1", "chat", "https://api.test/v1", "", reply_tokens=2048)
     steps = session_steps("test", proposal.entry, api_key="key", budget_tokens=TOKEN_RESERVATION)
     assert (await anext(steps)).name == "session:seed"
     http = clients[0]._http.httpx_async

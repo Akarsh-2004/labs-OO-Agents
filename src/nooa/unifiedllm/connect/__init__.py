@@ -15,6 +15,7 @@ import json
 import math
 import os
 import re
+import stat
 import tempfile
 import time
 from collections import deque
@@ -30,8 +31,11 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 import yaml
 
+from nooa.unifiedllm.limits import REPLY_CAP_KEYS
+
+from ._records import ProbeRecord, check_status, public_record
+
 CATALOGUE_URL = "https://openrouter.ai/api/v1/models"
-TEMPLATES = ("effort", "adaptive", "budget", "toggle", "thinking")
 DEFAULT_CHECK_BUDGET = 131072
 DEFAULT_REASONING_OUTPUT_TOKENS = 4096
 REASONING_CHECK_PROMPT = """Eight jobs—A, B, C, D, E, F, G and H—must run one at a time.
@@ -105,6 +109,9 @@ _RESERVED = {
     "custom_llm_provider",
     "extra_body",
     "client",
+    "transport",
+    "api_style",
+    "replay_vendor",
 }
 _PATHS = {"chat": "chat/completions", "responses": "responses", "anthropic": "messages"}
 
@@ -147,6 +154,7 @@ class Probe:
     body: dict[str, Any]
     token_estimate: int
     timeout_seconds: float = 30
+    uses_configured_cap: bool = True
 
 
 @dataclass(frozen=True)
@@ -189,7 +197,39 @@ class ProbeUpdate:
     """A request starting or finishing, for frontend progress display."""
 
     name: str
-    outcome: dict[str, Any]
+    outcome: ProbeRecord
+
+
+@dataclass(frozen=True)
+class Verdict:
+    """Shared result: unapproved checks are skipped; missing evidence needs attention."""
+
+    passed: tuple[str, ...]
+    needs_attention: tuple[str, ...]
+    skipped: tuple[str, ...]
+    unobserved_levels: tuple[str, ...]
+
+    @property
+    def ok(self) -> bool:
+        return bool(self.passed) and not self.needs_attention and not self.skipped
+
+
+def verdict(entry: dict) -> Verdict:
+    """Classify saved check evidence without making calls or guessing support."""
+    provenance = entry.get("provenance", {})
+    missing = tuple(unobserved_reasoning_levels(entry))
+    groups = {"passed": [], "attention": [], "skipped": []}
+    for name, record in {
+        **provenance.get("probes", {}),
+        **provenance.get("session_checks", {}),
+    }.items():
+        status = check_status(
+            name, record, missing_reasoning=name.removeprefix("level:") in missing
+        )
+        groups[status].append(name)
+    return Verdict(
+        tuple(groups["passed"]), tuple(groups["attention"]), tuple(groups["skipped"]), missing
+    )
 
 
 @dataclass(frozen=True)
@@ -332,7 +372,7 @@ async def discover(
 
 async def catalogue() -> list[dict]:
     """Fetch public metadata without sending the endpoint's credentials."""
-    async with httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
+    async with asyncio.timeout(30), httpx.AsyncClient(timeout=15, follow_redirects=False) as client:
         response = await client.get(CATALOGUE_URL)
         response.raise_for_status()
         payload = response.json()
@@ -445,7 +485,31 @@ def configure_entry(entry: dict, *, reply_tokens: int | None = None) -> dict:
     remain provenance, not request allocations. ``include: []`` is an explicit
     opt-out from carrying encrypted reasoning on stateless Responses calls.
     """
+
+    def reject_credentials(value):
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if isinstance(key, str) and key.lower().replace("-", "_") in {
+                    "api_key",
+                    "apikey",
+                    "x_api_key",
+                    "authorization",
+                    "proxy_authorization",
+                    "access_token",
+                    "client_secret",
+                    "password",
+                }:
+                    raise ValueError(
+                        "Use api_key_env, never literal credentials in model configuration"
+                    )
+                reject_credentials(child)
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                reject_credentials(child)
+
+    reject_credentials(entry)
     result = deepcopy(entry)
+    result.setdefault("transport", "direct")
     extra = result.get("extra_body") or {}
     if not isinstance(extra, dict):
         raise ValueError("extra_body must be a mapping")
@@ -478,10 +542,28 @@ def configure_entry(entry: dict, *, reply_tokens: int | None = None) -> dict:
     cap = reply_tokens if reply_tokens is not None else result.get("max_tokens")
     source = "user" if reply_tokens is not None else "entry"
     if cap is None:
-        cap = min(32768, bound) if bound else 32768
+        window = result.get("context_window")
+        default_bound = (
+            min(bound, max(1, window // 2)) if isinstance(window, int) and bound else bound
+        )
+        cap = min(32768, default_bound) if default_bound else 32768
         source = "connect_default"
     if not isinstance(cap, int) or isinstance(cap, bool) or cap <= 0:
         raise ValueError("Reply limit max_tokens must be a positive integer")
+    window = result.get("context_window")
+    if (
+        reply_tokens is None
+        and provenance.get("reply_limit", {}).get("source")
+        in {"connect_default", "catalogue_recommendation"}
+        and isinstance(window, int)
+        and cap >= window
+    ):
+        cap = min(cap, max(1, window // 2))
+        provenance["reply_limit"]["value"] = cap
+    if isinstance(window, int) and cap >= window:
+        raise ValueError(
+            "Reply limit leaves no room for input; set max_tokens below context_window"
+        )
     if (
         bound is not None
         and cap > bound
@@ -517,6 +599,8 @@ def configure_entry(entry: dict, *, reply_tokens: int | None = None) -> dict:
             raise ValueError(
                 f"Reasoning level {label!r} reply limit exceeds the model limit {bound}"
             )
+        if isinstance(window, int) and level_cap >= window:
+            raise ValueError(f"Reasoning level {label!r} reply limit leaves no room for input")
     if responses:
         result.setdefault("store", False)
         if not isinstance(result["store"], bool):
@@ -580,12 +664,74 @@ def model_metadata(
 
 def entry_warnings(entry: dict) -> list[str]:
     """Configuration warnings shared by the wizard, library and stage reports."""
-    return (
+    warnings = (
         []
         if entry.get("context_window")
         else [
             "Context window unknown: runtime fallback applies; supply --context-window or endpoint discovery metadata."
         ]
+    )
+    cap = entry.get("max_tokens")
+    evidence = entry.get("provenance", {})
+    records = {**evidence.get("probes", {}), **evidence.get("session_checks", {})}.values()
+    if cap and not any(
+        r.get("outcome") == "accepted"
+        and r.get("tested_reply_tokens") == cap
+        and r.get("settings_sent") is True
+        for r in records
+    ):
+        warnings.append(
+            "Saved reply budget unverified: no accepted check sent this configured cap on the wire."
+        )
+    return warnings
+
+
+def configured_reply_cap(entry: dict, level: str | None = None) -> int:
+    """The saved request cap, optionally replaced by a selected reasoning level."""
+    settings = entry.get("reasoning_levels", {}).get(level, {})
+    return next((settings[k] for k in REPLY_CAP_KEYS if k in settings), entry["max_tokens"])
+
+
+def refresh_plan(proposal: ConnectPlan) -> ConnectPlan:
+    """Rebuild detached requests and reservations after a configuration edit.
+
+    Interface discovery alone uses a small cap before model settings are chosen.
+    Every configured probe sends the saved cap (or the selected level's cap).
+    """
+    entry = configure_entry(proposal.entry)
+    token_key = "max_output_tokens" if entry["api_style"] == "responses" else "max_tokens"
+    probes = []
+    for probe in proposal.probes:
+        body = deepcopy(probe.body)
+        if probe.uses_configured_cap:
+            settings = (
+                entry.get("reasoning_levels", {}).get(probe.name.removeprefix("level:"), {})
+                if probe.name.startswith("level:")
+                else {}
+            )
+            body.update(settings)
+            cap = configured_reply_cap(
+                entry, probe.name[6:] if probe.name.startswith("level:") else None
+            )
+            for k in REPLY_CAP_KEYS:
+                body.pop(k, None)
+            body[token_key] = cap
+            for k in ("store", "include"):
+                if k in entry:
+                    body[k] = deepcopy(entry[k])
+            probe = replace(probe, body=body, token_estimate=512 + cap, timeout_seconds=120)
+        probes.append(probe)
+    estimate = sum(p.token_estimate for p in probes)
+    if proposal.session_checks:
+        from ._session import reply_budget
+
+        estimate += 3 * reply_budget(entry, max(0, proposal.budget_tokens - estimate))[2]
+    return replace(
+        proposal,
+        entry=entry,
+        probes=tuple(probes),
+        token_estimate=estimate,
+        price_estimate=proposal.price_estimate if tuple(probes) == proposal.probes else None,
     )
 
 
@@ -637,7 +783,6 @@ def plan(
         # The Messages runtime adds /v1/messages; Chat/Responses expect an API base.
         "api_base": api_base.removesuffix("/v1") if api_style == "anthropic" else api_base,
         "api_key_env": api_key_env,
-        "replay_vendor": vendor,
     }
     provenance: dict[str, Any] = {
         "probes": {},
@@ -654,7 +799,6 @@ def plan(
     }
     if catalogue is not None or endpoint_model is not None:
         catalogue = model_metadata(model, catalogue, endpoint_model)
-        entry["underlying_model"] = catalogue["id"]
         provenance["limit_sources"] = deepcopy(catalogue.get("limit_sources", {}))
         if catalogue.get("endpoint_limits"):
             provenance["endpoint_limits"] = {
@@ -801,7 +945,9 @@ def plan(
                 for probe in probes
                 if probe.name in previous
             }
-    estimate = sum(probe.token_estimate for probe in probes)
+    refreshed = refresh_plan(ConnectPlan(alias, entry, tuple(probes), budget_tokens, 0, None))
+    entry, probes = refreshed.entry, refreshed.probes
+    estimate = refreshed.token_estimate
     price = None
     if catalogue and catalogue.get("pricing"):
         try:
@@ -824,7 +970,7 @@ def plan(
 async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None):
     """Check the unsaved entry through the same client factory agents use.
 
-    Only the reply cap, timeout and retries are changed for bounded checks.
+    Configured probes retain the saved cap; timeouts and retries are bounded.
     Discovery and planning stay lightweight: runtime imports happen here only.
     Tool replies are inspected as data; Connect never executes model calls.
     """
@@ -843,7 +989,11 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
     if probe.name.startswith("level:"):
         label = probe.name.removeprefix("level:")
         settings = entry["reasoning_levels"][label]
-        if any(probe.body.get(key) != value for key, value in settings.items()):
+        if any(
+            probe.body.get(key) != value
+            for key, value in settings.items()
+            if key not in REPLY_CAP_KEYS
+        ):
             raise ValueError("Reasoning settings changed after planning; make a new plan")
         for key in settings:
             params.pop(key, None)
@@ -861,21 +1011,41 @@ async def _run_probe(alias: str, entry: dict, probe: Probe, api_key: str | None)
         http_config=HttpConfig(read_timeout=probe.timeout_seconds),
     )
     settings_sent = []
+    response_status = []
+
+    async def capture_status(response):
+        response_status.append(response.status_code)
 
     async def capture(request):
         from nooa.unifiedllm.connect._session import settings_on_wire
 
+        expected = {k: v for k, v in probe.body.items() if k in REPLY_CAP_KEYS}
         if probe.name.startswith("level:"):
-            settings_sent.append(settings_on_wire(settings, json.loads(request.content)))
+            expected = {
+                **{k: v for k, v in settings.items() if k not in REPLY_CAP_KEYS},
+                **expected,
+            }
+        settings_sent.append(settings_on_wire(expected, json.loads(request.content)))
 
     hooks = client._http.httpx_async.event_hooks["request"]
+    response_hooks = client._http.httpx_async.event_hooks["response"]
     hooks.append(capture)
+    response_hooks.append(capture_status)
     try:
         params["timeout"] = probe.timeout_seconds
         response = await client.acall(messages=messages, **params)
-        return response, (len(settings_sent) == 1 and all(settings_sent))
+        transport = getattr(client, "transport", "litellm")
+        observed = (len(settings_sent) == 1 and all(settings_sent)) if settings_sent else None
+        return response, observed, transport
+    except Exception as exc:
+        if response_status:
+            # LiteLLM can label a malformed HTTP-200 response as a 422 error.
+            # Keep the observed status distinct from that local translation.
+            exc._connect_http_status = response_status[-1]
+        raise
     finally:
         hooks.remove(capture)
+        response_hooks.remove(capture_status)
         await client.aclose()
 
 
@@ -924,10 +1094,15 @@ async def check_stage(
 
 
 def diagnostic_prompt(
-    stage: str, entry: dict, checks: dict, *, run_context: dict | None = None
+    stage: str,
+    entry: dict,
+    checks: dict,
+    *,
+    run_context: dict | None = None,
+    api_key: str | None = None,
 ) -> str:
     """Safe, copyable handoff for a person or agent; no credentials or raw bodies."""
-    from nooa.unifiedllm.connect._diagnostics import installation_context
+    from nooa.unifiedllm.connect._diagnostics import installation_context, scrub_report
 
     installation = installation_context()
     context = {
@@ -953,37 +1128,8 @@ def diagnostic_prompt(
             context["api_base"] = normalize_endpoint(context["api_base"])
         except (TypeError, ValueError):
             context["api_base"] = "[invalid endpoint omitted]"
-    outcomes = {
-        name: {
-            key: record[key]
-            for key in (
-                "outcome",
-                "error",
-                "detail",
-                "reason",
-                "checked_at",
-                "elapsed_seconds",
-                "error_chain",
-                "timeout_kind",
-                "request_shape",
-                "status_code",
-                "reasoning_observed",
-                "answer_correct",
-                "state_retained",
-                "settings_retained",
-                "settings_sent",
-                "configured_reply_tokens",
-                "tested_reply_tokens",
-                "input_tokens",
-                "cached_input_tokens",
-                "readings",
-                "finish_reason",
-            )
-            if key in record
-        }
-        for name, record in checks.items()
-    }
-    return (
+    outcomes = {name: public_record(record) for name, record in checks.items()}
+    text = (
         f"Diagnose and fix NOOA Connect stage {stage!r}. "
         "First read the nooa-model-configuration skill and companion docs located by the "
         "installation references below. "
@@ -1035,6 +1181,8 @@ def diagnostic_prompt(
         )
     )
 
+    return scrub_report(text, api_key=api_key, api_key_env=entry.get("api_key_env"))
+
 
 async def run_steps(
     proposal: ConnectPlan,
@@ -1074,10 +1222,10 @@ async def run_steps(
             previous.get("outcome") == "accepted"
             and previous.get("request") == probe.body
             and previous.get("client") == "unifiedllm"
-            and (not probe.name.startswith("level:") or previous.get("settings_sent") is True)
+            and previous.get("settings_sent") is True
         ):
             if probe.name == "routing" and entry.get("include"):
-                provenance["encrypted_reasoning"]["outcome"] = "accepted"
+                provenance.setdefault("encrypted_reasoning", {})["outcome"] = "accepted"
             yield ProbeUpdate(
                 probe.name, {**deepcopy(previous), "reason": "previous result reused"}
             )
@@ -1112,6 +1260,13 @@ async def run_steps(
             if name in probe.body
         ]
         required_cap = "max_output_tokens" if style == "responses" else "max_tokens"
+        expected_cap = configured_reply_cap(
+            entry, probe.name[6:] if probe.name.startswith("level:") else None
+        )
+        if probe.uses_configured_cap and probe.body.get(required_cap) != expected_cap:
+            record["reason"] = "Configured reply cap changed after planning; make a new plan"
+            yield ProbeUpdate(probe.name, deepcopy(record))
+            continue
         if required_cap not in probe.body or any(
             not isinstance(cap, int)
             or isinstance(cap, bool)
@@ -1134,7 +1289,9 @@ async def run_steps(
         }
         try:
             async with deadline:
-                response, settings_sent = await _run_probe(proposal.alias, entry, probe, key)
+                response, settings_sent, transport = await _run_probe(
+                    proposal.alias, entry, probe, key
+                )
             usage = response.usage
             reasoning = bool(response.reasoning or (usage and usage.reasoning_tokens))
             tool = any(call.name == "probe_tool" for call in response.tool_calls)
@@ -1142,12 +1299,16 @@ async def run_steps(
         except Exception as exc:
             from nooa.unifiedllm.connect._diagnostics import timeout_details
 
-            status = getattr(exc, "status_code", None)
+            status = getattr(exc, "_connect_http_status", getattr(exc, "status_code", None))
             record["error"] = type(exc).__name__
             record["elapsed_seconds"] = round(time.monotonic() - started, 3)
             if isinstance(status, int):
                 record["status_code"] = status
-                record["outcome"] = "rejected" if status == 400 else "not_probed"
+                record["outcome"] = "rejected" if status in {400, 422} else "not_probed"
+                if 200 <= status < 300:
+                    record.update(
+                        outcome="not_confirmed", reason="Reply not understood by the runtime"
+                    )
             record.update(timeout_details(exc, deadline_expired=deadline.expired()))
             if type(exc).__name__ == "ReasoningReplayError":
                 record.update(
@@ -1171,6 +1332,7 @@ async def run_steps(
             outcome="accepted",
             elapsed_seconds=round(time.monotonic() - started, 3),
             client="unifiedllm",
+            transport=transport,
             request=deepcopy(probe.body),
             reasoning_observed=reasoning,
             tool_observed=tool,
@@ -1180,7 +1342,19 @@ async def run_steps(
             reasoning_tokens=usage.reasoning_tokens if usage else None,
             finish_reason=response.finish_reason,
             checked_at=datetime.now(UTC).isoformat(),
+            configured_reply_tokens=configured_reply_cap(
+                entry, probe.name[6:] if probe.name.startswith("level:") else None
+            ),
+            tested_reply_tokens=probe.body[required_cap],
+            settings_sent=settings_sent,
         )
+        if not settings_sent:
+            record.update(
+                outcome="not_confirmed",
+                reason="Could not observe the actual request; the runtime used an uninstrumented HTTP client"
+                if settings_sent is None
+                else "Configured reply cap or settings missing from the actual request",
+            )
         if probe.name.startswith("level:"):
             # Score only the public final answer, never retain reasoning/reply text.
             # Correctness is separate from evidence that a setting was obeyed.
@@ -1188,7 +1362,7 @@ async def run_steps(
                 re.sub(r"[\s,]+", "", response.content or "").upper() == "BGDACEFH"
             )
             record["settings_sent"] = settings_sent
-            if not settings_sent:
+            if settings_sent is False:
                 record["outcome"] = "not_confirmed"
                 record["reason"] = (
                     "The client did not send the requested settings; check parameter filtering"
@@ -1196,9 +1370,7 @@ async def run_steps(
         spent += max(0, tokens - probe.token_estimate)
         yield ProbeUpdate(probe.name, deepcopy(record))
         if probe.name == "routing" and entry.get("include"):
-            provenance["encrypted_reasoning"]["outcome"] = "accepted"
-    if records.get("tools", {}).get("tool_observed"):
-        entry["tools"] = True  # No call is not evidence that tools are unsupported.
+            provenance.setdefault("encrypted_reasoning", {})["outcome"] = "accepted"
     provenance["requests_accepted"] = [
         name for name, item in records.items() if item["outcome"] == "accepted"
     ]
@@ -1238,6 +1410,7 @@ async def run_steps(
             provenance["tokens_charged_to_budget"] += checks.get("session", {}).get(
                 "tokens_charged_to_budget", 0
             )
+    provenance["warnings"] = entry_warnings(entry)
     yield ConnectResult(proposal.alias, entry)
 
 
@@ -1282,7 +1455,20 @@ async def check_interfaces(
         )
         proposal = replace(
             proposal,
-            probes=(replace(proposal.probes[0], timeout_seconds=timeout_seconds),),
+            probes=(
+                replace(
+                    proposal.probes[0],
+                    timeout_seconds=timeout_seconds,
+                    body={
+                        **proposal.probes[0].body,
+                        "max_output_tokens"
+                        if style == "responses"
+                        else "max_tokens": output_tokens,
+                    },
+                    token_estimate=output_tokens + 512,
+                    uses_configured_cap=False,
+                ),
+            ),
             budget_tokens=max(0, budget_tokens - spent),
         )
         async with aclosing(run_steps(proposal, approved="minimal", api_key=api_key)) as steps:
@@ -1302,14 +1488,35 @@ def write(entry: dict, path: Path, *, alias: str) -> None:
     unrelated entries and comments remain intact. The final replace is atomic.
     """
     entry = configure_entry(entry)
-    original = path.read_text() if path.exists() else None
-    source = original or ""
+    path = Path(path).resolve()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Lock a stable sidecar inode, not the registry inode replaced atomically.
+    # Keep the lock file: unlinking it would let a third writer bypass waiters.
+    import fcntl
+
+    with path.with_name(f".{path.name}.lock").open("a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        _write_entry(entry, path, alias=alias)
+
+
+def _write_entry(entry: dict, path: Path, *, alias: str) -> None:
+    """Perform one locked read/modify/replace, retaining a concurrent-edit check."""
+    original = path.read_bytes() if path.exists() else None
+    mode = stat.S_IMODE(path.stat().st_mode) if path.exists() else 0o600
+    newline = "\r\n" if original and b"\r\n" in original else "\n"
+    source = (original or b"").decode("utf-8").replace("\r\n", "\n")
     data = yaml.safe_load(source)
     if data is None:
         data = {}
+    if isinstance(data, dict) and data.get("models") is None:
+        data["models"] = {}
     if not isinstance(data, dict) or not isinstance(data.get("models", {}), dict):
         raise ValueError("Registry must be a mapping with a models mapping")
     document = yaml.compose(source)
+    if any(isinstance(token, (yaml.AnchorToken, yaml.AliasToken)) for token in yaml.scan(source)):
+        raise ValueError(
+            "Registry uses YAML anchors or merge keys; expand them before updating with Connect"
+        )
     models_node = (
         next((value for key, value in document.value if key.value == "models"), None)
         if document
@@ -1328,7 +1535,15 @@ def write(entry: dict, path: Path, *, alias: str) -> None:
             return content_end(node.value[-1])
         return node.end_mark
 
-    if models_node is None:
+    if models_node is not None and isinstance(models_node, yaml.ScalarNode):
+        # YAML's null mapping ("models:") is a valid empty registry.
+        text = (
+            source[: models_node.start_mark.index]
+            + "\n"
+            + indented
+            + source[models_node.end_mark.index :]
+        )
+    elif models_node is None:
         separator = "" if not source or source.endswith("\n") else "\n"
         text = source + separator + "models:\n" + indented
     elif models_node.flow_style:
@@ -1357,16 +1572,19 @@ def write(entry: dict, path: Path, *, alias: str) -> None:
     if yaml.safe_load(text) != expected:
         raise ValueError("Could not construct the registry update without changing other entries")
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        mode="w", encoding="utf-8", dir=path.parent, prefix=path.name + ".", delete=False
-    ) as temporary:
-        temporary.write(text)
-        temporary.flush()
-        os.fsync(temporary.fileno())
-        temporary_path = Path(temporary.name)
+    temporary_path = None
     try:
-        if (path.read_text() if path.exists() else None) != original:
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, prefix=path.name + ".", delete=False
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            temporary.write(text.replace("\n", newline))
+            os.chmod(temporary.name, mode)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        if (path.read_bytes() if path.exists() else None) != original:
             raise ValueError("Registry changed during write; reload before retrying")
         os.replace(temporary_path, path)
     finally:
-        temporary_path.unlink(missing_ok=True)
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)

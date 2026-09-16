@@ -80,13 +80,19 @@ probes and call that validation of a NOOA entry.
   its name. Chat uses `client_type: completion`; Responses uses
   `client_type: responses`; Anthropic Messages uses the completion client and
   its Anthropic route prefix. Connect normalizes provider prefixes and base URLs.
+- New Connect entries carry `transport: direct`. Runtimes with direct SDK support
+  use it to bypass LiteLLM; older runtimes ignore it. Preserve explicit transport
+  choices when editing. Check the installed runtime before describing probes as
+  direct-transport validation: the saved field alone is not evidence.
 - Explicit user choices win; endpoint-reported limits take precedence over
   public catalogue suggestions. Do not add input/output limits to invent a total
   context window. Record unknown context capacity as unverified.
 - The saved reply cap is `max_tokens` for all three interfaces; Responses maps
   it to `max_output_tokens` on the wire. Catalogue output ceilings are metadata,
-  not recommendations. Keep the selected cap within known limits and distinguish
-  it from the smaller setup-check cap. If no check sent the saved cap, report it
+  not recommendations. Keep the selected cap below the known context window.
+  Configured checks send this cap, including a selected level’s override; only
+  initial interface discovery uses a smaller cap. Insufficient approved budget
+  skips checks rather than lowering their caps. If no check sent the saved cap, report it
   as unverified. Thinking and the final answer can share the cap; a level-specific
   thinking budget needs answer headroom.
 - Connect defaults Responses entries to `store: false` and
@@ -104,8 +110,9 @@ probes and call that validation of a NOOA entry.
 
 Model listing may be public: it does not validate inference credentials.
 A timeout or server error does not prove an unsupported API. A truncated reply
-is inconclusive; increase the check limit only within the approved allowance
-and known ceiling, using bounded retries rather than an open-ended loop.
+is inconclusive. To test a larger limit, explicitly change the configuration,
+rebuild the plan, and rerun within the approved allowance and known ceiling.
+Connect does not silently retry with a different cap than the saved configuration.
 
 For reasoning, distinguish request acceptance, settings reaching the wire,
 reasoning observed in the reply, and state replayed in the next request. An

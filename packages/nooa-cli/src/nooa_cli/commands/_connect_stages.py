@@ -25,9 +25,12 @@ def read_discovery(path, endpoint):
 
     document = json.loads(Path(path).read_text())
     data = document.get("data", document)
-    if not isinstance(data, dict) or connect.normalize_endpoint(
-        data.get("api_base", "")
-    ) != connect.normalize_endpoint(endpoint):
+    if (
+        not isinstance(data, dict)
+        or not isinstance(data.get("api_base"), str)
+        or connect.normalize_endpoint(data["api_base"]).removesuffix("/v1")
+        != connect.normalize_endpoint(endpoint).removesuffix("/v1")
+    ):
         raise ValueError("Discovery metadata belongs to a different endpoint")
     models = data.get("models")
     if not isinstance(models, list) or not all(
@@ -101,12 +104,13 @@ def run_stage(
                 or not isinstance(data.get("entry"), dict)
             ):
                 raise click.UsageError("Save input requires an alias string and an entry mapping")
-            alias, entry = (
-                data["alias"],
-                connect.configure_entry(data["entry"], reply_tokens=reply_tokens),
-            )
-            if "api_key" in entry:
-                raise click.UsageError("Use api_key_env, never a literal key")
+            try:
+                alias, entry = (
+                    data["alias"],
+                    connect.configure_entry(data["entry"], reply_tokens=reply_tokens),
+                )
+            except ValueError as exc:
+                raise click.UsageError(str(exc)) from None
             if document.get("ok") is False:
                 click.echo("Warning: saving a configuration whose checks did not pass.", err=True)
             path = Path(output)
@@ -114,7 +118,7 @@ def run_stage(
             if path.exists():
                 with path.open() as source:
                     existing = yaml.safe_load(source) or {}
-            if alias in existing.get("models", {}):
+            if alias in (existing.get("models") or {}):
                 if not yes:
                     raise click.UsageError("Alias exists; --yes explicitly permits replacement")
                 click.echo(f"Warning: replacing alias {alias!r} in {path}.", err=True)
@@ -161,6 +165,8 @@ def run_stage(
             entry = proposal.entry
             if context_window:
                 entry["context_window"] = context_window
+                proposal = connect.refresh_plan(proposal)
+                entry = proposal.entry
             key = (
                 click.prompt("API key (used only for this check)", hide_input=True, err=True)
                 if prompt_key and stage != "plan"
@@ -219,26 +225,7 @@ def run_stage(
                     **entry["provenance"]["probes"],
                     **entry["provenance"].get("session_checks", {}),
                 }
-                if stage in {"session", "all"}:
-                    ok = (
-                        checks.get("cache", {}).get("outcome") in {"confirmed", "warning"}
-                        and checks.get("reasoning_retention", {}).get("outcome") == "confirmed"
-                    )
-                    if stage == "all":
-                        ok &= all(
-                            r.get("outcome") == "accepted"
-                            for r in entry["provenance"]["probes"].values()
-                        )
-                        ok &= bool(checks.get("tools", {}).get("tool_observed"))
-                        ok &= not connect.unobserved_reasoning_levels(entry)
-                else:
-                    ok = bool(checks) and all(
-                        r.get("outcome") == "accepted" for r in checks.values()
-                    )
-                    if stage == "tools":
-                        ok &= all(r.get("tool_observed", False) for r in checks.values())
-                    elif stage == "reasoning":
-                        ok &= not connect.unobserved_reasoning_levels(entry)
+                ok = connect.verdict(entry).ok
         error = None
     except Exception as exc:
         error = {"type": type(exc).__name__}
@@ -282,6 +269,9 @@ def run_stage(
         stage=stage,
         discovery_succeeded=ok if stage == "discover" else None,
     )
+    from nooa.unifiedllm.connect._diagnostics import scrub_report
+    from nooa.unifiedllm.connect._records import public_record
+
     report = {
         "version": 1,
         "stage": stage,
@@ -290,13 +280,12 @@ def run_stage(
         "error": error,
         "run_context": run_context,
         "warnings": connect.entry_warnings(entry) if entry else [],
-        "checks": {
-            name: {k: v for k, v in record.items() if k not in {"request"}}
-            for name, record in checks.items()
-        },
+        "checks": {name: public_record(record) for name, record in checks.items()},
         "diagnostic_prompt": None
         if ok
-        else connect.diagnostic_prompt(stage, entry, checks, run_context=run_context),
+        else connect.diagnostic_prompt(stage, entry, checks, run_context=run_context, api_key=key),
     }
-    click.echo(json.dumps(report, ensure_ascii=False))
+    click.echo(
+        json.dumps(scrub_report(report, api_key=key, api_key_env=api_key_env), ensure_ascii=False)
+    )
     return 0 if ok else failure_code

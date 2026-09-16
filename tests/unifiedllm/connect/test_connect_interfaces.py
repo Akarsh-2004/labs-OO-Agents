@@ -84,7 +84,11 @@ async def test_failed_interface_is_not_offered_but_other_interfaces_are_checked(
     assert len(calls) == 3
     assert "secret must not escape" not in repr(result)
     assert result.results["responses"].entry["provenance"]["probes"]["routing"]["outcome"] == (
-        "rejected" if failure == 400 else "not_confirmed" if failure == "timeout" else "not_probed"
+        "rejected"
+        if failure == 400
+        else "not_confirmed"
+        if failure in {"timeout", "wrong-shape"}
+        else "not_probed"
     )
     if failure == "timeout":
         record = result.results["responses"].entry["provenance"]["probes"]["routing"]
@@ -152,7 +156,7 @@ async def test_selected_routing_result_reused_even_when_levels_are_added(monkeyp
         reasoning_levels={"high": {"reasoning_effort": "high"}},
     )
     await connect.run(proposal, approved="all")
-    assert len(sent) == 5  # Three interfaces, tools, high; no second routing call.
+    assert len(sent) == 6  # Discovery's smaller cap cannot validate the configured routing cap.
 
 
 @pytest.mark.asyncio
@@ -173,7 +177,7 @@ async def test_success_status_without_expected_response_shape_is_inconclusive(
     record = result.entry["provenance"]["probes"]["routing"]
     # SDK validation and NOOA replay validation can fail at different layers;
     # neither a malformed 200 nor an unreadable reply confirms the interface.
-    assert record["outcome"] in {"not_probed", "not_confirmed"}
+    assert record["outcome"] in {"not_probed", "not_confirmed"}, record
     assert record["error"]
 
 

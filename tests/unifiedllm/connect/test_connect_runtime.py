@@ -91,7 +91,7 @@ async def test_probes_use_registry_entry_and_unified_call(monkeypatch, style):
     assert all(client.aclose.await_count == 1 for client in clients)
     assert proposal.entry == before
     record = result.entry["provenance"]["probes"]["routing"]
-    assert record["outcome"] == "accepted"
+    assert record["outcome"] == "not_confirmed"  # Mock bypassed HTTP: no wire evidence.
     assert record["reasoning_observed"] is True
     assert record["reported_tokens"] == 12
     assert "transient-secret" not in repr(result)
@@ -136,7 +136,6 @@ async def test_saved_entry_sends_the_same_request_as_connect(tmp_path, monkeypat
     try:
         await client.acall(
             messages=[{"role": "user", "content": "Compute 17 * 19. Reply with the number."}],
-            **{"max_output_tokens" if style == "responses" else "max_tokens": 200},
         )
     finally:
         await client.aclose()

@@ -28,10 +28,10 @@ def test_separate_caps_are_included_in_token_and_price_estimates():
     )
     assert proposal.budget_tokens == 131072
     assert proposal.entry["max_tokens"] == 32768
-    assert [p.body["max_tokens"] for p in proposal.probes] == [200, 200, 4096]
-    assert [p.token_estimate for p in proposal.probes] == [712, 712, 4608]
-    assert proposal.token_estimate == 6032
-    assert proposal.price_estimate == pytest.approx(3 * 512e-6 + (200 + 200 + 4096) * 2e-6)
+    assert [p.body["max_tokens"] for p in proposal.probes] == [32768] * 3
+    assert [p.token_estimate for p in proposal.probes] == [33280] * 3
+    assert proposal.token_estimate == 99840
+    assert proposal.price_estimate == pytest.approx(3 * 512e-6 + 3 * 32768 * 2e-6)
 
 
 @pytest.mark.asyncio

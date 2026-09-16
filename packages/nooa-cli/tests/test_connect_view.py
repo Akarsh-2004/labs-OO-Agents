@@ -70,7 +70,7 @@ def test_model_details_show_published_limits_separately_from_setup_cap():
         assert text in result.output
     assert "Reported reply ceiling" in result.output
     assert "Published output default" not in result.output
-    assert "Connection/tool check limit" in result.output
+    assert "Interface discovery limit" in result.output
     assert "Source: OpenRouter" in result.output
     assert "not proof" not in result.output
 

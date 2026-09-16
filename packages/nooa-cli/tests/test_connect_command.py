@@ -14,6 +14,9 @@ from tests.unifiedllm.connect.connect_http import mock_http, response_body
 def sdk_credentials(monkeypatch):
     from nooa_cli.commands import _connect_prompts as _connect_prompts
 
+    from nooa import llm_config
+
+    monkeypatch.setattr(llm_config, "llm_config_chain", lambda: [])
     # Reply-budget interaction has its own contract tests.
     monkeypatch.setattr(
         _connect_prompts, "choose_reply_limit", lambda suggested, ceiling, **kw: suggested
@@ -104,6 +107,8 @@ def test_enabled_reasoning_without_evidence_warns_once_before_save(
             "adaptive" if style == "anthropic" else "effort",
             "--levels",
             "high,none",
+            "--max-tokens",
+            "2048",
             "--output",
             str(path),
             *(["--no-probe"] if mode == "unprobed" else []),
@@ -134,6 +139,145 @@ def test_offline_cli_needs_no_key_and_writes_generated_registry(tmp_path, monkey
     assert yaml.safe_load(path.read_text())["models"]["local"]["model_name"] == "openai/wire/model"
     assert "skipped" in result.output
     assert "not approved" in result.output
+
+
+def test_recovery_edit_server_preserves_budget_and_saves_only_new_route(tmp_path, monkeypatch):
+    import httpx
+
+    sent = []
+
+    def handle(request):
+        sent.append(request)
+        if request.url.host == "new.example" and request.url.path.endswith("chat/completions"):
+            return httpx.Response(200, json=response_body("chat"))
+        return httpx.Response(404)
+
+    mock_http(monkeypatch, handle)
+    path = tmp_path / "models.yaml"
+    result = CliRunner().invoke(
+        command,
+        [
+            "old-model",
+            "--as",
+            "local",
+            "--endpoint",
+            "https://old.example/v1",
+            "--api-key-env",
+            "",
+            "--no-catalogue",
+            "--probe",
+            "minimal",
+            "--max-tokens",
+            "200",
+            "--budget-tokens",
+            "6000",
+            "--output",
+            str(path),
+        ],
+        input="y\nserver\nhttps://new.example/v1\nnew-model\ny\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert [r.url.host for r in sent] == ["old.example"] * 3 + ["new.example"] * 3
+    entry = yaml.safe_load(path.read_text())["models"]["local"]
+    assert entry["api_base"] == "https://new.example/v1"
+    assert entry["model_name"] == "openai/new-model"
+    assert entry["provenance"]["tokens_charged_to_budget"] == 6 * 712
+
+
+@pytest.mark.parametrize("yes", [False, True])
+def test_multiple_saved_key_variables_require_an_explicit_choice(tmp_path, monkeypatch, yes):
+    path = tmp_path / "models.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {
+                    name: {
+                        "model_name": "openai/model",
+                        "api_base": "https://api.test/v1",
+                        "api_key_env": name,
+                    }
+                    for name in ("KEY_ONE", "KEY_TWO")
+                }
+            }
+        )
+    )
+    options = [
+        "model",
+        "--as",
+        "new",
+        "--endpoint",
+        "https://api.test/v1",
+        "--api-style",
+        "chat",
+        "--no-catalogue",
+        "--no-probe",
+        "--output",
+        str(path),
+    ]
+    result = CliRunner().invoke(command, options + (["--yes"] if yes else []), input="KEY_TWO\ny\n")
+    assert result.exit_code == (2 if yes else 0), result.output
+    if yes:
+        assert "supply --api-key-env" in result.output
+        assert "new" not in yaml.safe_load(path.read_text())["models"]
+    else:
+        assert "Saved key variable" in result.output
+        assert yaml.safe_load(path.read_text())["models"]["new"]["api_key_env"] == "KEY_TWO"
+
+
+@pytest.mark.parametrize("save_key", [False, True])
+def test_new_key_path_persists_only_after_separate_confirmation(tmp_path, monkeypatch, save_key):
+    from nooa import paths
+
+    monkeypatch.setattr(paths, "get_user_dir", lambda name: tmp_path / name)
+    monkeypatch.delenv("NOOA_MODEL_API_KEY", raising=False)
+    path = tmp_path / "models.yaml"
+    result = CliRunner().invoke(
+        command,
+        [*args(path), "--api-key-env", "new"],
+        input="\nnew-private-test-key\ny\n" + ("y\n" if save_key else "n\n"),
+    )
+    assert result.exit_code == 0, result.output
+    assert (
+        yaml.safe_load(path.read_text())["models"]["local"]["api_key_env"] == "NOOA_MODEL_API_KEY"
+    )
+    assert "new-private-test-key" not in result.output + path.read_text()
+    secrets = tmp_path / "secrets.yaml"
+    assert secrets.exists() is save_key
+    if save_key:
+        assert (
+            yaml.safe_load(secrets.read_text())["env"]["NOOA_MODEL_API_KEY"]
+            == "new-private-test-key"
+        )
+
+
+def test_wizard_discovery_auth_failure_stops_before_generation_or_save(tmp_path, monkeypatch):
+    import httpx
+
+    sent = []
+
+    def handle(request):
+        sent.append(request.method)
+        return httpx.Response(401)
+
+    mock_http(monkeypatch, handle)
+    path = tmp_path / "models.yaml"
+    result = CliRunner().invoke(
+        command,
+        [
+            "--endpoint",
+            "https://api.test/v1",
+            "--api-key-env",
+            "",
+            "--no-catalogue",
+            "--output",
+            str(path),
+        ],
+        input="y\n",
+    )
+    assert result.exit_code == 1
+    assert "Authentication failed" in result.output
+    assert sent == ["GET"]
+    assert not path.exists()
 
 
 @pytest.mark.parametrize("show_config", [False, True])
@@ -348,7 +492,7 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
         ),
     )
     assert result.exit_code == 0, result.output
-    assert [r.method for r in requests] == ["GET"] + ["POST"] * 7
+    assert [r.method for r in requests] == ["GET"] + ["POST"] * 5
     entry = yaml.safe_load((tmp_path / "llm_config.yaml").read_text())["models"]["my-model"]
     assert entry["model_name"] == "openai/example-model"
     assert "temporary-secret" not in result.output + yaml.safe_dump(entry)
@@ -476,11 +620,11 @@ def test_authentication_recovery_keeps_budget_and_secrets(tmp_path, monkeypatch,
     assert "skills/nooa-model-configuration/SKILL.md" in handoff
     assert "git clone" not in handoff
     assert litellm.suppress_debug_info is False
-    assert len(sent) == (6 if recover else 3)
+    assert len(sent) == (7 if recover else 3)
     if recover:
         entry = yaml.safe_load(path.read_text())["models"]["local"]
         assert entry["api_key_env"] == "CONNECT_GOOD"
-        assert entry["provenance"]["tokens_charged_to_budget"] == 6 * 712
+        assert entry["provenance"]["tokens_charged_to_budget"] == 6 * 712 + 32768 + 512
         assert "test-secret" not in path.read_text()
     else:
         assert not path.exists()
@@ -572,12 +716,12 @@ def test_interface_and_later_checks_share_the_cli_budget(tmp_path, monkeypatch):
     assert len(sent) == 3  # All of the budget was spent testing interfaces.
     provenance = yaml.safe_load(path.read_text())["models"]["local"]["provenance"]
     assert provenance["tokens_charged_to_budget"] == 2136
-    assert provenance["probes"]["routing"]["outcome"] == "accepted"
+    assert provenance["probes"]["routing"]["outcome"] == "not_probed"
     assert provenance["probes"]["tools"]["outcome"] == "not_probed"
     assert "approved budget is too small" in result.output
-    assert "setup is incomplete; budget exhausted before tools" in result.output
+    assert "setup is incomplete; budget exhausted before routing" in result.output
     assert result.output.index("approved budget is too small") < result.output.index(
-        "Connection: Connected"
+        "Connection: budget exhausted"
     )
 
 
@@ -672,7 +816,7 @@ def test_model_settings_can_be_edited_skipped_or_cancelled(tmp_path, monkeypatch
         assert set(probes) == {"routing", "tools", "level:low", "level:medium"}
 
 
-def test_default_budget_covers_interfaces_tools_and_every_level(tmp_path, monkeypatch):
+def test_default_budget_covers_explicit_small_cap_and_every_level(tmp_path, monkeypatch):
     # The exact count below includes LiteLLM's pre-HTTP interface rejection.
     monkeypatch.setenv("NOOA_LLM_TRANSPORT", "litellm")
     import json
@@ -705,6 +849,8 @@ def test_default_budget_covers_interfaces_tools_and_every_level(tmp_path, monkey
             "effort",
             "--levels",
             levels,
+            "--max-tokens",
+            "2048",
             "--output",
             str(path),
         ],
@@ -715,9 +861,9 @@ def test_default_budget_covers_interfaces_tools_and_every_level(tmp_path, monkey
         body["reasoning_effort"] for body in bodies if "reasoning_effort" in body
     ] == levels.split(",")
     # Two interfaces reach HTTP; the runtime rejects the third before sending.
-    # The tool check and all six levels still run; routing is reused.
+    # Routing is rechecked at the configured cap; tools and all six levels run.
     # The session seed is also attempted; this minimal mock lacks a finish reason.
-    assert len(bodies) == 10
+    assert len(bodies) == 11
     probes = yaml.safe_load(path.read_text())["models"]["local"]["provenance"]["probes"]
     assert all(record["outcome"] == "accepted" for record in probes.values())
 

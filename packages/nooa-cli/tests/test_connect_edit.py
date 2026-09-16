@@ -24,6 +24,7 @@ def registry(tmp_path, monkeypatch):
     entry = {
         "model_name": "openai/vendor/model",
         "api_style": "chat",
+        "transport": "litellm",
         "api_base": "https://api.test/v1",
         "api_key_env": "EDIT_TEST_KEY",
         "context_window": 50000,
@@ -71,6 +72,7 @@ def test_edit_jumps_to_settings_preserving_custom_fields(registry, monkeypatch, 
     assert actual["context_window"] == 64000
     for key in (
         "model_name",
+        "transport",
         "max_tokens",
         "reasoning_levels",
         "extra_body",

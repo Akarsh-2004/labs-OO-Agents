@@ -13,7 +13,7 @@ from tests.unifiedllm.connect.connect_http import mock_http, response_body
 
 
 def proposal(*, api_base="https://api.openai.com/v1", **kwargs):
-    return connect.plan("model", "gpt-5.1", "responses", api_base, "", **kwargs)
+    return connect.plan("model", "gpt-5.1", "responses", api_base, "", reply_tokens=200, **kwargs)
 
 
 @pytest.mark.asyncio
@@ -116,7 +116,7 @@ async def test_session_field_rejection_is_recorded_without_rerunning_session(mon
         body = json.loads(request.content)
         bodies.append(body)
         assert body["include"] == ["reasoning.encrypted_content"]
-        if body["max_output_tokens"] == 2048:
+        if len(bodies) == 3:
             return httpx.Response(
                 422,
                 json={

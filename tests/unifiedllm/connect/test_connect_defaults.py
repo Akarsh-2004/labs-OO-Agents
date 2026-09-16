@@ -166,7 +166,7 @@ def test_responses_reply_alias_precedence(base_key):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("saved,tested", [(1024, 1024), (8192, 2048)])
+@pytest.mark.parametrize("saved,tested", [(1024, 1024), (8192, 8192)])
 async def test_session_reports_the_cap_actually_tested(monkeypatch, saved, tested):
     from nooa.unifiedllm.connect._session import TOKEN_RESERVATION, session_steps
 
@@ -185,7 +185,10 @@ async def test_session_reports_the_cap_actually_tested(monkeypatch, saved, teste
     events = [
         e
         async for e in session_steps(
-            "test", proposal.entry, api_key="test-key", budget_tokens=TOKEN_RESERVATION
+            "test",
+            proposal.entry,
+            api_key="test-key",
+            budget_tokens=max(TOKEN_RESERVATION, 3 * (8192 + 3 * saved)),
         )
     ]
     assert len(bodies) == 3
@@ -195,4 +198,5 @@ async def test_session_reports_the_cap_actually_tested(monkeypatch, saved, teste
     )
     assert seed["configured_reply_tokens"] == saved
     assert seed["tested_reply_tokens"] == tested
-    assert seed["reply_limit_reduced_for_check"] == (saved != tested)
+    assert seed["settings_sent"] is True
+    assert saved == tested

@@ -23,7 +23,38 @@ BASE = [
     "local",
     "--api-key-env",
     "STAGE_TEST_KEY",
+    "--max-tokens",
+    "2048",
 ]
+
+
+@pytest.mark.parametrize("stage", ["interfaces", "routing"])
+@pytest.mark.parametrize("pasted", [False, True])
+def test_full_stage_report_scrubs_key_accidentally_pasted_as_model(monkeypatch, stage, pasted):
+    secret = "private-active-test-key"
+    monkeypatch.setenv("STAGE_TEST_KEY", secret)
+    mock_http(monkeypatch, lambda request: httpx.Response(401))
+    options = [secret, *BASE[1:], "--stage", stage]
+    result = CliRunner().invoke(
+        command,
+        options + (["--prompt-key"] if pasted else []),
+        input=secret + "\n" if pasted else None,
+    )
+    assert result.exit_code == 1
+    report = json.loads(result.stdout)
+    assert secret not in result.output
+    assert set(report) == {
+        "version",
+        "stage",
+        "ok",
+        "data",
+        "checks",
+        "error",
+        "run_context",
+        "warnings",
+        "diagnostic_prompt",
+    }
+    assert all("request" not in check for check in report["checks"].values())
 
 
 def test_explicit_prompt_key_keeps_stage_json_clean(monkeypatch):
@@ -85,14 +116,7 @@ def test_each_check_stage_is_independent_json(monkeypatch, tmp_path, stage, coun
     assert "private reasoning" not in result.output
     assert "Approve" not in result.output
     assert all(
-        body.get("max_tokens", body.get("max_completion_tokens"))
-        == (
-            4096
-            if body["messages"][0]["content"] == connect.REASONING_CHECK_PROMPT
-            else 2048
-            if stage == "session" or (stage == "all" and i >= 4)
-            else 200
-        )
+        body.get("max_tokens", body.get("max_completion_tokens")) == 2048
         for i, body in enumerate(requests)
     )
     if stage == "reasoning":

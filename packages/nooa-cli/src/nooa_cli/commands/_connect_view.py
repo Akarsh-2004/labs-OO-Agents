@@ -44,6 +44,8 @@ def check_failure(outcome):
         return "Reply not understood (ReasoningReplayError)."
     if error == "APIConnectionError":
         return "Could not reach the server. Check the connection or try again."
+    if isinstance(status, int) and 400 <= status < 500:
+        return "Request rejected by this server. Check the request settings."
     return None
 
 
@@ -70,7 +72,7 @@ def local_failure(exc, *, api_key=None, api_key_env=None):
 
 def line(text, *, fg=None, bold=False, dim=False):
     width = max(24, min(84, shutil.get_terminal_size((80, 24)).columns - 4))
-    for part in textwrap.wrap(text, width=width) or [""]:
+    for part in textwrap.wrap(text, width=width, break_on_hyphens=False) or [""]:
         if "NO_COLOR" not in os.environ:
             part = click.style(part, fg=fg, bold=bold, dim=dim)
         click.echo("  " + part)
@@ -89,7 +91,7 @@ def intro(*, checks, output_tokens, budget_tokens, reasoning_output_tokens=4096)
             dim=True,
         )
         line(
-            f"Connection/tool checks: {output_tokens:,} output tokens / call. Reasoning checks: {reasoning_output_tokens:,} output tokens / call, including thinking. Conversation checks use your chosen reply budget if the shared budget allows; otherwise at most 2,048 tokens each.",
+            f"Interface discovery: {output_tokens:,} output tokens / call. After setup, all checks send the saved reply cap (including reasoning-level overrides); checks that do not fit the approved budget are skipped.",
             dim=True,
         )
         line(
@@ -99,7 +101,7 @@ def intro(*, checks, output_tokens, budget_tokens, reasoning_output_tokens=4096)
             dim=True,
         )
         line(
-            "A truncated conversation reply may retry twice with a doubled limit, up to your saved limit and within this budget (at most 9 conversation calls). No network-error retries. Caps are estimates, not billing limits.",
+            "No automatic retries or capacity probes. Caps are estimates, not billing limits.",
             dim=True,
         )
         line(
@@ -216,6 +218,9 @@ class CheckProgress:
                 )
         elif name == "reasoning_retention" and outcome == "confirmed":
             detail = "Preserved in the next request"
+        from nooa.unifiedllm.connect._records import check_status
+
+        status = check_status(name, record, missing_reasoning=missing_reasoning)
         icon, color = {
             "passed": ("✓", "green"),
             "attention": ("!", "yellow"),
@@ -281,7 +286,7 @@ def model_details(model, *, output_tokens, edited=False):
         ("Reasoning levels", level_text),
         ("Default reasoning", default_text),
         (
-            "Connection/tool check limit",
+            "Interface discovery limit",
             f"{output_tokens:,} tokens per reply (not reasoning checks)",
         ),
     ):

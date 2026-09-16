@@ -18,11 +18,15 @@ def entries(extra_path=None):
     for path in paths:
         with Path(path).open() as source:
             data = yaml.safe_load(source) or {}
+        if isinstance(data, dict) and data.get("models") is None:
+            data["models"] = {}
         if not isinstance(data, dict) or not isinstance(data.get("models", {}), dict):
             raise ValueError(f"Registry {path} must contain a models mapping")
         for alias, entry in data.get("models", {}).items():
             if isinstance(alias, str) and isinstance(entry, dict):
                 resolved[alias] = (entry, Path(path))
+            else:
+                resolved.pop(alias, None)
     return resolved
 
 

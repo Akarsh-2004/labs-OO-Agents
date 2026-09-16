@@ -141,7 +141,7 @@ def test_scripted_plan_honours_explicit_reply_cap():
     assert result.exit_code == 0, result.output
     plan = json.loads(result.stdout)["data"]
     assert plan["entry"]["max_tokens"] == 1234
-    assert plan["probes"][0]["body"]["max_output_tokens"] == 200
+    assert plan["probes"][0]["body"]["max_output_tokens"] == 1234
 
 
 def test_stage_reasoning_budget_override_reaches_wire(monkeypatch, tmp_path):
@@ -175,7 +175,7 @@ def test_stage_reasoning_budget_override_reaches_wire(monkeypatch, tmp_path):
             "TEST_REASONING_KEY",
             "--levels-file",
             str(levels),
-            "--reasoning-output-tokens",
+            "--max-tokens",
             "8192",
             "--budget-tokens",
             "9000",

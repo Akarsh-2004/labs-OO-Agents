@@ -3,9 +3,28 @@
 """Local installation references and bounded, non-secret failure observations."""
 
 import json
+import os
 import re
 from importlib import metadata
 from pathlib import Path
+
+
+def scrub_report(value, *, api_key=None, api_key_env=None):
+    """Remove active credential values throughout a report, including mapping keys."""
+    secrets = tuple(s for s in (api_key, os.environ.get(api_key_env or "")) if s)
+
+    def scrub(item):
+        if isinstance(item, str):
+            for secret in secrets:
+                item = item.replace(secret, "[redacted]")
+            return item
+        if isinstance(item, dict):
+            return {scrub(k): scrub(v) for k, v in item.items()}
+        if isinstance(item, (list, tuple)):
+            return [scrub(v) for v in item]
+        return item
+
+    return scrub(value)
 
 
 def installation_context():

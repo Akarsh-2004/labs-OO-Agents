@@ -6,6 +6,15 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Add `nooa connect`: a model-setup wizard, staged JSON interface and reusable
+  `nooa.unifiedllm.connect` library. Prompts remain in `nooa-cli`, without new
+  core dependencies. Configured checks send the saved reply limit, including
+  reasoning-level overrides; insufficient budget skips checks instead of lowering
+  caps. Save-time validation rejects caps that leave no input room. New entries
+  default to `transport: direct`, forward-compatible with the direct SDK runtime;
+  older runtimes ignore it and explicit existing transport choices are preserved.
+  Registry writes follow symlinks and retain mode/newlines. Diagnostic handoffs
+  scrub active keys throughout reports, including model names and mapping keys.
 - Add the dedicated `nooa-model-configuration` coding-agent skill and route
   Connect help and diagnostic handoffs to it. Agent authoring links to model
   setup instead of embedding registry and reasoning-configuration instructions.
