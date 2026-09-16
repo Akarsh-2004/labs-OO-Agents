@@ -661,8 +661,8 @@ async def test_solve_task_uses_v2_single_tool_contract(agent_type, tmp_path):
 
     The single python_cell tool stays; duplicated framework blocks (state,
     execution_context, context_usage, strategy prompt) are suppressed; the
-    class docs render once, concisely, as the self block; live cell context and
-    state blocks replace the generic ones.
+    class docs render once, concisely, as the self block. The namespace context
+    remains available without the automatic cell-state inventory.
     """
     code = (
         "return_result(TaskResult(solution_description='done', evidence='ran true', "
@@ -703,7 +703,7 @@ async def test_solve_task_uses_v2_single_tool_contract(agent_type, tmp_path):
         assert "<strategy_prompt" not in rendered
         assert "<python_cell_tools" in system_prompt
         assert "<python_cell_context" in system_prompt
-        assert "<python_cell_state" in rendered
+        assert "<python_cell_state" not in rendered
         assert "<self" in system_prompt
         assert "You are an autonomous software engineering agent." in system_prompt
         assert "Solve the supplied task completely." in rendered

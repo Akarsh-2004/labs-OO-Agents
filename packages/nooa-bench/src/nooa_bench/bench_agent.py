@@ -58,6 +58,7 @@ _SOLVE_STRATEGY = CodeActV2(config=CodeActConfig(max_retries=10, cell_timeout=18
 _SOLVE_CONTEXT = {
     "state": None,
     "execution_context": None,
+    "python_cell_state": None,
     "self": Context(expr="doc(type(self), concise=True)", prefix=True),
     # Method inputs remain live even if their prefill events are summarized.
     # Reuse the framework's bounded parameter rendering rather than a raw copy.

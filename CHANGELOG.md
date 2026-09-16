@@ -16,6 +16,7 @@ to follow semantic versioning.
   Its cacheable Python-cell context includes the execution namespace's typed
   stub without a second execution-context block. Names and runtime helpers use
   one Python-style block; internal delegation errors are not advertised there.
+  Benchmark agents omit the automatic `python_cell_state` inventory block.
 - Trace explorer viewer requests now send configured viewer authentication and
   honor proxy environment settings, including `NO_PROXY` for direct access.
   Authenticated HTTP requests warn that bearer tokens are unencrypted; existing
