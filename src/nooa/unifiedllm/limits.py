@@ -20,6 +20,18 @@ class ContextLimits:
     reserved_output_tokens: int
     reserve_is_fallback: bool = False
 
+    def __post_init__(self) -> None:
+        if (
+            not self.reserve_is_fallback
+            and self.context_window is not None
+            and self.reserved_output_tokens >= self.context_window
+        ):
+            raise ValueError(
+                f"Configured reply cap ({self.reserved_output_tokens:,}) leaves no room for input "
+                f"in the context window ({self.context_window:,}). Reduce the reply cap or "
+                "correct the model's context_window before using context management."
+            )
+
     @property
     def usable_input_tokens(self) -> int | None:
         """Remaining input capacity, or None when the window is unknown."""

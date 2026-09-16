@@ -16,6 +16,8 @@ to follow semantic versioning.
   explicit summary thresholds remain fixed across model switches. Responses
   requests translate reply-cap aliases to `max_output_tokens`, and cap overrides
   replace inherited aliases rather than sending conflicting limits.
+  Context management rejects a configured reply cap at or above the known
+  context window instead of repeatedly summarizing against a one-token budget.
 - Restore legacy Todo notes and statuses through the stored-session deserializer,
   and retain completed worker results when a delegated Todo disappears.
   Cleanup handles child-task re-entry and continues after a callback is cancelled,

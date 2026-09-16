@@ -65,6 +65,68 @@ def test_active_level_not_metadata_default_and_unknown_reserve():
     assert limits.reserve_is_fallback
 
 
+@pytest.mark.parametrize("cap", [32_768, 65_536])
+@pytest.mark.parametrize("source", ["default", "override", "alias", "extra_body", "level"])
+def test_reply_cap_must_leave_room_for_input(cap, source):
+    llm = client()
+    llm._context_window = 32_768
+    llm.config["max_tokens"] = 8192
+    overrides = {}
+    if source == "default":
+        llm.config["max_tokens"] = cap
+    elif source == "override":
+        overrides = {"max_tokens": cap}
+    elif source == "alias":
+        overrides = {"max_output_tokens": cap}
+    elif source == "extra_body":
+        overrides = {"extra_body": {"max_tokens": cap}}
+    else:
+        llm._reasoning_config = ReasoningConfig(levels={"high": {"max_tokens": cap}})
+        overrides = {"reasoning_level": "high"}
+
+    with pytest.raises(ValueError, match="reply cap.*leaves no room for input"):
+        context_budget(llm, request_params=overrides)
+
+
+@pytest.mark.parametrize("cap", [16_384, 24_576])
+def test_large_valid_reply_cap_is_not_replaced_by_a_fallback(cap):
+    llm = client()
+    llm._context_window = 32_768
+    llm.config["max_tokens"] = cap
+    limits = llm.get_context_limits(fallback_reserve=4096)
+    assert limits.reserved_output_tokens == cap
+    assert limits.usable_input_tokens == 32_768 - cap
+    assert not limits.reserve_is_fallback
+    assert context_budget(llm) == int((32_768 - cap) * 0.8)
+
+
+def test_reply_cap_guard_also_covers_custom_clients_but_not_unknown_limits():
+    from types import SimpleNamespace
+
+    from nooa.unifiedllm.limits import context_limits_for
+
+    custom = SimpleNamespace(context_window=32_768)
+    with pytest.raises(ValueError, match="reply cap.*leaves no room for input"):
+        context_limits_for(custom, {"max_completion_tokens": 32_768})
+
+    llm = client()
+    llm._context_window = None
+    assert llm.get_context_limits().usable_input_tokens is None
+    # An unknown provider cap is not a configured, invalid request.
+    custom.context_window = 2048
+    assert context_limits_for(custom, fallback_reserve=4096).reserve_is_fallback
+
+
+def test_invalid_reply_cap_cannot_install_a_one_token_automatic_summary_budget():
+    llm = client()
+    llm._context_window = 32_768
+    llm.config["max_tokens"] = 32_768
+    agent = Agent(llm=llm)
+    with pytest.raises(ValueError, match="reply cap.*leaves no room for input"):
+        install_summarizer(SummarizationConfig(), agent)
+    assert not getattr(agent, "_summarizers", [])
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "overrides,expected",
