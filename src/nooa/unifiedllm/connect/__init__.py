@@ -985,7 +985,7 @@ def diagnostic_prompt(
     }
     return (
         f"Diagnose and fix NOOA Connect stage {stage!r}. "
-        "First read the nooa-agent-authoring skill and companion docs located by the "
+        "First read the nooa-model-configuration skill and companion docs located by the "
         "installation references below. "
         "Inspect the configuration, credential lookup, and actual request construction. "
         "Model listing alone does not validate credentials. Distinguish rejection, missing "

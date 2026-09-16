@@ -3,6 +3,7 @@
 """Diagnostic handoffs explain reproduction and sources without exposing credentials."""
 
 import shlex
+from pathlib import Path
 
 from nooa_cli.commands._connect_registry import diagnostic_context
 
@@ -40,6 +41,13 @@ def test_target_and_effective_source_are_distinct(tmp_path, monkeypatch):
     assert "git clone" not in prompt
     assert context["source_root"].startswith("/")
     assert all(path.startswith("/") for path in context["reference_paths"])
+    from nooa.skill import _parse_skill_md
+
+    skill_path = Path(context["reference_paths"][0])
+    name, _, _ = _parse_skill_md(skill_path.parent)
+    assert name == "nooa-model-configuration"
+    assert str(skill_path) in prompt
+    assert "nooa-agent-authoring" not in prompt
     assert context["target_in_registry_chain"] is False
     assert shlex.split(context["rerun_command"])[-1] == "2136"
     assert "does not authorize additional paid calls" in prompt
@@ -89,6 +97,8 @@ def test_wheel_references_pin_version_not_main(monkeypatch, tmp_path):
     result = installation_context()
     assert result["source_root"] is None
     assert "checkout --detach v1.2.3" in result["reference_command"]
+    assert "skills/nooa-model-configuration/SKILL.md" in result["reference_guidance"]
+    assert "nooa-agent-authoring" not in result["reference_guidance"]
     monkeypatch.setattr(_version, "__version__", "0.0.0+unknown")
     result = installation_context()
     assert "reference_command" not in result

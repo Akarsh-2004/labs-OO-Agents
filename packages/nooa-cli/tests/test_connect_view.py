@@ -24,7 +24,7 @@ def test_intro_is_wrapped_and_keeps_cost_notice_and_manual_routes(monkeypatch):
     assert "--no-probe" in result.output
     assert "F1" in result.output
     assert "docs/model-configuration.md" in result.output
-    assert "nooa-agent-authoring" in result.output
+    assert "nooa-model-configuration" in result.output
 
 
 def test_no_color_keeps_readable_titles_and_warning(monkeypatch):

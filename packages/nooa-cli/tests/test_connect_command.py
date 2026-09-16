@@ -473,7 +473,7 @@ def test_authentication_recovery_keeps_budget_and_secrets(tmp_path, monkeypatch,
     assert context["remaining_budget_tokens"] == 131072 - 3 * 712
     assert context["interface_timeout_seconds"] == 30
     assert "--stage interfaces" in context["rerun_command"]
-    assert "skills/nooa-agent-authoring/SKILL.md" in handoff
+    assert "skills/nooa-model-configuration/SKILL.md" in handoff
     assert "git clone" not in handoff
     assert litellm.suppress_debug_info is False
     assert len(sent) == (6 if recover else 3)
@@ -534,7 +534,7 @@ def test_no_probe_points_to_manual_skill_and_does_no_http(tmp_path, monkeypatch)
     result = CliRunner().invoke(command, [*args(path), "--yes"])
     assert result.exit_code == 0, result.output
     assert "model-configuration.md" in result.output
-    assert "nooa-agent-authoring" in result.output
+    assert "nooa-model-configuration" in result.output
 
 
 def test_interface_and_later_checks_share_the_cli_budget(tmp_path, monkeypatch):

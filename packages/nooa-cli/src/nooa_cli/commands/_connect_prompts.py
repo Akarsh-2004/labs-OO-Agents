@@ -112,7 +112,7 @@ def prompt(
                         "class:help",
                         " No paid calls: restart with --no-probe\n"
                         " Manual setup: docs/model-configuration.md\n"
-                        " Agent skill: nooa-agent-authoring\n"
+                        " Agent skill: nooa-model-configuration\n"
                         " Enter uses the suggested default. Typing replaces it. Right Arrow edits it.\n"
                         " Arrow keys / Home / End edit. Ctrl-U clears. F1 closes help.",
                     )

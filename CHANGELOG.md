@@ -6,6 +6,9 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- Add the dedicated `nooa-model-configuration` coding-agent skill and route
+  Connect help and diagnostic handoffs to it. Agent authoring links to model
+  setup instead of embedding registry and reasoning-configuration instructions.
 - Connect prefers endpoint-reported limits to catalogue values, labels input-only
   context bounds, and lets staged/offline plans reuse discovery JSON. Cache checks
   consider both continuations without treating provider misses as setup failures.

@@ -291,7 +291,7 @@ checks as well as saving. Library frontends opt in with `plan(..., session_check
 
 If you do not want paid checks, use `--no-probe` or follow
 [manual model configuration](model-configuration.md), optionally with the
-`nooa-agent-authoring` skill. With `--no-probe`, interface selection is manual.
+`nooa-model-configuration` skill. With `--no-probe`, interface selection is manual.
 
 In a terminal, type part of a model name to filter a scrolling completion menu;
 Tab selects a match. Large catalogues do not print every model into the prompt.

@@ -1,7 +1,8 @@
 # Configure a model without paid checks
 
 You can write a model configuration yourself, or ask an agent using the
-`nooa-agent-authoring` skill to do it. Neither requires a model API call.
+[nooa-model-configuration](../skills/nooa-model-configuration/SKILL.md) skill to do it.
+Neither requires a model API call.
 Use the endpoint's documentation for its exact model ID, API format and limits;
 leave anything unknown unset rather than guessing.
 
@@ -90,7 +91,7 @@ uv run nooa connect your-model --as my-model \
 ```
 
 You still confirm before saving or replacing an alias. For agent-assisted setup,
-ask: “Use the `nooa-agent-authoring` skill to configure this model without API
+ask: “Use the `nooa-model-configuration` skill to configure this model without API
 calls. Preserve my other entries, use an environment-variable name for the key,
 and validate the file locally only.” See [Connect](model-connect.md) for the
 automatic checks if you later want to test the endpoint.

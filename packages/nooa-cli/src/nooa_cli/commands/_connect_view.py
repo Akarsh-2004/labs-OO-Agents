@@ -115,7 +115,7 @@ def intro(*, checks, output_tokens, budget_tokens, reasoning_output_tokens=4096)
     line("Skip paid checks: --no-probe    Help: F1", dim=True)
     if not sys.stdin.isatty():
         line("Manual setup: docs/model-configuration.md", dim=True)
-        line("Agent skill: nooa-agent-authoring", dim=True)
+        line("Agent skill: nooa-model-configuration", dim=True)
 
 
 def step(number, title):
