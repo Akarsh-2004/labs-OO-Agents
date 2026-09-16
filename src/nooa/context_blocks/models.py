@@ -440,33 +440,30 @@ class ContextWindowStats(BaseModel):
             return None
         return self.prompt_tokens / window
 
-    def format(self, *, include_guidance: bool = True) -> str:
+    def format(self) -> str:
         """Human-readable context window summary, suitable for a context block.
 
         Before the first provider response there is no token count yet::
 
-            Context usage: awaiting first model response (no provider token count yet)
+            Context: awaiting first model response
 
         With provider usage and a known model window::
 
-            Context usage: 12,450 / 200,000 tokens (6.2%) [provider-reported]
+            Context: 12,450 / 200,000 tokens (6.2%)
               Context blocks: ~8,200 tokens — 6 blocks
               Events:         ~4,250 tokens — 18 events
 
         The header total is the exact provider count; the per-category lines
         are attributed from it by character share (prefixed ``~``).
-        Set ``include_guidance=False`` when history compaction is automatic.
         """
         guidance = (
-            "Free space by collapsing older event history with "
+            "Compact history: "
             "self.events.collapse(start_tag, end_tag, summary_text=...); "
-            "use doc(self.events) for the available event-history tools. "
-            "Use self.context (ContextApi) to summarize or remove large "
-            "context blocks."
+            "see doc(self.events).\n"
+            "Manage context blocks: doc(self.context)."
         )
         if self.prompt_tokens is None:
-            text = "Context usage: awaiting first model response (no provider token count yet)"
-            return text + ("\n" + guidance if include_guidance else "")
+            return "Context: awaiting first model response\n" + guidance
 
         lines: list[str] = []
 
@@ -478,17 +475,13 @@ class ContextWindowStats(BaseModel):
             reserve = self.reserved_output_tokens or 0
             if reserve:
                 lines.append(
-                    f"Context usage: {self.prompt_tokens:,} / {usable:,} usable tokens "
-                    f"({pct:.1f}%) [provider-reported; {reserve:,} of the "
-                    f"{window:,}-token window reserved for output]"
+                    f"Context: {self.prompt_tokens:,} / {usable:,} usable tokens "
+                    f"({pct:.1f}%) · output reserve: {reserve:,}"
                 )
             else:
-                lines.append(
-                    f"Context usage: {self.prompt_tokens:,} / {window:,} tokens "
-                    f"({pct:.1f}%) [provider-reported]"
-                )
+                lines.append(f"Context: {self.prompt_tokens:,} / {window:,} tokens ({pct:.1f}%)")
         else:
-            lines.append(f"Context usage: {self.prompt_tokens:,} tokens [provider-reported]")
+            lines.append(f"Context: {self.prompt_tokens:,} tokens")
 
         # --- Context blocks line (attributed by character share) ---
         cb = self.context_blocks_tokens or 0
@@ -511,7 +504,6 @@ class ContextWindowStats(BaseModel):
             lines.append("Context is nearly full. Context blocks over budget are labeled EVICTED.")
 
         # --- Cleanup guidance ---
-        if include_guidance:
-            lines.append(guidance)
+        lines.append(guidance)
 
         return "\n".join(lines)

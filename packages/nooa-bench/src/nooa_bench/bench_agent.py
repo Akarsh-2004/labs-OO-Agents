@@ -123,9 +123,7 @@ class BenchAgent(
     llm=FakeLLMClient(),
     context={
         "todo_status": Context(expr="self.todo.status()"),
-        "context_usage": Context(
-            expr="self.context_stats.format(include_guidance=False) if self.context_stats else ''"
-        ),
+        "context_usage": Context(expr="self.context_stats.format() if self.context_stats else ''"),
     },
 ):
     """You are an autonomous software engineering agent.
