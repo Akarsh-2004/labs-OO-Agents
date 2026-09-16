@@ -121,7 +121,12 @@ def _problem_statement(task_input: dict) -> str:
 class BenchAgent(
     Agent,
     llm=FakeLLMClient(),
-    context={"todo_status": Context(expr="self.todo.status()")},
+    context={
+        "todo_status": Context(expr="self.todo.status()"),
+        "context_usage": Context(
+            expr="self.context_stats.format(include_guidance=False) if self.context_stats else ''"
+        ),
+    },
 ):
     """You are an autonomous software engineering agent.
 

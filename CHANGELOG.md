@@ -47,8 +47,9 @@ to follow semantic versioning.
   separate `AgentVars` implementation.
 - Delegation merge conflicts raise `DelegationMergeError` carrying the completed
   result and worker state. Benchmark agents no longer pre-seed a planning Todo;
-  they expose tools through `python_cell_tools`, omit the `context_usage` block,
-  and recreate the shell for each evaluation's working directory.
+  they expose tools through `python_cell_tools`, retain the `context_usage` status
+  without manual-compaction advice, and recreate the shell for each evaluation's
+  working directory.
 
 - Responses clients now honor the cached renderer's stable-prefix boundary by default,
   without a cache setting in the model registry. Requests without a usable boundary

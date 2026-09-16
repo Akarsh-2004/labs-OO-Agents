@@ -440,7 +440,7 @@ class ContextWindowStats(BaseModel):
             return None
         return self.prompt_tokens / window
 
-    def format(self) -> str:
+    def format(self, *, include_guidance: bool = True) -> str:
         """Human-readable context window summary, suitable for a context block.
 
         Before the first provider response there is no token count yet::
@@ -455,16 +455,18 @@ class ContextWindowStats(BaseModel):
 
         The header total is the exact provider count; the per-category lines
         are attributed from it by character share (prefixed ``~``).
+        Set ``include_guidance=False`` when history compaction is automatic.
         """
+        guidance = (
+            "Free space by collapsing older event history with "
+            "self.events.collapse(start_tag, end_tag, summary_text=...); "
+            "use doc(self.events) for the available event-history tools. "
+            "Use self.context (ContextApi) to summarize or remove large "
+            "context blocks."
+        )
         if self.prompt_tokens is None:
-            return (
-                "Context usage: awaiting first model response (no provider token count yet)\n"
-                "Free space by collapsing older event history with "
-                "self.events.collapse(start_tag, end_tag, summary_text=...); "
-                "use doc(self.events) for the available event-history tools. "
-                "Use self.context (ContextApi) to summarize or remove large "
-                "context blocks."
-            )
+            text = "Context usage: awaiting first model response (no provider token count yet)"
+            return text + ("\n" + guidance if include_guidance else "")
 
         lines: list[str] = []
 
@@ -509,12 +511,7 @@ class ContextWindowStats(BaseModel):
             lines.append("Context is nearly full. Context blocks over budget are labeled EVICTED.")
 
         # --- Cleanup guidance ---
-        lines.append(
-            "Free space by collapsing older event history with "
-            "self.events.collapse(start_tag, end_tag, summary_text=...); "
-            "use doc(self.events) for the available event-history tools. "
-            "Use self.context (ContextApi) to summarize or remove large "
-            "context blocks."
-        )
+        if include_guidance:
+            lines.append(guidance)
 
         return "\n".join(lines)

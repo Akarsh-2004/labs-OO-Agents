@@ -369,6 +369,35 @@ class TestContextWindowStatsEdgeCases:
 class TestContextWindowStatsFormat:
     """Tests for the format() context block output."""
 
+    def test_guidance_can_be_omitted_without_changing_stats(self):
+        stats = ContextWindowStats(
+            context_blocks_count=5,
+            events_count=12,
+            prompt_tokens=24000,
+            context_blocks_chars=10000,
+            events_chars=30000,
+            model_context_window=128000,
+            reserved_output_tokens=8000,
+        )
+        expected = (
+            "Context usage: 24,000 / 120,000 usable tokens (20.0%) "
+            "[provider-reported; 8,000 of the 128,000-token window reserved for output]\n"
+            "  Context blocks: ~6,000 tokens — 5 blocks\n"
+            "  Events:         ~18,000 tokens — 12 events"
+        )
+        assert stats.format(include_guidance=False) == expected
+        assert stats.format().startswith(expected + "\nFree space")
+        assert "self.events.collapse" in stats.format()
+        pending = stats.model_copy(update={"prompt_tokens": None})
+        assert pending.format(include_guidance=False) == (
+            "Context usage: awaiting first model response (no provider token count yet)"
+        )
+        assert "self.events.collapse" in pending.format()
+
+        full = stats.model_copy(update={"prompt_tokens": 110000})
+        assert "Context is nearly full" in full.format(include_guidance=False)
+        assert "self.events.collapse" not in full.format(include_guidance=False)
+
     def test_format_awaiting_first_response(self):
         """Before the first provider response, format() says so — no numbers."""
         stats = ContextWindowStats(

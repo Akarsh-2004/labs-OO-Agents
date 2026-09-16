@@ -198,9 +198,10 @@ async def test_merge_error_is_not_advertised_in_python_cell_context(agent_class)
         await agent.aclose()
 
 
-def test_bench_agent_context_is_minimal_and_automatic():
+@pytest.mark.parametrize("agent_type", [BenchAgent, RLMBenchAgent])
+def test_bench_agent_context_is_minimal_and_automatic(agent_type):
     """Only actionable live context is exposed; compaction is automatic."""
-    agent = BenchAgent(llm=FakeLLMClient())
+    agent = agent_type(llm=FakeLLMClient())
 
     keys = list(agent.context_manager.keys())
 
@@ -208,7 +209,7 @@ def test_bench_agent_context_is_minimal_and_automatic():
     assert "python_cell_tools" in keys
     assert "task" not in keys
     assert "todo" not in keys
-    assert "context_usage" not in keys
+    assert "context_usage" in keys
     assert getattr(agent, "_summarizers", [])
 
 
@@ -660,7 +661,7 @@ async def test_solve_task_uses_v2_single_tool_contract(agent_type, tmp_path):
     """Bench agents share CodeActV2's context contract.
 
     The single python_cell tool stays; duplicated framework blocks (state,
-    execution_context, context_usage, strategy prompt) are suppressed; the
+    execution_context, strategy prompt) are suppressed; the
     class docs render once, concisely, as the self block. The namespace context
     remains available without the automatic cell-state inventory.
     """
@@ -682,6 +683,17 @@ async def test_solve_task_uses_v2_single_tool_contract(agent_type, tmp_path):
         ]
     )
     agent = agent_type(llm=llm, working_dir=str(tmp_path))
+    from nooa.context_blocks.models import ContextWindowStats
+
+    agent.runtime._last_context_stats = ContextWindowStats(
+        context_blocks_count=5,
+        events_count=12,
+        prompt_tokens=24000,
+        context_blocks_chars=10000,
+        events_chars=30000,
+        model_context_window=128000,
+        reserved_output_tokens=8000,
+    )
     try:
         result = await agent._solve_task("solve the supplied task")
         assert result.solution_description == "done"
@@ -699,7 +711,9 @@ async def test_solve_task_uses_v2_single_tool_contract(agent_type, tmp_path):
 
         assert "<state" not in system_prompt
         assert "<execution_context" not in rendered
-        assert "<context_usage" not in rendered
+        assert "<context_usage" in rendered
+        assert "Context usage: 24,000 / 120,000 usable tokens (20.0%)" in rendered
+        assert "self.events.collapse" not in rendered
         assert "<strategy_prompt" not in rendered
         assert "<python_cell_tools" in system_prompt
         assert "<python_cell_context" in system_prompt
