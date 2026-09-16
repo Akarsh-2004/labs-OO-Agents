@@ -189,10 +189,9 @@ class TruncationConfig(BaseModel):
         int,
         Field(description="Minimum number of recent events preserved during eviction"),
     ] = 5
-    # Output-token planning reserve. When a call sets ``max_tokens``
-    # explicitly, THAT value is reserved out of the model window (the provider
-    # rejects prompt + max_tokens > window); when it doesn't, this value is
-    # used instead. The reserve shrinks the usable window for the default
+    # Output-token planning reserve, used only when UnifiedLLM cannot resolve
+    # a reply cap from client defaults, reasoning settings or call overrides.
+    # The reserve shrinks the usable window for the default
     # context-block budget (``(context_window - reserve) // 2``), for the
     # ``ctx N%`` utilization / nearly-full warning, and for post-error archive
     # sizing. Set to 0 to disable both the reserve and the auto-derived
@@ -201,9 +200,9 @@ class TruncationConfig(BaseModel):
         int,
         Field(
             description=(
-                "Tokens reserved for the LLM response when the call does not "
-                "set max_tokens explicitly. Shrinks the usable context window "
-                "for budgeting and utilization. 0 disables."
+                "Planning reserve when no effective reply cap is configured. "
+                "Shrinks the usable context window for budgeting and utilization. "
+                "0 disables the fallback, not an explicit reply cap."
             )
         ),
     ] = 4_096

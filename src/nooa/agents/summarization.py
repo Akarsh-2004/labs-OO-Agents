@@ -539,30 +539,35 @@ class SummarizationAgent(Agent):
     def _input_token_budget(self) -> int | None:
         """Max tokens for the rendered summarization input (history_markdown).
 
-        ~70% of the summarizer model's context window, leaving headroom for the
+        ~70% of the summarizer model's usable input window, leaving headroom for the
         summarize() method's own prompt scaffolding (docstring, instructions,
         target_chars) and the completion. ``None`` (no cap) when the model
         window can't be determined — never wipe the input on a misconfig; the
         API error path is still the backstop."""
         llm = getattr(self, "_llm", None)
-        for attr in ("context_window", "context_limit"):
-            window = getattr(llm, attr, None)
-            if isinstance(window, int) and window > 0:
-                return int(window * 0.7)
-        return None
+        return context_budget(llm, percent=0.7, fallback=None)
 
 
 # =============================================================================
 # Helper Functions
 # =============================================================================
-def context_budget(llm: Any, percent: float = 0.8, fallback: int = 100_000) -> int:
-    """Calculate token budget as percentage of the LLM's context window.
+def context_budget(
+    llm: Any,
+    percent: float = 0.8,
+    fallback: int | None = 100_000,
+    *,
+    request_params: dict[str, Any] | None = None,
+    fallback_reserve: int = 0,
+) -> int | None:
+    """Calculate a percentage of the usable input window, after the reply reserve.
 
     Args:
         llm: LLM instance with ``context_window`` attribute (``context_limit``
              also accepted for historical callers)
         percent: Fraction of context to use (0.0-1.0), default 0.8 (80%)
         fallback: Value returned when the LLM doesn't expose either attribute
+        request_params: Effective per-call settings, including reasoning level.
+        fallback_reserve: Planning reserve when no reply limit is configured.
 
     Returns:
         Token budget as integer.
@@ -575,16 +580,12 @@ def context_budget(llm: Any, percent: float = 0.8, fallback: int = 100_000) -> i
     if percent <= 0:
         raise ValueError("percent must be > 0")
 
-    # ``context_window`` is the UnifiedLLM convention. ``context_limit`` was
-    # the originally-documented attribute name but no shipped LLM client sets
-    # it — falling back keeps the helper useful for any custom wrapper that
-    # does. Treat non-positive limits as unavailable; returning 0 silently
-    # disables useful token-budget summarization.
-    for attr in ("context_window", "context_limit"):
-        limit = getattr(llm, attr, None)
-        if limit is not None and limit > 0:
-            return int(limit * percent)
-    return fallback
+    from nooa.unifiedllm.limits import context_limits_for
+
+    limit = context_limits_for(
+        llm, request_params, fallback_reserve=fallback_reserve
+    ).usable_input_tokens
+    return max(1, int(limit * percent)) if limit is not None else fallback
 
 
 # =============================================================================
@@ -621,6 +622,7 @@ class TokenBudgetSummarizer(SummarizationAgent):
     _pending_source: Annotated[tuple[tuple[str, str], ...] | None, hidden] = None
     _warned_filtered: Annotated[bool, hidden] = False
     _failed_forks: Annotated[int, hidden] = 0
+    _automatic_context_budget: Annotated[bool, hidden] = False
 
     @hidden
     @no_trace
@@ -670,6 +672,13 @@ class TokenBudgetSummarizer(SummarizationAgent):
         selected = tags[: -self.config.preserve_recent] if self.config.preserve_recent else tags
         source = tuple((tag, self.target_event_manager[tag].id) for tag in selected)
         ctx = await nxt(ctx)
+        if self._automatic_context_budget and ctx.client is not None:
+            budget = context_budget(
+                ctx.client,
+                request_params=ctx.params,
+                fallback_reserve=ctx.runtime.truncation_config.response_reserve_tokens,
+            )
+            self.config = self.config.model_copy(update={"max_tokens": budget})
         usage = ctx.response.usage if ctx.response is not None else None
         if (
             self._pending_task is not None

@@ -28,6 +28,43 @@ def test_run_stream_documents_standalone_usage():
     assert "event.timed_out" in doc
 
 
+def test_run_and_run_stream_have_matching_arguments():
+    import inspect
+
+    def arguments(method):
+        return [(p.name, p.kind, p.default) for p in inspect.signature(method).parameters.values()]
+
+    assert arguments(ShellTools.run_stream) == arguments(ShellTools.run)
+
+
+@pytest.mark.parametrize("payload", ["", "hello", "one\ntwo\n", "'\" $HOME $(echo nope) `pwd` λ\n"])
+async def test_run_stream_accepts_stdin_verbatim_and_keeps_exit_status(tmp_path, payload):
+    shell = ShellTools(cwd=str(tmp_path))
+    try:
+        buffered = await shell.run(
+            "cat; printf 'problem\\n' >&2; (exit 7)", stdin=payload, timeout=5.0
+        )
+        events = [
+            event
+            async for event in shell.run_stream(
+                "cat; printf 'problem\\n' >&2; (exit 7)", stdin=payload, timeout=5.0
+            )
+        ]
+        assert "".join(event.text for event in events if event.kind == "stdout") == payload
+        assert "".join(event.text for event in events if event.kind == "stderr") == "problem\n"
+        assert events[-1].kind == "done"
+        assert events[-1].returncode == 7
+        # Buffered run has always stripped trailing newlines; streaming does not.
+        assert buffered.stdout == payload.rstrip("\n")
+        assert buffered.stderr == "problem"
+        assert buffered.returncode == events[-1].returncode
+        assert not events[-1].timed_out
+        assert sum(event.kind == "done" for event in events) == 1
+        assert (await shell.run("printf ready")).stdout == "ready"
+    finally:
+        await shell.close()
+
+
 @pytest.fixture
 def sh(tmp_path):
     return ShellTools(cwd=str(tmp_path))

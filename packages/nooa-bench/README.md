@@ -40,6 +40,13 @@ cleanup does not merge partial state. Task-local state stays on Todos, and autom
 summarization handles context maintenance. Method-writing tools are available in
 both variants.
 
+Context usage is the last provider-reported input count divided by the model
+window minus UnifiedLLM's effective reply cap (including reasoning-level and
+per-call settings). For example, 32,000 input tokens with a 128,000-token window
+and 64,000-token reply cap is 50%. Automatic summarization triggers at 80% of
+that usable input window. Explicit summarization thresholds stay fixed; an
+unknown reply cap uses a labelled planning reserve, not a claimed model limit.
+
 The runner writes `result.json`, `trajectory.json` and aggregate `behavior.json`
 under `/logs/agent`, and the verification instructions to `/app/answer.txt`. Behavior
 metrics count both Python tool names and exclude framework prefill. Set

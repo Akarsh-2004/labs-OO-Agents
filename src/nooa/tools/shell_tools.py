@@ -439,14 +439,18 @@ class ShellTools(Skill):
     async def run_stream(
         self,
         command: Annotated[str, spec(description="Shell command to execute")],
-        timeout: Annotated[float, spec(description="Max seconds to wait before timeout")] = 30.0,
+        *,
+        stdin: Annotated[
+            str | None, spec(description="Text piped to stdin (replaces heredocs)")
+        ] = None,
+        timeout: Annotated[float, spec(description="Max seconds")] = 30.0,
     ) -> AsyncIterator[StreamEvent | StreamDone]:
         """Stream command output line-by-line as it arrives, ending with a done event.
 
         Yields ``StreamEvent`` chunks (``.kind`` is "stdout"/"stderr", ``.text``
         the chunk) incrementally, then a final ``StreamDone`` (``.returncode``,
         ``.timed_out``) once the command completes. Runs in the persistent
-        session, like ``run``.
+        session, like ``run``. Pass a payload as ``stdin=`` instead of heredocs.
 
         Consume output directly and check the final exit status::
 
@@ -455,11 +459,17 @@ class ShellTools(Skill):
                     print("exit:", event.returncode, "timed out:", event.timed_out)
                 else:
                     print(event.text, end="")
+
+        Args:
+            command: Shell command to execute.
+            stdin: Text piped to stdin (no quoting needed).
+            timeout: Max seconds before timeout.
         """
         session = await self._get_session()
+        run_cmd = self._with_stdin(command, stdin)
         timed_out = False
         exit_code = 0
-        async for stream_name, chunk in session.run_stream(command, timeout=timeout):
+        async for stream_name, chunk in session.run_stream(run_cmd, timeout=timeout):
             if stream_name == "__done__":
                 parts = chunk.split(",")
                 exit_code = int(parts[0])
@@ -477,7 +487,7 @@ class ShellTools(Skill):
 
         b64 = base64.b64encode(stdin.encode()).decode()
         return (
-            f"__nemo_in=$(mktemp); base64 -d <<<{b64} > $__nemo_in; "
+            f"__nemo_in=$(mktemp); base64 -d <<<'{b64}' > $__nemo_in; "
             f"({command}) < $__nemo_in; __nemo_rc=$?; rm -f $__nemo_in; "
             f"( exit $__nemo_rc )"
         )

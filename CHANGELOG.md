@@ -6,6 +6,16 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `ShellTools.run_stream` and the coding activity wrapper now accept
+  `command, *, stdin=None, timeout=30.0`, matching `run`. Streaming uses the
+  same stdin handling; pass an existing positional timeout as `timeout=...`.
+- Context status, percentages, automatic summarization and overflow recovery now
+  reserve the selected UnifiedLLM client's effective reply cap, including
+  reasoning levels and per-call overrides. Unknown caps use a labelled planning
+  reserve. Automatic summaries trigger at 80% of the usable input window;
+  explicit summary thresholds remain fixed across model switches. Responses
+  requests translate reply-cap aliases to `max_output_tokens`, and cap overrides
+  replace inherited aliases rather than sending conflicting limits.
 - Restore legacy Todo notes and statuses through the stored-session deserializer,
   and retain completed worker results when a delegated Todo disappears.
   Cleanup handles child-task re-entry and continues after a callback is cancelled,

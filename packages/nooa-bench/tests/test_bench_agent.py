@@ -710,6 +710,7 @@ async def test_solve_task_uses_v2_single_tool_contract(agent_type, tmp_path):
     agent = agent_type(llm=llm, working_dir=str(tmp_path))
     from nooa.context_blocks.models import ContextWindowStats
 
+    llm.config["max_tokens"] = 8000
     agent.runtime._last_context_stats = ContextWindowStats(
         context_blocks_count=5,
         events_count=12,

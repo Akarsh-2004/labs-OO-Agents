@@ -380,6 +380,9 @@ class ContextWindowStats(BaseModel):
             )
         ),
     ] = None
+    output_reserve_is_fallback: bool = Field(
+        default=False, description="Reserve is a planning allowance, not a configured reply cap"
+    )
 
     @property
     def total_tokens(self) -> int | None:
@@ -474,9 +477,10 @@ class ContextWindowStats(BaseModel):
             pct = self.prompt_tokens / usable * 100
             reserve = self.reserved_output_tokens or 0
             if reserve:
+                label = "planning reserve" if self.output_reserve_is_fallback else "output reserve"
                 lines.append(
                     f"Context: {self.prompt_tokens:,} / {usable:,} usable tokens "
-                    f"({pct:.1f}%) · output reserve: {reserve:,}"
+                    f"({pct:.1f}%) · {label}: {reserve:,}"
                 )
             else:
                 lines.append(f"Context: {self.prompt_tokens:,} / {window:,} tokens ({pct:.1f}%)")
