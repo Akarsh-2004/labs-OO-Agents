@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     from nooa.trace_explorer.client import TraceExplorerClient
 
 from nooa.agentdoc import pformat as _pformat
-from nooa.tracing._viewer_auth import apply_viewer_auth
+from nooa.trace_explorer.client import _viewer_headers
 
 # =============================================================================
 # Module Configuration
@@ -2199,7 +2199,7 @@ class TraceExplorer:
         offset = 0
         page_size = 500
 
-        async with httpx.AsyncClient(timeout=30, headers=apply_viewer_auth({})) as client:
+        async with httpx.AsyncClient(timeout=30, headers=_viewer_headers(base_url)) as client:
             while True:
                 url = f"{base_url}/api/trace?session_id={encoded_sid}&limit={page_size}&offset={offset}"
                 try:
@@ -2292,7 +2292,7 @@ class TraceExplorer:
         encoded_exp = urllib.parse.quote(experiment_id, safe="")
         url = f"{base_url}/api/experiment/{encoded_exp}/traces"
 
-        async with httpx.AsyncClient(timeout=60, headers=apply_viewer_auth({})) as client:
+        async with httpx.AsyncClient(timeout=60, headers=_viewer_headers(base_url)) as client:
             try:
                 resp = await client.get(url)
                 if resp.status_code == 404:
@@ -3782,6 +3782,14 @@ class TraceExplorer:
                     break
         if adjacent_turns:
             context_turn_idx, context_llm_turn, context_source = adjacent_turns[0]
+        if (
+            not turn.tool_call_id
+            and turn_index + 1 < len(session.turns)
+            and isinstance(session.turns[turn_index + 1], LLMTurn)
+        ):
+            context_turn_idx = turn_index + 1
+            context_llm_turn = session.turns[context_turn_idx]
+            context_source = "following"
         if turn.tool_call_id:
             for i, candidate, source in adjacent_turns:
                 calls = candidate.tool_calls + [
@@ -3886,8 +3894,11 @@ class TraceExplorer:
         if turn.code:
             tool_name = "execute_python"
             if not turn.tool_call_id and context_llm_turn:
+                calls = context_llm_turn.tool_calls + [
+                    tc for message in context_llm_turn.messages for tc in message.tool_calls
+                ]
                 matching_call = next(
-                    (tc for tc in context_llm_turn.tool_calls if _is_python_tool(tc.function_name)),
+                    (tc for tc in calls if _is_python_tool(tc.function_name)),
                     None,
                 )
             if matching_call is not None:
@@ -5554,7 +5565,7 @@ async def _handle_experiment_errors(
     base_url = base_url.rstrip("/")
     encoded_eid = urllib.parse.quote(experiment_id, safe="")
 
-    async with httpx.AsyncClient(timeout=30, headers=apply_viewer_auth({})) as _client:
+    async with httpx.AsyncClient(timeout=30, headers=_viewer_headers(base_url)) as _client:
         try:
             _resp = await _client.get(f"{base_url}/api/eval/experiment/{encoded_eid}/tests")
             if _resp.status_code == 404:
@@ -5619,7 +5630,7 @@ async def _handle_experiment_search(base_url: str, experiment_id: str, pattern: 
     base_url = base_url.rstrip("/")
     encoded_eid = urllib.parse.quote(experiment_id, safe="")
 
-    async with httpx.AsyncClient(timeout=30, headers=apply_viewer_auth({})) as _client:
+    async with httpx.AsyncClient(timeout=30, headers=_viewer_headers(base_url)) as _client:
         try:
             _resp = await _client.get(f"{base_url}/api/eval/experiment/{encoded_eid}/tests")
             if _resp.status_code == 404:
@@ -5699,7 +5710,7 @@ async def _handle_experiment_failures(base_url: str, experiment_id: str) -> None
     base_url = base_url.rstrip("/")
     encoded_eid = urllib.parse.quote(experiment_id, safe="")
 
-    async with httpx.AsyncClient(timeout=30, headers=apply_viewer_auth({})) as _client:
+    async with httpx.AsyncClient(timeout=30, headers=_viewer_headers(base_url)) as _client:
         try:
             _resp = await _client.get(f"{base_url}/api/eval/experiment/{encoded_eid}/tests")
             if _resp.status_code == 404:
@@ -5801,7 +5812,7 @@ async def _handle_experiment(
     encoded_eid = urllib.parse.quote(experiment_id, safe="")
 
     # Fetch summary
-    async with httpx.AsyncClient(timeout=30, headers=apply_viewer_auth({})) as _client:
+    async with httpx.AsyncClient(timeout=30, headers=_viewer_headers(base_url)) as _client:
         try:
             _resp = await _client.get(f"{base_url}/api/eval/experiment/{encoded_eid}/summary")
             if _resp.status_code == 404:
@@ -5817,7 +5828,7 @@ async def _handle_experiment(
             sys.exit(1)
     # Fetch test results
     tests_data: dict = {"tests": []}
-    async with httpx.AsyncClient(timeout=30, headers=apply_viewer_auth({})) as _client:
+    async with httpx.AsyncClient(timeout=30, headers=_viewer_headers(base_url)) as _client:
         try:
             _resp = await _client.get(f"{base_url}/api/eval/experiment/{encoded_eid}/tests")
             _resp.raise_for_status()
@@ -5935,7 +5946,7 @@ async def _try_thin_client(viewer_url: str, session_id: str) -> TraceExplorerCli
 
     base = viewer_url.rstrip("/")
     try:
-        async with httpx.AsyncClient(timeout=5, headers=apply_viewer_auth({})) as client:
+        async with httpx.AsyncClient(timeout=5, headers=_viewer_headers(base)) as client:
             resp = await client.get(
                 f"{base}/api/explorer/summary",
                 params={"session_id": session_id},

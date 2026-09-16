@@ -260,6 +260,27 @@ def test_delegation_merge_rejects_conflicting_field_changes() -> None:
         tm.merge_todo(worker, base=base)
 
 
+@pytest.mark.parametrize("conflict", ["variable", "worker_comment", "parent_comment"])
+def test_delegation_conflict_matrix_never_partially_commits(conflict):
+    tm = TodoManager()
+    original = tm.add("review", shared="baseline")
+    tm.comment(original, "original comment")
+    base = tm.copy_todo(original)
+    worker = base.model_copy(deep=True)
+    worker.title = "must not commit"
+    if conflict == "variable":
+        original.v.shared = "parent"
+        worker.v.shared = "worker"
+    elif conflict == "worker_comment":
+        worker.comments[0].body = "edited by worker"
+    else:
+        original.comments[0].body = "edited by parent"
+    before = tm.to_dict()
+    with pytest.raises(ValueError, match="conflicting|modified existing"):
+        tm.merge_todo(worker, base=base)
+    assert tm.to_dict() == before
+
+
 def test_manager_preserves_id_keyword_compatibility() -> None:
     tm = TodoManager()
     first = tm.add("first")

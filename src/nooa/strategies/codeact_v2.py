@@ -124,9 +124,9 @@ class CodeActV2(CodeActStrategy):
             text = f"{text[: max_chars - 1]}…"
         return escape(text, quote=False)
 
-    async def python_cell_state_context(self, runtime: RuntimeServices) -> str:
-        """Render compact working state without repeating inputs or output history."""
-        call = getattr(runtime, "current_call", None)
+    @staticmethod
+    def _cell_state(call: "CurrentCall | None") -> dict[str, dict[str, str]]:
+        """Use one visibility rule for compact context and the complete state builtin."""
         live_locals = None if call is None else (call.execution_locals or call.session_locals)
         inputs = {} if call is None else call.bound_parameters()
         input_names = set(inputs)
@@ -144,8 +144,13 @@ class CodeActV2(CodeActStrategy):
                 if isinstance(value, type) or callable(value):
                     continue
                 local_types[name] = type(value).__name__
-        local_items = sorted(local_types.items())
-        import_items = sorted(import_names.items())
+        return {"cell_locals": local_types, "cell_imports": import_names}
+
+    async def python_cell_state_context(self, runtime: RuntimeServices) -> str:
+        """Render compact working state without repeating inputs or output history."""
+        state = self._cell_state(getattr(runtime, "current_call", None))
+        local_items = sorted(state["cell_locals"].items())
+        import_items = sorted(state["cell_imports"].items())
 
         lines = ["## Python cell state"]
 
@@ -192,43 +197,13 @@ class CodeActV2(CodeActStrategy):
 
         def python_cell_state() -> dict[str, dict[str, str]]:
             """Return the complete name-to-type inventory for this call's cell state."""
-            live = call.execution_locals or call.session_locals or {}
-            inputs = call.bound_parameters()
-            input_names = set(inputs)
-            visible = {
-                name: value
-                for name, value in live.items()
-                if isinstance(name, str)
-                and name != "Out"
-                and not name.startswith("_")
-                and name not in input_names
-                and not isinstance(value, type)
-                and not callable(value)
-            }
-            return {
-                "cell_locals": {
-                    **{str(name): type(value).__name__ for name, value in inputs.items()},
-                    **{
-                        name: type(value).__name__
-                        for name, value in visible.items()
-                        if not isinstance(value, ModuleType)
-                    },
-                },
-                "cell_imports": {
-                    name: value.__name__
-                    for name, value in visible.items()
-                    if isinstance(value, ModuleType)
-                },
-            }
+            return self._cell_state(call)
 
         builtins["python_cell_state"] = python_cell_state
         return builtins
 
-    def _always_available_text(self) -> str:
-        return (
-            "Always available without import: `self`, `print()`, `pprint()`, `doc()`, "
-            "`python_cell_state()`, `return_result()`, plus stdlib `asyncio` and `typing`."
-        )
+    def _always_available_builtins(self) -> tuple[str, ...]:
+        return (*super()._always_available_builtins(), "python_cell_state()")
 
     def _python_tool_name(self) -> str:
         return "python_cell"
@@ -236,14 +211,12 @@ class CodeActV2(CodeActStrategy):
     def _build_execute_python_tool(self) -> Any:
         """Build the sole provider tool, including its complete operating contract."""
         tool = super()._build_execute_python_tool()
-        tool.description = """Execute one cell in the current method call's Python session.
+        tool.description = f"""Execute one cell in the current method call's Python session.
 
 Parameters are pre-loaded as locals. Names defined in one cell remain available in
 later cells of this call; reuse them instead of recreating unchanged values. The
 caller controls whether locals survive after the method returns, so follow the agent's
-application-specific state guidance. Already available without import: `self`,
-`print()`, `pprint()`,
-`doc()`, `python_cell_state()`, `return_result()`, `asyncio`, and `typing`. Use
+application-specific state guidance. {self._always_available_text()} Use
 `await` directly. This is your only provider tool: call it on every turn because
 plain-text replies do not execute work or finish the task.
 
@@ -262,10 +235,7 @@ with `asyncio.gather` and inspect each result. For single-shot extraction or
 classification, use a documented `@strategy(PredictStrategy())` helper.
 
 Restrictions (will throw):
-- `eval`, `exec`, `compile`, `__import__`, `input`, `breakpoint`
-- `globals`, `locals`, `vars`, `asyncio.run`, `loop.run_until_complete`
-- Attaching callables to the agent: `self.foo = fn`, `setattr(self, "foo", fn)`,
-  `type(self).foo = fn`
+{self._restrictions_text()}
 """
         return tool
 

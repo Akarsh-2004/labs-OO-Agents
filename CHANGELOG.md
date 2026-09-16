@@ -12,6 +12,8 @@ to follow semantic versioning.
   stub without a second execution-context block.
 - Trace explorer viewer requests now send configured viewer authentication and
   honor proxy environment settings, including `NO_PROXY` for direct access.
+  Authenticated requests require HTTPS; cleartext URLs fail before sending a
+  bearer token. Unauthenticated local HTTP access remains supported.
 - `CurrentCall` is a mutable invocation record; strategies bind its event ID and
   live execution namespace with ordinary public-field assignment during setup.
 - Breaking: remove `CodeActLiteStrategy` and its experimental exports. Use
@@ -24,6 +26,21 @@ to follow semantic versioning.
 - Benchmark agents release resources through `aclose()` as well as `close()`;
   delegation prepares reference data before allocating a worker. Todo metadata
   and comment read-back methods are now included in model-facing documentation.
+  Cancellation during shutdown is propagated only after background cleanup drains.
+- `CodeActStrategy` remains the default strategy, but its model-facing behavior
+  changes: revised delegation guidance, validated inline completion values in
+  PythonOutput (None on validation failure), no replay of synthetic inline-return
+  tool pairs, and explicit error/retry feedback for non-object tool arguments.
+- Todo snapshot upgrades preserve legacy tasks, but downgrading to the previous
+  implementation silently loses descriptions, active-task selection and comment
+  IDs. Back up sessions before downgrading. `TodoVars` is now an alias for
+  `PersistentVars`; helper-name keys must use explicit `get`/`set` access, and
+  private/helper attribute writes are rejected. `InteractiveAgent.v` retains its
+  separate `AgentVars` implementation.
+- Delegation merge conflicts raise `DelegationMergeError` carrying the completed
+  result and worker state. Benchmark agents no longer pre-seed a planning Todo;
+  they expose tools through `python_cell_tools`, omit the `context_usage` block,
+  and recreate the shell for each evaluation's working directory.
 
 - Responses clients now honor the cached renderer's stable-prefix boundary by default,
   without a cache setting in the model registry. Requests without a usable boundary

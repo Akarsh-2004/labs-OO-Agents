@@ -18,11 +18,15 @@ from nooa.unifiedllm import FakeLLMClient, LLMResponse, LLMUsage
 @pytest.mark.asyncio
 @pytest.mark.parametrize("agent_type", [BenchAgent, RLMBenchAgent])
 @pytest.mark.parametrize("close_method", ["close", "aclose"])
+@pytest.mark.parametrize("cancel_close", [False, True])
 async def test_close_drains_pending_summary_before_shell_and_shared_client(
-    agent_type, tmp_path, close_method
+    agent_type, tmp_path, close_method, cancel_close
 ):
     """Exercise the installed summarizer's real middleware and cancellation hook."""
     entered, cancelled = asyncio.Event(), asyncio.Event()
+    cleaning, release = asyncio.Event(), asyncio.Event()
+    if not cancel_close:
+        release.set()
     llm = FakeLLMClient()
     agent = agent_type(
         llm=llm,
@@ -38,7 +42,8 @@ async def test_close_drains_pending_summary_before_shell_and_shared_client(
             await asyncio.Event().wait()
         finally:
             # Include asynchronous cleanup, not only immediate cancellation.
-            await asyncio.sleep(0)
+            cleaning.set()
+            await release.wait()
             cancelled.set()
 
     async def close_shell():
@@ -70,11 +75,28 @@ async def test_close_drains_pending_summary_before_shell_and_shared_client(
     try:
         await agent.event_manager.run_middleware("llm_call", ctx, complete)
         await asyncio.wait_for(entered.wait(), 2)
-        await getattr(agent, close_method)()
+        closer = asyncio.create_task(getattr(agent, close_method)())
+        await asyncio.wait_for(cleaning.wait(), 2)
+        try:
+            if cancel_close:
+                for _ in range(2):
+                    closer.cancel()
+                    await asyncio.sleep(0)
+                    await asyncio.sleep(0)
+                    assert not closer.done()
+                    assert closed == []
+        finally:
+            release.set()
+        if cancel_close:
+            with pytest.raises(asyncio.CancelledError):
+                await closer
+        else:
+            await closer
         assert cancelled.is_set()
         llm.aclose.assert_not_awaited()  # Only the caller owns the shared client.
         await llm.aclose()
         assert closed == ["shell", "client"]
     finally:
+        release.set()
         await agent.aclose()
         await original_shell_close()

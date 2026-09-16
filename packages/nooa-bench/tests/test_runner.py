@@ -202,6 +202,7 @@ async def test_runner_executes_delegation_and_preserves_provider_turns(
         scripted_responses=[
             first,
             response(
+                f"assert str(self.shell.cwd) == {str(tmp_path)!r}\n"
                 "checked = await self.shell.run('printf verified')\n"
                 "assert checked.returncode == 0 and checked.stdout == 'verified'\n"
                 "task = self.todo.list_todos()[0]\n"
@@ -223,7 +224,14 @@ async def test_runner_executes_delegation_and_preserves_provider_turns(
     monkeypatch.setattr(runner, "LOGS_DIR", tmp_path / "logs")
     monkeypatch.setattr(runner, "ANSWER_FILE", tmp_path / "answer.txt")
     assert (
-        await runner._run("Verify the workspace", "fixture-model", agent_type, str(tmp_path)) == 0
+        await runner._run(
+            "Verify the workspace",
+            "fixture-model",
+            agent_type,
+            api_base=None,
+            working_dir=str(tmp_path),
+        )
+        == 0
     )
     assert llm.call_count == 3
     assert llm.close_count == 1  # Worker cleanup must not close the shared client.

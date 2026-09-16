@@ -222,7 +222,8 @@ async def test_explicit_return_completes_with_only_python_cell_tool():
     assert "Cell locals are discarded" not in normalized_description
     assert "self.v" not in normalized_description
     assert "self.shell" not in normalized_description
-    assert "Already available without import" in tool.description
+    assert CodeActV2()._always_available_text() in tool.description
+    assert CodeActV2()._restrictions_text() in tool.description
     for name in (
         "self",
         "print()",
@@ -247,10 +248,13 @@ async def test_explicit_return_completes_with_only_python_cell_tool():
 
 
 @pytest.mark.asyncio
-async def test_trailing_string_is_suppressed_and_does_not_complete():
+@pytest.mark.parametrize(
+    "expression, value", [("'working notes'", None), ("42", 42), ("[1, 2]", [1, 2])]
+)
+async def test_trailing_expression_does_not_complete(expression, value):
     fake_llm = FakeLLMClient(
         scripted_responses=[
-            _response("'working notes'", "call_1"),
+            _response(expression, "call_1"),
             _response("return 'done'", "call_2"),
         ]
     )
@@ -265,7 +269,7 @@ async def test_trailing_string_is_suppressed_and_does_not_complete():
     assert await agent.answer() == "done"
     outputs = [event for event in agent.event_manager.values() if isinstance(event, PythonOutput)]
     assert len(outputs) == 2
-    assert outputs[0].value is None
+    assert outputs[0].value == value
     assert outputs[0].explicit_return is False
     assert outputs[1].value == "done"
     assert outputs[1].explicit_return is True

@@ -3,8 +3,9 @@
 """Shared attribute-access facade over an owner's existing ``vars`` mapping.
 
 This generalizes the ``TodoVars`` proxy formerly defined in ``nooa.tools.todo``;
-it does not implement a new persistence backend. Core ``Todo.v`` and application
-agents that expose ``self.v`` use the same API. It lives beside ``SnapshotVars``
+it does not implement a new persistence backend. Core ``Todo.v`` uses this proxy;
+applications may opt into it for ``self.v``. ``InteractiveAgent.v`` still uses
+its separate ``AgentVars`` proxy and reserved-name rules. It lives beside ``SnapshotVars``
 so the core Todo tool does not depend on the CLI or an interactive session host.
 Snapshot storage and its owner determine when values are saved and restored.
 """

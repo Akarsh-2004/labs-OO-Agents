@@ -104,7 +104,8 @@ Return type: int
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("call_in_messages", [False, True])
-    async def test_later_prefill_uses_matching_following_turn(self, call_in_messages):
+    @pytest.mark.parametrize("has_id", [False, True])
+    async def test_later_prefill_uses_matching_following_turn(self, call_in_messages, has_id):
         """An earlier completed call must not mask the next prefill's tool name."""
         earlier = LLMTurn(
             session_id="abcdef",
@@ -114,7 +115,8 @@ Return type: int
             tool_calls=[ToolCall("execute_python", '{"code": "pass"}', "call_1")],
         )
         completed = ExecutionTurn("pass", "", None, None, tool_call_id="call_1")
-        prefill = ExecutionTurn("print('task')", "task", None, None, tool_call_id="prefill_2")
+        call_id = "prefill_2" if has_id else ""
+        prefill = ExecutionTurn("print('task')", "task", None, None, tool_call_id=call_id)
         matching = ToolCall("python_cell", '{"code": "print(\'task\')"}', "prefill_2")
         following = LLMTurn(
             session_id="abcdef",
@@ -146,7 +148,8 @@ Return type: int
 
         execution = await trace.get_turn("abcdef", 2)
 
-        assert '<tool_call name="python_cell" id="prefill_2">' in execution
+        id_attr = ' id="prefill_2"' if has_id else ""
+        assert f'<tool_call name="python_cell"{id_attr}>' in execution
         assert "## LLM Context (from turn 3)" in execution
         assert "keep API" in execution
         assert "keep state" in execution

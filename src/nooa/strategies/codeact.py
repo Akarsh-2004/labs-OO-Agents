@@ -660,9 +660,20 @@ Standard Python builtins and agent instance (`self`) are available."""
             return ", ".join(name for name, _ in ordered)
 
     def _always_available_text(self) -> str:
+        names = ", ".join(f"`{name}`" for name in self._always_available_builtins())
+        return f"Always available without import: {names}, plus stdlib `asyncio` and `typing`."
+
+    def _always_available_builtins(self) -> tuple[str, ...]:
+        return ("self", "print()", "pprint()", "doc()", "return_result()")
+
+    @staticmethod
+    def _restrictions_text() -> str:
+        """Shared model-facing restrictions for the two Python-tool strategies."""
         return (
-            "Always available without import: `self`, `print()`, `pprint()`, `doc()`, "
-            "`return_result()`, plus stdlib `asyncio` and `typing`."
+            "- `eval`, `exec`, `compile`, `__import__`, `input`, `breakpoint`\n"
+            "- `globals`, `locals`, `vars`, `asyncio.run`, `loop.run_until_complete`\n"
+            "- Attaching callables to the agent: `self.foo = fn`, "
+            "`setattr(self, 'foo', fn)`, `type(self).foo = fn`"
         )
 
     def _python_tool_name(self) -> str:
@@ -743,9 +754,7 @@ Standard Python builtins and agent instance (`self`) are available."""
 
         ## Restrictions (will throw)
 
-        - `eval`, `exec`, `compile`, `__import__`, `input`, `breakpoint`
-        - `globals`, `locals`, `vars`, `asyncio.run`, `loop.run_until_complete`
-        - Attaching callables to the agent: `self.foo = fn`, `setattr(self, 'foo', fn)`, `type(self).foo = fn`
+        {self._restrictions_text()}
         """
         ...
 
@@ -1416,7 +1425,7 @@ Standard Python builtins and agent instance (`self`) are available."""
                                 f"Unknown tool `{tool_call.name}`. "
                                 f"Available tools: {self._available_tool_names()}"
                                 + (
-                                    ". To finish, call python_cell with code "
+                                    f". To finish, call {self._python_tool_name()} with code "
                                     "`return_result(value)`; return_result is a Python builtin, "
                                     "not a provider tool."
                                     if tool_call.name == "return_result"

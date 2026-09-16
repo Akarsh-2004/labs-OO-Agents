@@ -10,6 +10,7 @@ EventManager is a unified event pipeline:
 Design: phase-2-strategy-middleware.md
 """
 
+import asyncio
 import itertools
 import logging
 import re
@@ -124,6 +125,7 @@ class EventManager:
         self._backend: EventBackend = backend if backend is not None else InMemoryBackend()
         self._handlers: dict[str, list[EventHandler]] = defaultdict(list)
         self._close_callbacks: list[Callable[[], Awaitable[None]]] = []
+        self._close_task: asyncio.Task[None] | None = None
 
         # Runtime event query override (set via set_event_query())
         self._event_query: EventQuery | None = None
@@ -254,11 +256,33 @@ class EventManager:
         return unsubscribe
 
     async def aclose(self) -> None:
-        """Await cleanup in reverse registration order, logging individual failures.
+        """Drain background cleanup before propagating caller cancellation.
 
-        Drain registrations first so callbacks can unsubscribe and repeated close
-        calls do not run the same cleanup again. This does not close storage.
+        Concurrent callers share the drain. Shielding prevents cancellation of an
+        owner from interrupting a component while it still uses shared resources.
+        This does not close storage.
         """
+        if asyncio.current_task() is self._close_task:
+            return  # A cleanup callback may close its owner recursively.
+        if self._close_task is None:
+            self._close_task = asyncio.create_task(self._drain_close_callbacks())
+        task = self._close_task
+        cancelled = False
+        try:
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    cancelled = True
+            task.result()
+        finally:
+            if task.done() and self._close_task is task:
+                self._close_task = None
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _drain_close_callbacks(self) -> None:
+        """Own callbacks until their reverse-order cleanup has finished."""
         callbacks, self._close_callbacks = self._close_callbacks, []
         for callback in reversed(callbacks):
             try:

@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for trace explorer thin-client path (explorer_routes + client)."""
 
+from contextlib import nullcontext
 from unittest.mock import patch
 
 import httpx
@@ -274,6 +275,7 @@ async def test_client_honors_env_proxy_and_no_proxy(monkeypatch, no_proxy):
     """The actual thin client uses a proxy unless NO_PROXY exempts the viewer."""
     for name in ("http_proxy", "https_proxy", "all_proxy", "no_proxy"):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("NOOA_VIEWER_AUTH_TOKEN", raising=False)
     monkeypatch.setenv("HTTP_PROXY", "http://blackhole.invalid:3128")
     monkeypatch.setenv("HTTPS_PROXY", "http://blackhole.invalid:3128")
     monkeypatch.setenv("NO_PROXY", no_proxy)
@@ -292,11 +294,12 @@ async def test_client_honors_env_proxy_and_no_proxy(monkeypatch, no_proxy):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("token", [None, "   ", " test-viewer-token "])
+@pytest.mark.parametrize("scheme", ["http", "https"])
 @pytest.mark.parametrize(
     "operation",
     ["thin", "detect", "trace", "experiment", "errors", "search", "failures", "summary"],
 )
-async def test_all_viewer_requests_use_configured_auth(monkeypatch, token, operation):
+async def test_all_viewer_requests_use_configured_auth(monkeypatch, token, operation, scheme):
     """Every viewer entry point authenticates, without adding a header when unset."""
     from nooa.trace_explorer import explorer
 
@@ -319,23 +322,28 @@ async def test_all_viewer_requests_use_configured_auth(monkeypatch, token, opera
         )
 
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", handle)
-    url = "http://viewer.example"
-    if operation == "thin":
-        assert await TraceExplorerClient(url, "test-session").get_overview() == "ok"
-    elif operation == "detect":
-        assert await explorer._try_thin_client(url, "test-session") is not None
-    elif operation == "trace":
-        await explorer.TraceExplorer.from_viewer(url, "test-session")
-    elif operation == "experiment":
-        await explorer.TraceExplorer.load_experiment_sessions(url, "experiment")
-    elif operation == "errors":
-        await explorer._handle_experiment_errors(url, "experiment")
-    elif operation == "search":
-        await explorer._handle_experiment_search(url, "experiment", "pattern")
-    elif operation == "failures":
-        await explorer._handle_experiment_failures(url, "experiment")
-    else:
-        await explorer._handle_experiment(url, "experiment")
+    url = f"{scheme}://viewer.example"
+    blocked = bool(token and token.strip() and scheme == "http")
+    with pytest.raises(ValueError, match="HTTPS") if blocked else nullcontext():
+        if operation == "thin":
+            assert await TraceExplorerClient(url, "test-session").get_overview() == "ok"
+        elif operation == "detect":
+            assert await explorer._try_thin_client(url, "test-session") is not None
+        elif operation == "trace":
+            await explorer.TraceExplorer.from_viewer(url, "test-session")
+        elif operation == "experiment":
+            await explorer.TraceExplorer.load_experiment_sessions(url, "experiment")
+        elif operation == "errors":
+            await explorer._handle_experiment_errors(url, "experiment")
+        elif operation == "search":
+            await explorer._handle_experiment_search(url, "experiment", "pattern")
+        elif operation == "failures":
+            await explorer._handle_experiment_failures(url, "experiment")
+        else:
+            await explorer._handle_experiment(url, "experiment")
+    if blocked:
+        assert not requests
+        return
     assert requests
     expected = "Bearer test-viewer-token" if token and token.strip() else None
     assert all(request.headers.get("Authorization") == expected for request in requests)

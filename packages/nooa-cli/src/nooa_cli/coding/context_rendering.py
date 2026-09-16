@@ -14,6 +14,7 @@ that arbitrary free text contains no secrets.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -35,7 +36,8 @@ _REDACTED_KEY_PARTS = {
 
 def _is_sensitive_key(key: str) -> bool:
     """Conservatively identify common credential-bearing mapping keys."""
-    normalized = key.lower().replace("-", "_")
+    normalized = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", key)
+    normalized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", normalized).lower().replace("-", "_")
     parts = {part for part in normalized.split("_") if part}
     collapsed = normalized.replace("_", "")
     return bool(parts & _REDACTED_KEY_PARTS) or any(

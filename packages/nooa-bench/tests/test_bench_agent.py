@@ -207,6 +207,30 @@ def test_bench_agent_hides_manual_context_maintenance_apis():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["plain answer", None, 42])
+async def test_run_evaluation_handles_non_task_result(monkeypatch, tmp_path, value):
+    monkeypatch.setattr(bench_agent_module, "ShellTools", _FakeShell)
+    monkeypatch.setattr(bench_agent_module, "RepoTools", _FakeRepo)
+    agent = BenchAgent(llm=FakeLLMClient(), working_dir=str(tmp_path))
+
+    async def solve(_description):
+        return value
+
+    monkeypatch.setattr(agent, "_solve_task", solve)
+    try:
+        result = await agent._run_evaluation(
+            {"problem_statement": "task", "working_dir": str(tmp_path)}
+        )
+        assert result == {
+            "response": str(value) if value is not None else "",
+            "success": True,
+            "result": value,
+        }
+    finally:
+        await agent.aclose()
+
+
+@pytest.mark.asyncio
 async def test_run_evaluation_returns_structured_task_result(monkeypatch, tmp_path):
     shells: list[_FakeShell] = []
 

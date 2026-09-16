@@ -73,6 +73,25 @@ def test_empty_status_is_minimal() -> None:
     assert TodoManager().status() == "(no todos)"
 
 
+def test_persistent_vars_public_api_round_trip():
+    todo = TodoManager().add("work")
+    proxy = todo.v
+    proxy.result = 42
+    proxy.set("keys", ["artifact"])
+    assert set(proxy.keys()) == {"result", "keys"}
+    assert dict(proxy.items()) == {"result": 42, "keys": ["artifact"]}
+    assert proxy.result == 42
+    assert proxy.get("keys") == ["artifact"]
+    assert proxy.get("missing", "default") == "default"
+    assert "result" in proxy
+    del proxy.result
+    assert "result" not in proxy
+    with pytest.raises(AttributeError, match="No var"):
+        _ = proxy.result
+    proxy.clear()
+    assert proxy.items() == []
+
+
 def test_status_hides_description_payload_and_advertises_inspection() -> None:
     manager = TodoManager()
     todo = manager.add(

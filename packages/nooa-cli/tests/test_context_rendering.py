@@ -39,3 +39,14 @@ def test_mapping_keys_remain_distinct_without_calling_arbitrary_repr():
     assert set(rendered.values()) == {"one", "two", "literal", "object"}
     assert rendered["<int: 1>"] == "one"
     assert rendered["<int: 2>"] == "two"
+
+
+@pytest.mark.parametrize(
+    "key", ["refreshToken", "passwordHash", "mySecretValue", "APIKey", "HTTPAuthorization"]
+)
+def test_camelcase_credentials_are_redacted(key):
+    rendered = render_delegated_context(
+        {key: "sensitive-sentinel", "userName": "Ada", "tokenizer": "ok"}
+    )
+    assert "sensitive-sentinel" not in rendered
+    assert json.loads(rendered) == {key: "[REDACTED]", "userName": "Ada", "tokenizer": "ok"}

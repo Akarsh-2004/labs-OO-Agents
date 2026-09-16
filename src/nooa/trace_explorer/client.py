@@ -17,10 +17,19 @@ Usage:
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
 from nooa.tracing._viewer_auth import apply_viewer_auth
+
+
+def _viewer_headers(url: str) -> dict[str, str]:
+    """Refuse cleartext bearer authentication before constructing an HTTP client."""
+    headers = apply_viewer_auth({})
+    if headers and urlsplit(url).scheme != "https":
+        raise ValueError("Authenticated viewer requests require an HTTPS endpoint.")
+    return headers
 
 
 class TraceExplorerClient:
@@ -29,6 +38,10 @@ class TraceExplorerClient:
     Has the same public async API as TraceExplorer but executes all
     analysis server-side, avoiding the need to download and parse
     all spans locally.
+
+    Configured bearer authentication requires an HTTPS base URL. HTTP remains
+    available for unauthenticated local viewers. Proxy and NO_PROXY settings
+    follow httpx's environment handling.
     """
 
     def __init__(self, base_url: str, session_id: str, *, timeout: float = 60.0):
@@ -62,7 +75,7 @@ class TraceExplorerClient:
 
         # Honor HTTP(S)_PROXY and NO_PROXY, just like the viewer loaders.
         async with httpx.AsyncClient(
-            timeout=self._timeout, headers=apply_viewer_auth({})
+            timeout=self._timeout, headers=_viewer_headers(self._base_url)
         ) as client:
             try:
                 resp = await client.get(url, params=all_params)
