@@ -236,7 +236,10 @@ class OpenInferenceHooks:
         if parent_call_id:
             span.set_attribute("agent.parent_call_id", parent_call_id)
 
-        span.add_event("status_update", {"message": f"Running agent method: {agent_name}.{method_name}"})
+        span.add_event(
+            "status_update",
+            {"message": f"Running agent method: {agent_name}.{method_name}"},
+        )
 
         # Extract method signature, docstring, and file path
         try:
