@@ -506,7 +506,7 @@ def emit_status(message: str, attributes: dict[str, Any] | None = None) -> None:
     """
     span = trace.get_current_span()
     if span.is_recording():
-        span.add_event("status_update", attributes={"message": message, **(attributes or {})})
+        span.add_event("status_update", attributes={**(attributes or {}), "message": message})
 
 
 def flush_traces(timeout_millis: int = 30000) -> None:
