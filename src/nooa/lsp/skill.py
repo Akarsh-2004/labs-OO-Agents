@@ -54,7 +54,11 @@ class LSPSkill(Skill):
         server_cmd_key = tuple(server_config.command)
         if server_cmd_key not in self._clients:
             client = LSPClient(command=server_config.command, root_uri=self._root_uri)
-            await client.start()
+            try:
+                await client.start()
+            except BaseException:
+                await client.stop()
+                raise
             self._clients[server_cmd_key] = client
 
         client = self._clients[server_cmd_key]

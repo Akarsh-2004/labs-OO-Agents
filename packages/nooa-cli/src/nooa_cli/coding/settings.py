@@ -68,6 +68,12 @@ def load_coding_skills_dirs(
     if not os.environ.get(_SETTINGS_ENV_VAR) and not modern_key_set:
         configured.extend(_legacy_project_paths(root / ".nooa" / _LEGACY_CONFIG_FILENAME))
 
+    repo_configured = set()
+    repo_configured.update(_setting_paths(project_settings, "coding"))
+    repo_configured.update(_setting_paths(project_settings, "tui"))
+    if not os.environ.get(_SETTINGS_ENV_VAR) and not modern_key_set:
+        repo_configured.update(_legacy_project_paths(root / ".nooa" / _LEGACY_CONFIG_FILENAME))
+
     trusted: list[Path] = []
     workspace_dirs: list[Path] = []
     
@@ -80,14 +86,19 @@ def load_coding_skills_dirs(
     _add((_resolve_configured(path, root) for path in explicit), trusted)
     
     configured_paths = []
+    user_paths = []
     for path in configured:
         resolved = _resolve_configured(path, root).resolve()
-        try:
-            resolved.relative_to(root)
-            configured_paths.append(resolved)
-        except ValueError:
-            logger.warning("Ignoring repository skill directory outside workspace: %s", path)
+        if path in repo_configured:
+            try:
+                resolved.relative_to(root)
+                configured_paths.append(resolved)
+            except ValueError:
+                logger.warning("Ignoring repository skill directory outside workspace: %s", path)
+        else:
+            user_paths.append(resolved)
             
+    _add(user_paths, trusted)
     _add(configured_paths, workspace_dirs)
     _add((root / path for path in _WORKSPACE_SKILL_DIRS), workspace_dirs)
     _add((Path.home() / path for path in _USER_SKILL_DIRS), trusted)

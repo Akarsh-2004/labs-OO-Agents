@@ -96,7 +96,13 @@ class CodingAgent(InteractiveAgent):
         # project it means, or every session shares one directory — and
         # SkillWriting puts it on sys.path and activates local.*, so that
         # would expose one workspace's agent-authored code to another.
-        self.libs = SkillWriting(self, path=libs_dir or get_project_dir("libs"))
+        is_workspace_default = libs_dir is None
+        default_libs_dir = get_project_dir("libs")
+        self.libs = SkillWriting(
+            self,
+            path=libs_dir or default_libs_dir,
+            load_existing=not is_workspace_default,
+        )
 
         self.skills = SkillRegistry(self)
         self.skills.register("nemo.shell", self.shell)
@@ -121,6 +127,9 @@ class CodingAgent(InteractiveAgent):
             self.skills.load(installed)
             
         self.untrusted_workspace_skills = []
+        if is_workspace_default:
+            self.untrusted_workspace_skills.append(default_libs_dir)
+            
         if skills_dirs:
             if isinstance(skills_dirs, dict):
                 # Phase 3: Flip the default. Do not load untrusted workspace paths automatically.
@@ -129,7 +138,11 @@ class CodingAgent(InteractiveAgent):
                     import logging
                     logger = logging.getLogger(__name__)
                     logger.info("Workspace trust: Gating discovered skill roots: %s", workspace_dirs)
-                    self.untrusted_workspace_skills = workspace_dirs
+                    self.untrusted_workspace_skills.extend(workspace_dirs)
+                    
+                    # Continue discovering inert SKILL.md skills in untrusted workspace dirs
+                    if hasattr(self.skills, "discover_text_skills_dirs"):
+                        self.skills.discover_text_skills_dirs(workspace_dirs)
                 
                 # Only load trusted dirs automatically
                 trusted_dirs = skills_dirs.get("trusted", [])

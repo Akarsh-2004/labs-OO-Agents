@@ -35,7 +35,7 @@ class LSPClient:
             *self.command,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
         )
         self._run_task = asyncio.create_task(self._read_loop())
 
@@ -65,7 +65,7 @@ class LSPClient:
         if self.process:
             if self.process.returncode is None:
                 try:
-                    await self.send_request("shutdown", {})
+                    await asyncio.wait_for(self.send_request("shutdown", {}), timeout=2.0)
                     await self.send_notification("exit", {})
                 except Exception:
                     pass
@@ -111,6 +111,11 @@ class LSPClient:
             pass
         except Exception as e:
             logger.error("LSP Read Error: %s", e)
+        finally:
+            for fut in self._pending_requests.values():
+                if not fut.done():
+                    fut.set_exception(LSPClientError("LSP server connection closed"))
+            self._pending_requests.clear()
 
     def _handle_message(self, message: dict[str, Any]):
         if "id" in message and "method" not in message:
@@ -132,6 +137,9 @@ class LSPClient:
                     self._diagnostics[uri] = params.get("diagnostics", [])
 
     async def send_request(self, method: str, params: dict[str, Any] | None = None) -> Any:
+        if self._run_task and self._run_task.done():
+            raise LSPClientError("LSP server connection closed")
+            
         msg_id = self._next_id
         self._next_id += 1
         msg = {
