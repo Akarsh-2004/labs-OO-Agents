@@ -76,7 +76,7 @@ class CodingAgent(InteractiveAgent):
         *,
         cwd: str | Path = ".",
         summarization: SummarizationConfig | None = None,
-        skills_dirs: list[Path] | None = None,
+        skills_dirs: list[Path] | dict[str, list[Path]] | None = None,
         libs_dir: Path | None = None,
         **kwargs: Any,
     ) -> None:
@@ -119,8 +119,23 @@ class CodingAgent(InteractiveAgent):
             installed.append(name)
         if installed:
             self.skills.load(installed)
+            
+        self.untrusted_workspace_skills = []
         if skills_dirs:
-            self.skills.discover_skills_dirs(skills_dirs)
+            if isinstance(skills_dirs, dict):
+                # Phase 3: Flip the default. Do not load untrusted workspace paths automatically.
+                workspace_dirs = skills_dirs.get("workspace", [])
+                if workspace_dirs:
+                    import logging
+                    logger = logging.getLogger(__name__)
+                    logger.info("Workspace trust: Gating discovered skill roots: %s", workspace_dirs)
+                    self.untrusted_workspace_skills = workspace_dirs
+                
+                # Only load trusted dirs automatically
+                trusted_dirs = skills_dirs.get("trusted", [])
+                self.skills.discover_skills_dirs(trusted_dirs)
+            else:
+                self.skills.discover_skills_dirs(skills_dirs)
 
         self.context["python_tools"] = Context(
             doc(RepoTools, ActivityShellTools),

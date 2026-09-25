@@ -68,21 +68,31 @@ def load_coding_skills_dirs(
     if not os.environ.get(_SETTINGS_ENV_VAR) and not modern_key_set:
         configured.extend(_legacy_project_paths(root / ".nooa" / _LEGACY_CONFIG_FILENAME))
 
-    candidates: list[Path] = []
-    candidates.extend(_resolve_configured(path, root) for path in explicit)
-    candidates.extend(_resolve_configured(path, root) for path in configured)
-    candidates.extend(root / path for path in _WORKSPACE_SKILL_DIRS)
-    candidates.extend(Path.home() / path for path in _USER_SKILL_DIRS)
+    trusted: list[Path] = []
+    workspace_dirs: list[Path] = []
+    
+    def _add(candidates: Iterable[Path], target: list[Path]) -> None:
+        for candidate in candidates:
+            resolved = candidate.expanduser().resolve()
+            if resolved not in trusted and resolved not in workspace_dirs and resolved.is_dir():
+                target.append(resolved)
 
-    result: list[Path] = []
-    seen: set[Path] = set()
-    for candidate in candidates:
-        resolved = candidate.expanduser().resolve()
-        if resolved in seen or not resolved.is_dir():
-            continue
-        seen.add(resolved)
-        result.append(resolved)
-    return result
+    _add((_resolve_configured(path, root) for path in explicit), trusted)
+    
+    configured_paths = []
+    for path in configured:
+        resolved = _resolve_configured(path, root).resolve()
+        try:
+            resolved.relative_to(root)
+            configured_paths.append(resolved)
+        except ValueError:
+            logger.warning("Ignoring repository skill directory outside workspace: %s", path)
+            
+    _add(configured_paths, workspace_dirs)
+    _add((root / path for path in _WORKSPACE_SKILL_DIRS), workspace_dirs)
+    _add((Path.home() / path for path in _USER_SKILL_DIRS), trusted)
+
+    return {"trusted": trusted, "workspace": workspace_dirs}
 
 
 def _setting_paths(settings: Mapping[str, Any], section: str) -> list[str | Path]:
