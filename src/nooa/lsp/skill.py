@@ -20,8 +20,8 @@ class LSPSkill(Skill):
         defs = await lsp.definition(line=10, character=5)
         refs = await lsp.references(line=10, character=5)
         
-    Note: All methods in this skill and the returned facade are async coroutines
-    and must be awaited.
+    Note: All methods in this skill and the returned facade document requests are async coroutines
+    and must be awaited. However, `LSPDocumentFacade.diagnostics()` is synchronous and must not be awaited.
     """
 
     def __init__(self, root_uri: str | None = None):
@@ -55,9 +55,13 @@ class LSPSkill(Skill):
             return None
 
         server_cmd_key = tuple(server_config.command)
-        if server_cmd_key not in self._clients:
+        if server_cmd_key not in self._clients or self._clients[server_cmd_key].status == "FAILED":
             client = LSPClient(command=server_config.command, root_uri=self._root_uri)
-            await client.start()
+            try:
+                await client.start()
+            except BaseException:
+                await client.stop()
+                raise
             self._clients[server_cmd_key] = client
 
         client = self._clients[server_cmd_key]
@@ -78,6 +82,10 @@ class LSPSkill(Skill):
                 lang_id = "javascript"
             elif lang_id == "ts":
                 lang_id = "typescript"
+            elif lang_id == "tsx":
+                lang_id = "typescriptreact"
+            elif lang_id == "jsx":
+                lang_id = "javascriptreact"
                 
             await client.send_notification(
                 "textDocument/didOpen",
@@ -124,7 +132,16 @@ class LSPSkill(Skill):
                     if "selectionRange" in s:
                         return s["selectionRange"]["start"]
                     elif "location" in s and "range" in s["location"]:
-                        return s["location"]["range"]["start"]
+                        start = s["location"]["range"]["start"]
+                        sym_uri = s["location"]["uri"]
+                        if sym_uri in self._opened_documents:
+                            content = self._opened_documents[sym_uri][1]
+                            lines = content.splitlines()
+                            if 0 <= start["line"] < len(lines):
+                                offset = lines[start["line"]].find(target, start["character"])
+                                if offset != -1:
+                                    return {"line": start["line"], "character": offset}
+                        return start
                 if "children" in s and s["children"]:
                     res = _find_symbol_pos(s["children"], target)
                     if res:

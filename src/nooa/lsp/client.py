@@ -154,6 +154,9 @@ class LSPClient:
                     self._diagnostics[uri] = params.get("diagnostics", [])
 
     async def send_request(self, method: str, params: dict[str, Any] | None = None) -> Any:
+        if self.status == "FAILED":
+            raise LSPClientError("LSP server connection closed")
+            
         msg_id = self._next_id
         self._next_id += 1
         msg = {
