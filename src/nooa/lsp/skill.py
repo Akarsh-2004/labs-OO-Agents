@@ -19,6 +19,9 @@ class LSPSkill(Skill):
         lsp = await self.lsp.for_file("src/orders.py")
         defs = await lsp.definition(line=10, character=5)
         refs = await lsp.references(line=10, character=5)
+        
+    Note: All methods in this skill and the returned facade are async coroutines
+    and must be awaited.
     """
 
     def __init__(self, root_uri: str | None = None):
@@ -33,7 +36,7 @@ class LSPSkill(Skill):
 
         self.registry = LSPServerRegistry()
         self._clients: Dict[tuple[str, ...], LSPClient] = {}
-        self._opened_documents: set[str] = set()
+        self._opened_documents: dict[str, tuple[int, str]] = {}
 
     async def for_file(self, filepath: str) -> LSPDocumentFacade | None:
         """Get an LSP facade for a given file.
@@ -61,37 +64,77 @@ class LSPSkill(Skill):
         uri = path.as_uri()
 
         # Ensure the document is "open" from the LSP's perspective.
-        if uri not in self._opened_documents:
-            try:
-                content = path.read_text(encoding="utf-8")
-                lang_id = ext.lstrip(".")
+        content = path.read_text(encoding="utf-8")
+        state = self._opened_documents.get(uri)
+        if state is None:
+            lang_id = ext.lstrip(".")
+            
+            # Standardize common language IDs
+            if lang_id == "py":
+                lang_id = "python"
+            elif lang_id == "rs":
+                lang_id = "rust"
+            elif lang_id == "js":
+                lang_id = "javascript"
+            elif lang_id == "ts":
+                lang_id = "typescript"
                 
-                # Standardize common language IDs
-                if lang_id == "py":
-                    lang_id = "python"
-                elif lang_id == "rs":
-                    lang_id = "rust"
-                elif lang_id == "js":
-                    lang_id = "javascript"
-                elif lang_id == "ts":
-                    lang_id = "typescript"
-                    
-                await client.send_notification(
-                    "textDocument/didOpen",
-                    {
-                        "textDocument": {
-                            "uri": uri,
-                            "languageId": lang_id,
-                            "version": 1,
-                            "text": content,
-                        }
-                    },
-                )
-                self._opened_documents.add(uri)
-            except Exception:
-                pass  # Ignore read errors
+            await client.send_notification(
+                "textDocument/didOpen",
+                {
+                    "textDocument": {
+                        "uri": uri,
+                        "languageId": lang_id,
+                        "version": 1,
+                        "text": content,
+                    }
+                },
+            )
+            self._opened_documents[uri] = (1, content)
+        elif state[1] != content:
+            version = state[0] + 1
+            await client.send_notification(
+                "textDocument/didChange",
+                {
+                    "textDocument": {"uri": uri, "version": version},
+                    "contentChanges": [{"text": content}],
+                },
+            )
+            self._opened_documents[uri] = (version, content)
 
         return LSPDocumentFacade(client, uri)
+
+    async def find_references(self, filepath: str, symbol: str) -> Any:
+        """Find all references to a named symbol - compiler-accurate via LSP.
+        
+        Prefer this over text search when precision matters. 
+        Note that this returns LSP Locations and requires the symbol to be present
+        in the document's document_symbols first to find its position. If you know
+        the position, use `lsp.for_file` and then `references(line, character)` directly.
+        """
+        facade = await self.for_file(filepath)
+        if not facade:
+            return []
+            
+        symbols = await facade.document_symbols()
+        
+        def _find_symbol_pos(syms: list[Any], target: str) -> dict[str, int] | None:
+            for s in syms:
+                if s.get("name") == target:
+                    if "selectionRange" in s:
+                        return s["selectionRange"]["start"]
+                    elif "location" in s and "range" in s["location"]:
+                        return s["location"]["range"]["start"]
+                if "children" in s and s["children"]:
+                    res = _find_symbol_pos(s["children"], target)
+                    if res:
+                        return res
+            return None
+            
+        pos = _find_symbol_pos(symbols if isinstance(symbols, list) else [], symbol)
+        if pos:
+            return await facade.references(pos["line"], pos["character"])
+        return []
 
     async def shutdown(self):
         """Shutdown all running LSP clients."""

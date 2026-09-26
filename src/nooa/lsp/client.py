@@ -28,6 +28,7 @@ class LSPClient:
         self._diagnostics: Dict[str, list[Any]] = {}
         self._run_task: asyncio.Task | None = None
         self.capabilities: dict[str, Any] = {}
+        self.status = "UNKNOWN"
 
     async def start(self) -> InitializeResult:
         """Start the LSP server process and initialize the connection."""
@@ -58,6 +59,7 @@ class LSPClient:
 
         # Send initialized
         await self.send_notification("initialized", {})
+        self.status = "COMPLETE"
         return InitializeResult(capabilities=self.capabilities)
 
     async def stop(self):
@@ -106,11 +108,18 @@ class LSPClient:
                     message = json.loads(content)
                     self._handle_message(message)
                 except json.JSONDecodeError:
+                    self.status = "DEGRADED"
                     logger.error("Failed to decode LSP message: %s", content)
         except asyncio.CancelledError:
             pass
         except Exception as e:
             logger.error("LSP Read Error: %s", e)
+        finally:
+            self.status = "FAILED"
+            for fut in self._pending_requests.values():
+                if not fut.done():
+                    fut.set_exception(LSPClientError("LSP server connection closed"))
+            self._pending_requests.clear()
 
     def _handle_message(self, message: dict[str, Any]):
         if "id" in message and "method" not in message:
@@ -124,7 +133,20 @@ class LSPClient:
                     else:
                         future.set_result(message.get("result"))
         elif "method" in message:
-            # Notification or Request from server
+            if "id" in message:
+                method = message["method"]
+                if method == "workspace/configuration":
+                    items = message.get("params", {}).get("items", [])
+                    self._send({"jsonrpc": "2.0", "id": message["id"], "result": [None] * len(items)})
+                elif method in ("client/registerCapability", "client/unregisterCapability",
+                                "window/workDoneProgress/create"):
+                    self._send({"jsonrpc": "2.0", "id": message["id"], "result": None})
+                else:
+                    self._send({"jsonrpc": "2.0", "id": message["id"],
+                                "error": {"code": -32601, "message": f"Unsupported: {method}"}})
+                return
+            
+            # Notification from server
             if message["method"] == "textDocument/publishDiagnostics":
                 params = message.get("params", {})
                 uri = params.get("uri")

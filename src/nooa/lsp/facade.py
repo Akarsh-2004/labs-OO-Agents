@@ -32,7 +32,7 @@ class LSPDocumentFacade:
         )
 
     async def references(
-        self, line: int, character: int, include_declaration: bool = False
+        self, line: int, character: int, include_declaration: bool = True
     ) -> Any:
         """Find all references to the symbol at the given position.
         
