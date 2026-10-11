@@ -2,29 +2,69 @@
 # SPDX-License-Identifier: Apache-2.0
 """LSP Skill module for NOOA agents."""
 
+import asyncio
 import pathlib
+import re
+from collections.abc import Sequence
 from typing import Dict
 
 from nooa.skill import Skill
 
 from .client import LSPClient
 from .facade import LSPDocumentFacade
+from .protocol import DocumentSymbol, Location, Position, SymbolInformation
 from .registry import LSPServerRegistry
+
+
+def _character_units(character: str, encoding: str) -> int:
+    if encoding == "utf-8":
+        return len(character.encode("utf-8"))
+    if encoding == "utf-16":
+        return len(character.encode("utf-16-le")) // 2
+    if encoding == "utf-32":
+        return 1
+    raise ValueError(f"Unsupported LSP position encoding: {encoding}")
+
+
+def _lsp_character_to_index(
+    text: str, character: int, encoding: str
+) -> int | None:
+    if character < 0:
+        return None
+    units = 0
+    for index, value in enumerate(text):
+        if units == character:
+            return index
+        units += _character_units(value, encoding)
+        if units > character:
+            return None
+    return len(text) if units == character else None
+
+
+def _index_to_lsp_character(text: str, index: int, encoding: str) -> int:
+    return sum(_character_units(value, encoding) for value in text[:index])
 
 
 class LSPSkill(Skill):
     """Provides Language Server Protocol (LSP) capabilities for code intelligence.
+
+    Document requests are async coroutines and must be awaited; calling one
+    without `await` returns a coroutine object, not a facade or result. Symbol
+    results are typed models with fields such as `symbol.name`,
+    `symbol.selectionRange`, or `symbol.location`.
+    `LSPDocumentFacade.diagnostics()` is synchronous and must not be awaited.
 
     Use this skill to perform repository-aware semantic code navigation:
         lsp = await self.lsp.for_file("src/orders.py")
         defs = await lsp.definition(line=10, character=5)
         refs = await lsp.references(line=10, character=5)
         
-    Note: All methods in this skill and the returned facade document requests are async coroutines
-    and must be awaited. However, `LSPDocumentFacade.diagnostics()` is synchronous and must not be awaited.
+    For a name-based one-shot lookup (compiler-accurate alternative to text search):
+        refs = await self.lsp.find_references("src/orders.py", "OrderService")
     """
 
     def __init__(self, root_uri: str | None = None):
+        """Initialize language server clients for the given workspace URI."""
         super().__init__()
         if root_uri is None:
             self._root_uri = pathlib.Path.cwd().as_uri()
@@ -36,10 +76,12 @@ class LSPSkill(Skill):
 
         self.registry = LSPServerRegistry()
         self._clients: Dict[tuple[str, ...], LSPClient] = {}
+        self._client_locks: dict[tuple[str, ...], asyncio.Lock] = {}
         self._opened_documents: dict[str, tuple[int, str]] = {}
+        self._opened_document_clients: dict[str, tuple[str, ...]] = {}
 
     async def for_file(self, filepath: str) -> LSPDocumentFacade | None:
-        """Get an LSP facade for a given file.
+        """Get an LSP facade for a given file. Must be awaited.
 
         Args:
             filepath: Path to the source file (e.g., 'src/main.py').
@@ -55,24 +97,18 @@ class LSPSkill(Skill):
             return None
 
         server_cmd_key = tuple(server_config.command)
-        if server_cmd_key not in self._clients or self._clients[server_cmd_key].status == "FAILED":
-            client = LSPClient(command=server_config.command, root_uri=self._root_uri)
-            try:
-                await client.start()
-            except BaseException:
-                await client.stop()
-                raise
-            self._clients[server_cmd_key] = client
+        lock = self._client_locks.setdefault(server_cmd_key, asyncio.Lock())
+        async with lock:
+            client = await self._get_or_start_client(
+                server_cmd_key, server_config.command
+            )
 
-        client = self._clients[server_cmd_key]
         uri = path.as_uri()
-
-        # Ensure the document is "open" from the LSP's perspective.
         content = path.read_text(encoding="utf-8")
         state = self._opened_documents.get(uri)
         if state is None:
             lang_id = ext.lstrip(".")
-            
+
             # Standardize common language IDs
             if lang_id == "py":
                 lang_id = "python"
@@ -86,7 +122,7 @@ class LSPSkill(Skill):
                 lang_id = "typescriptreact"
             elif lang_id == "jsx":
                 lang_id = "javascriptreact"
-                
+
             await client.send_notification(
                 "textDocument/didOpen",
                 {
@@ -110,52 +146,148 @@ class LSPSkill(Skill):
             )
             self._opened_documents[uri] = (version, content)
 
+        self._opened_document_clients[uri] = server_cmd_key
         return LSPDocumentFacade(client, uri)
 
-    async def find_references(self, filepath: str, symbol: str) -> Any:
-        """Find all references to a named symbol - compiler-accurate via LSP.
-        
-        Prefer this over text search when precision matters. 
-        Note that this returns LSP Locations and requires the symbol to be present
-        in the document's document_symbols first to find its position. If you know
-        the position, use `lsp.for_file` and then `references(line, character)` directly.
+    async def _get_or_start_client(
+        self, server_cmd_key: tuple[str, ...], command: list[str]
+    ) -> LSPClient:
+        client = self._clients.get(server_cmd_key)
+        if client is not None and client.status == "FAILED":
+            stale_uris = [
+                uri
+                for uri, owner in self._opened_document_clients.items()
+                if owner == server_cmd_key
+            ]
+            for stale_uri in stale_uris:
+                self._opened_documents.pop(stale_uri, None)
+                self._opened_document_clients.pop(stale_uri, None)
+            self._clients.pop(server_cmd_key)
+            await client.stop()
+            client = None
+
+        if client is None:
+            client = LSPClient(command=command, root_uri=self._root_uri)
+            try:
+                await client.start()
+            except BaseException:
+                await client.stop()
+                raise
+            self._clients[server_cmd_key] = client
+        return client
+
+    async def find_references(
+        self, filepath: str, symbol: str
+    ) -> list[Location]:
+        """Find references to a named symbol using the language server. Must be awaited.
+
+        Compiler-accurate alternative to text-based search: resolves the
+        symbol's declaration via document_symbols, then queries references
+        at that exact position (declaration included in results).
+
+        Prefer this to text search when precision matters. The symbol must be
+        present in the document's symbols. For a known position, use
+        ``lsp.for_file`` and then ``references(line, character)`` directly.
+
+        Args:
+            filepath: Path to the file where the symbol is defined.
+            symbol: The symbol name to find references for (e.g. 'get_llm_client').
+
+        Returns:
+            Typed LSP Location models. Empty if no server or symbol is
+            available.
+
+        Raises:
+            LSPClientError: If the language server returns a malformed result.
+
+        Example:
+            refs = await self.lsp.find_references("src/nooa/unifiedllm/registry.py", "get_llm_client")
         """
         facade = await self.for_file(filepath)
         if not facade:
             return []
-            
+
+        document_uri = pathlib.Path(filepath).absolute().as_uri()
         symbols = await facade.document_symbols()
-        
-        def _find_symbol_pos(syms: list[Any], target: str) -> dict[str, int] | None:
-            for s in syms:
-                if s.get("name") == target:
-                    if "selectionRange" in s:
-                        return s["selectionRange"]["start"]
-                    elif "location" in s and "range" in s["location"]:
-                        start = s["location"]["range"]["start"]
-                        sym_uri = s["location"]["uri"]
-                        if sym_uri in self._opened_documents:
-                            content = self._opened_documents[sym_uri][1]
-                            lines = content.splitlines()
-                            if 0 <= start["line"] < len(lines):
-                                offset = lines[start["line"]].find(target, start["character"])
-                                if offset != -1:
-                                    return {"line": start["line"], "character": offset}
-                        return start
-                if "children" in s and s["children"]:
-                    res = _find_symbol_pos(s["children"], target)
-                    if res:
-                        return res
+
+        def _find_symbol_pos(
+            syms: Sequence[DocumentSymbol | SymbolInformation],
+            target: str,
+            uri: str,
+        ) -> Position | None:
+            """Find a symbol's LSP position, searching nested symbols too."""
+            for item in syms:
+                if item.name == target:
+                    if isinstance(item, DocumentSymbol):
+                        return item.selectionRange.start
+
+                    symbol_range = item.location.range
+                    start = symbol_range.start
+                    client_key = self._opened_document_clients.get(uri)
+                    if (
+                        uri not in self._opened_documents
+                        or client_key is None
+                        or client_key not in self._clients
+                    ):
+                        return None
+
+                    lines = re.split(
+                        r"\r\n|\r|\n", self._opened_documents[uri][1]
+                    )
+                    end = symbol_range.end
+                    encoding = self._clients[client_key].position_encoding
+                    if (
+                        start.line < 0
+                        or end.line >= len(lines)
+                        or start.line > end.line
+                        or start.character < 0
+                        or end.character < 0
+                    ):
+                        return None
+
+                    for line_number in range(start.line, end.line + 1):
+                        line = lines[line_number]
+                        line_start = 0
+                        if line_number == start.line:
+                            line_start = _lsp_character_to_index(
+                                line, start.character, encoding
+                            )
+                            if line_start is None:
+                                return None
+                        line_end = len(line)
+                        if line_number == end.line:
+                            line_end = _lsp_character_to_index(
+                                line, end.character, encoding
+                            )
+                            if line_end is None:
+                                return None
+                        offset = line.find(target, line_start, line_end)
+                        if offset != -1:
+                            return Position(
+                                line=line_number,
+                                character=_index_to_lsp_character(
+                                    line, offset, encoding
+                                ),
+                            )
+                    return None
+
+                if isinstance(item, DocumentSymbol) and item.children:
+                    result = _find_symbol_pos(
+                        item.children, target, uri
+                    )
+                    if result:
+                        return result
             return None
             
-        pos = _find_symbol_pos(symbols if isinstance(symbols, list) else [], symbol)
+        pos = _find_symbol_pos(symbols, symbol, document_uri)
         if pos:
-            return await facade.references(pos["line"], pos["character"])
+            return await facade.references(pos.line, pos.character)
         return []
 
     async def shutdown(self):
-        """Shutdown all running LSP clients."""
+        """Shutdown all running LSP clients. Must be awaited."""
         for client in self._clients.values():
             await client.stop()
         self._clients.clear()
         self._opened_documents.clear()
+        self._opened_document_clients.clear()
