@@ -1116,6 +1116,7 @@ class TestFailedTransition:
     ):
         client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
         process = _FakeProcess()
+        process.stdin.on_write = None
         client.process = process
         client.status = LSPClientStatus.COMPLETE
         wait_calls = 0
@@ -1153,6 +1154,10 @@ class TestFailedTransition:
         assert wait_calls == expected_wait_calls
         assert kill_calls == 1
         assert client.status == LSPClientStatus.FAILED
+        exit_message = json.loads(
+            process.stdin.writes[-1].split(b"\r\n\r\n", 1)[1]
+        )
+        assert exit_message["method"] == "exit"
 
     async def test_unexpected_process_death_marks_failed(self, monkeypatch):
         client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
