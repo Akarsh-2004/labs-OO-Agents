@@ -55,14 +55,23 @@ class LSPClientStatus:
 class LSPClient:
     """A generic LSP JSON-RPC client."""
 
-    def __init__(self, command: list[str], root_uri: str):
+    def __init__(
+        self,
+        command: list[str],
+        root_uri: str,
+        initialize_timeout: float = 30.0,
+        request_timeout: float = 30.0,
+    ):
         """Create a client for the server command and workspace URI."""
         self.command = command
         self.root_uri = root_uri
+        self.initialize_timeout = initialize_timeout
+        self.request_timeout = request_timeout
         self.process: asyncio.subprocess.Process | None = None
         self._next_id = 1
         self._pending_requests: Dict[int, asyncio.Future] = {}
         self._diagnostics: Dict[str, list[Any]] = {}
+        self._diagnostics_versions: dict[str, int | None] = {}
         self._run_task: asyncio.Task | None = None
         self._watch_task: asyncio.Task | None = None
         self.capabilities: dict[str, Any] = {}
@@ -104,6 +113,7 @@ class LSPClient:
                         },
                     },
                 },
+                timeout=self.initialize_timeout,
             )
             initialize_result = self._parse_response(
                 "initialize", init_res, InitializeResult
@@ -278,11 +288,13 @@ class LSPClient:
                 uri = params.get("uri")
                 if uri:
                     try:
-                        self._diagnostics[uri] = self._parse_list_response(
+                        diagnostics = self._parse_list_response(
                             "textDocument/publishDiagnostics",
                             params.get("diagnostics", []),
                             Diagnostic,
                         )
+                        self._diagnostics[uri] = diagnostics
+                        self._diagnostics_versions[uri] = params.get("version")
                     except LSPClientError as error:
                         self._decode_errors += 1
                         self.status = LSPClientStatus.DEGRADED
@@ -326,7 +338,12 @@ class LSPClient:
             )
         return cls._parse_response(method, result, list[item_type])
 
-    async def send_request(self, method: str, params: dict[str, Any] | None = None) -> Any:
+    async def send_request(
+        self,
+        method: str,
+        params: dict[str, Any] | None = None,
+        timeout: float | None = None,
+    ) -> Any:
         """Send a JSON-RPC request and return its response result."""
         if self.status == LSPClientStatus.FAILED:
             raise LSPClientError(
@@ -351,7 +368,23 @@ class LSPClient:
             self._pending_requests.pop(msg_id, None)
             raise
         try:
-            return await future
+            return await asyncio.wait_for(
+                future,
+                timeout=self.request_timeout if timeout is None else timeout,
+            )
+        except asyncio.TimeoutError as error:
+            try:
+                await self.send_notification(
+                    "$/cancelRequest", {"id": msg_id}
+                )
+            except (LSPClientError, OSError):
+                pass
+            message = (
+                "LSP initialize request timed out"
+                if method == "initialize"
+                else f"LSP request {method} timed out"
+            )
+            raise LSPClientError(message) from error
         finally:
             self._pending_requests.pop(msg_id, None)
 
@@ -463,3 +496,7 @@ class LSPClient:
     def get_diagnostics(self, uri: str) -> list[Diagnostic]:
         """Return the latest diagnostics published for a document URI."""
         return self._diagnostics.get(uri, [])
+
+    def get_diagnostics_version(self, uri: str) -> int | None:
+        """Return the document version of the latest diagnostics."""
+        return self._diagnostics_versions.get(uri)

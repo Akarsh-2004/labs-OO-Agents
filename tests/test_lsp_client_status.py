@@ -243,6 +243,29 @@ class TestInitialStatus:
 
         assert client._pending_requests == {}
 
+    async def test_send_request_timeout_cancels_server_request(self):
+        client = LSPClient(
+            command=["fake-server"],
+            root_uri="file:///tmp",
+            request_timeout=0.01,
+        )
+        process = _FakeProcess(responses={1: []})
+        client.process = process
+        client.status = LSPClientStatus.COMPLETE
+
+        with pytest.raises(LSPClientError, match="textDocument/definition timed out"):
+            await client.send_request("textDocument/definition")
+
+        cancel_message = json.loads(
+            process.stdin.writes[-1].split(b"\r\n\r\n", 1)[1]
+        )
+        assert cancel_message == {
+            "jsonrpc": "2.0",
+            "method": "$/cancelRequest",
+            "params": {"id": 1},
+        }
+        assert client._pending_requests == {}
+
 
 # ---------------------------------------------------------------------------
 # Successful startup
@@ -250,6 +273,53 @@ class TestInitialStatus:
 
 
 class TestStartupTransition:
+    async def test_initialize_uses_its_own_request_timeout(self, monkeypatch):
+        client = LSPClient(
+            command=["fake-server"],
+            root_uri="file:///tmp",
+            initialize_timeout=12.0,
+            request_timeout=0.01,
+        )
+        process = _FakeProcess()
+        request_timeouts = []
+
+        async def fake_exec(*args, **kwargs):
+            return process
+
+        async def fake_send_request(method, params=None, timeout=None):
+            request_timeouts.append((method, timeout))
+            return {"capabilities": {}}
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(client, "send_request", fake_send_request)
+
+        await client.start()
+
+        assert request_timeouts[0] == ("initialize", 12.0)
+        await client.stop()
+
+    async def test_initialize_timeout_stops_process_and_tasks(self, monkeypatch):
+        client = LSPClient(
+            command=["fake-server"],
+            root_uri="file:///tmp",
+            initialize_timeout=0.01,
+        )
+        process = _FakeProcess(responses={1: []})
+
+        async def fake_exec(*args, **kwargs):
+            return process
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+        with pytest.raises(LSPClientError, match="initialize request timed out"):
+            await client.start()
+
+        assert process.returncode == 0
+        assert client.status == LSPClientStatus.FAILED
+        await asyncio.gather(client._run_task, client._watch_task)
+        assert client._run_task.done()
+        assert client._watch_task.done()
+
     async def test_initialize_negotiates_position_encoding(self, monkeypatch):
         client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
         response = json.dumps(
@@ -305,10 +375,10 @@ class TestStartupTransition:
         send_request = client.send_request
         send_notification = client.send_notification
 
-        async def fail_initialize_request(method, params=None):
+        async def fail_initialize_request(method, params=None, timeout=None):
             if failure_phase == "request" and method == "initialize":
                 raise LSPClientError("initialize request failed")
-            return await send_request(method, params)
+            return await send_request(method, params, timeout=timeout)
 
         async def fail_initialized_notification(method, params=None):
             if failure_phase == "initialized" and method == "initialized":
@@ -852,6 +922,7 @@ class TestLSPPackageInterface:
             "method": "textDocument/publishDiagnostics",
             "params": {
                 "uri": "file:///tmp/x.py",
+                "version": 4,
                 "diagnostics": [raw_diagnostic],
             },
         }
@@ -860,6 +931,7 @@ class TestLSPPackageInterface:
         diagnostics = client.get_diagnostics("file:///tmp/x.py")
         assert diagnostics == [Diagnostic.model_validate(raw_diagnostic)]
         assert isinstance(diagnostics[0], Diagnostic)
+        assert client.get_diagnostics_version("file:///tmp/x.py") == 4
 
         client._handle_message(
             {
@@ -872,6 +944,42 @@ class TestLSPPackageInterface:
         )
         assert client.status == LSPClientStatus.DEGRADED
         assert client.get_diagnostics("file:///tmp/x.py") == diagnostics
+        assert client.get_diagnostics_version("file:///tmp/x.py") == 4
+
+    def test_unversioned_diagnostics_report_no_version(self):
+        client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
+        diagnostic = {
+            "range": {
+                "start": {"line": 0, "character": 0},
+                "end": {"line": 0, "character": 1},
+            },
+            "message": "problem",
+        }
+
+        client._handle_message(
+            {
+                "method": "textDocument/publishDiagnostics",
+                "params": {
+                    "uri": "file:///tmp/x.py",
+                    "diagnostics": [diagnostic],
+                },
+            }
+        )
+
+        assert client.get_diagnostics_version("file:///tmp/x.py") is None
+
+    def test_facade_exposes_diagnostics_version(self):
+        uri = "file:///tmp/x.py"
+        client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
+        facade = LSPDocumentFacade(client, uri)
+        client._handle_message(
+            {
+                "method": "textDocument/publishDiagnostics",
+                "params": {"uri": uri, "version": 12, "diagnostics": []},
+            }
+        )
+
+        assert facade.diagnostics_version() == 12
 
     def test_server_requests_receive_method_specific_responses(self):
         client = LSPClient(command=["fake-server"], root_uri="file:///tmp")

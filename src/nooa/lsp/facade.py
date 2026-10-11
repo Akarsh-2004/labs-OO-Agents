@@ -95,3 +95,7 @@ class LSPDocumentFacade:
             A list of LSP Diagnostic objects.
         """
         return self._client.get_diagnostics(self._uri)
+
+    def diagnostics_version(self) -> int | None:
+        """Return the version of this document's latest diagnostics."""
+        return self._client.get_diagnostics_version(self._uri)
