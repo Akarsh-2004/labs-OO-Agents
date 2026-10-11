@@ -43,6 +43,225 @@ def args(path):
     ]
 
 
+def test_working_dir_saves_under_its_nooa_directory_like_the_tui(tmp_path):
+    workspace = tmp_path / "myproject"
+    workspace.mkdir()
+    options = [
+        "wire/model",
+        "--as",
+        "local",
+        "--endpoint",
+        "https://api.test/v1",
+        "--api-style",
+        "chat",
+        "--api-key-env",
+        "CONNECT_TEST_KEY",
+        "--no-catalogue",
+        "--no-probe",
+        "--working-dir",
+        str(workspace),
+        "--yes",
+    ]
+    result = CliRunner().invoke(command, options)
+    assert result.exit_code == 0, result.output
+    target = workspace / ".nooa" / "llm_config.yaml"
+    assert target.exists()
+    assert (
+        yaml.safe_load(target.read_text())["models"]["local"]["api_base"] == "https://api.test/v1"
+    )
+
+
+def test_working_dir_keeps_project_registry_guidance_and_precedence(tmp_path, monkeypatch):
+    from nooa import llm_config, paths
+
+    user_registry = tmp_path / "user-llm-config.yaml"
+    user_registry.write_text("models: {local: {model_name: openai/old}}\n")
+    monkeypatch.setattr(llm_config, "llm_config_chain", lambda: [user_registry])
+    monkeypatch.setattr(
+        paths,
+        "get_user_dir",
+        lambda name: user_registry if name == "llm_config.yaml" else tmp_path / name,
+    )
+    workspace = tmp_path / "myproject"
+    workspace.mkdir()
+    result = CliRunner().invoke(
+        command,
+        [
+            "wire/model",
+            "--as",
+            "local",
+            "--endpoint",
+            "https://api.test/v1",
+            "--api-style",
+            "chat",
+            "--api-key-env",
+            "CONNECT_TEST_KEY",
+            "--no-catalogue",
+            "--no-probe",
+            "--working-dir",
+            str(workspace),
+            "--yes",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "include it in NEMO_OO_LLM_CONFIG" not in result.output
+    assert "takes precedence over this destination" not in result.output
+    assert (workspace / ".nooa" / "llm_config.yaml").exists()
+
+
+def test_working_dir_and_output_are_mutually_exclusive(tmp_path):
+    workspace = tmp_path / "myproject"
+    workspace.mkdir()
+    options = [
+        "wire/model",
+        "--as",
+        "local",
+        "--endpoint",
+        "https://api.test/v1",
+        "--api-style",
+        "chat",
+        "--working-dir",
+        str(workspace),
+        "--output",
+        str(tmp_path / "explicit.yaml"),
+        "--yes",
+    ]
+    result = CliRunner().invoke(command, options)
+    assert result.exit_code == 2
+    assert "mutually exclusive" in result.output
+
+
+def test_working_dir_with_a_non_save_stage_is_a_clear_usage_error(tmp_path):
+    """--working-dir computes an --output path, but every stage other than
+    save rejects any --output at all (those stages just emit JSON and never
+    write a registry file). Without this check that combination crashed with
+    a generic, confusing "--input and --output are for stage save" error.
+    """
+    workspace = tmp_path / "myproject"
+    workspace.mkdir()
+    options = [
+        "wire/model",
+        "--stage",
+        "routing",
+        "--endpoint",
+        "https://api.test/v1",
+        "--api-style",
+        "chat",
+        "--working-dir",
+        str(workspace),
+    ]
+    result = CliRunner().invoke(command, options)
+    assert result.exit_code == 2
+    assert "--working-dir only applies to" in result.output
+
+
+def test_working_dir_with_stage_save_still_works(tmp_path):
+    workspace = tmp_path / "myproject"
+    workspace.mkdir()
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(
+        json.dumps(
+            {
+                "alias": "local",
+                "entry": {
+                    "model_name": "wire/model",
+                    "api_base": "https://api.test/v1",
+                    "api_style": "chat",
+                    "api_key_env": "CONNECT_TEST_KEY",
+                    "client_type": "completion",
+                },
+            }
+        )
+    )
+    options = [
+        "--stage",
+        "save",
+        "--input",
+        str(plan_file),
+        "--working-dir",
+        str(workspace),
+    ]
+    result = CliRunner().invoke(command, options)
+    assert result.exit_code == 0, result.output
+    assert (workspace / ".nooa" / "llm_config.yaml").exists()
+
+
+def test_working_dir_expands_a_literal_tilde(tmp_path, monkeypatch):
+    """click's exists=True check on --working-dir used to run on the raw,
+    unexpanded argument, before the command's own expanduser() call — so a
+    literal "~" was rejected as nonexistent even though it's a real
+    directory. --working-dir no longer declares exists=True; existence is
+    checked explicitly after expansion instead.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    options = [
+        "wire/model",
+        "--as",
+        "local",
+        "--endpoint",
+        "https://api.test/v1",
+        "--api-style",
+        "chat",
+        "--api-key-env",
+        "CONNECT_TEST_KEY",
+        "--no-catalogue",
+        "--no-probe",
+        "--working-dir",
+        "~",
+        "--yes",
+    ]
+    result = CliRunner().invoke(command, options)
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / ".nooa" / "llm_config.yaml").exists()
+
+
+def test_working_dir_reports_a_missing_directory_clearly():
+    options = [
+        "wire/model",
+        "--as",
+        "local",
+        "--endpoint",
+        "https://api.test/v1",
+        "--api-style",
+        "chat",
+        "--working-dir",
+        "/no/such/directory/at/all",
+        "--yes",
+    ]
+    result = CliRunner().invoke(command, options)
+    assert result.exit_code == 2
+    assert "does not exist" in result.output
+
+
+def test_working_dir_reports_a_file_as_not_a_directory(tmp_path, monkeypatch):
+    """click's own file_okay=False check only runs when its raw, unexpanded
+    argument happens to already exist as given — a "~"-relative path skips
+    it entirely (click never expands "~" itself), so a real file reached
+    only through "~" used to be misreported as "does not exist" instead of
+    "is not a directory". A plain absolute path to the same file is already
+    caught correctly by click's own check, so this needs the "~" form to
+    actually exercise the gap.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "notadir.txt").write_text("hello")
+    options = [
+        "wire/model",
+        "--as",
+        "local",
+        "--endpoint",
+        "https://api.test/v1",
+        "--api-style",
+        "chat",
+        "--working-dir",
+        "~/notadir.txt",
+        "--yes",
+    ]
+    result = CliRunner().invoke(command, options)
+    assert result.exit_code == 2
+    assert "is not a directory" in result.output
+    assert "does not exist" not in result.output
+
+
 @pytest.mark.parametrize("style", ["chat", "responses", "anthropic"])
 @pytest.mark.parametrize("mode", ["missing", "observed", "usage", "rejected", "unprobed"])
 def test_enabled_reasoning_without_evidence_warns_once_before_save(
@@ -117,18 +336,18 @@ def test_enabled_reasoning_without_evidence_warns_once_before_save(
     )
     assert result.exit_code == 0, result.output
     warning = "Warning: no reasoning information was returned for: high."
-    assert result.output.count(warning) == (
-        1 if mode == "missing" or (mode == "usage" and style == "anthropic") else 0
-    )
+    # Billed reasoning_tokens alone (mode "usage") is no longer treated as
+    # evidence for any style -- confirmed live, Kimi/Qwen bill reasoning
+    # tokens on routes that never put a reasoning item on the wire at all.
+    assert result.output.count(warning) == (1 if mode in {"missing", "usage"} else 0)
     assert "returned for: none" not in result.output
     assert "private reasoning" not in result.output
     assert len(sent) == (0 if mode == "unprobed" else 5 if mode == "rejected" else 7)
     if mode == "missing":
         assert result.output.index(warning) < result.output.index("Write model entry")
         assert "Try another API format or review the server's reasoning settings" in result.output
-        probes = yaml.safe_load(path.read_text())["models"]["local"]["provenance"]["probes"]
-        assert probes["level:high"]["outcome"] == "accepted"
-        assert probes["level:high"]["reasoning_observed"] is False
+        entry = yaml.safe_load(path.read_text())["models"]["local"]
+        assert "provenance" not in entry  # evidence stays in the session
 
 
 def test_offline_cli_needs_no_key_and_writes_generated_registry(tmp_path, monkeypatch):
@@ -181,7 +400,7 @@ def test_recovery_edit_server_preserves_budget_and_saves_only_new_route(tmp_path
     entry = yaml.safe_load(path.read_text())["models"]["local"]
     assert entry["api_base"] == "https://new.example/v1"
     assert entry["model_name"] == "openai/new-model"
-    assert entry["provenance"]["tokens_charged_to_budget"] == 6 * 712
+    assert "provenance" not in entry  # budget accounting stays in the session
 
 
 @pytest.mark.parametrize("yes", [False, True])
@@ -224,6 +443,70 @@ def test_multiple_saved_key_variables_require_an_explicit_choice(tmp_path, monke
         assert yaml.safe_load(path.read_text())["models"]["new"]["api_key_env"] == "KEY_TWO"
 
 
+def _single_saved_key_options(path):
+    return [
+        "model",
+        "--as",
+        "new",
+        "--endpoint",
+        "https://api.test/v1",
+        "--api-style",
+        "chat",
+        "--no-catalogue",
+        "--no-probe",
+        "--output",
+        str(path),
+    ]
+
+
+def _write_single_saved_key_entry(path, name="CONNECT_SAVED_KEY"):
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "models": {
+                    "existing": {
+                        "model_name": "openai/model",
+                        "api_base": "https://api.test/v1",
+                        "api_key_env": name,
+                    }
+                }
+            }
+        )
+    )
+
+
+def test_saved_key_message_says_using_only_when_a_value_is_actually_set(tmp_path, monkeypatch):
+    path = tmp_path / "models.yaml"
+    _write_single_saved_key_entry(path)
+    monkeypatch.setenv("CONNECT_SAVED_KEY", "sk-already-set")
+    result = CliRunner().invoke(command, _single_saved_key_options(path), input="y\n")
+    assert result.exit_code == 0, result.output
+    normalized_output = " ".join(result.output.split())
+    assert "Using saved key variable CONNECT_SAVED_KEY for this endpoint." in normalized_output
+    assert "API key (used only for this setup)" not in normalized_output
+    assert yaml.safe_load(path.read_text())["models"]["new"]["api_key_env"] == "CONNECT_SAVED_KEY"
+
+
+def test_saved_key_message_is_honest_and_still_prompts_when_no_value_is_set(tmp_path, monkeypatch):
+    path = tmp_path / "models.yaml"
+    _write_single_saved_key_entry(path)
+    monkeypatch.delenv("CONNECT_SAVED_KEY", raising=False)
+    result = CliRunner().invoke(
+        command,
+        [*_single_saved_key_options(path), "--prompt-key"],
+        input="sk-freshly-entered\ny\nn\n",
+    )
+    assert result.exit_code == 0, result.output
+    normalized_output = " ".join(result.output.split())
+    assert "API key (used only for this setup)" in normalized_output
+    assert (
+        "This endpoint previously used key variable CONNECT_SAVED_KEY, "
+        "but it has no value set." in normalized_output
+    )
+    assert "Using saved key variable CONNECT_SAVED_KEY for this endpoint." not in normalized_output
+    assert yaml.safe_load(path.read_text())["models"]["new"]["api_key_env"] == "CONNECT_SAVED_KEY"
+
+
 @pytest.mark.parametrize("save_key", [False, True])
 def test_new_key_path_persists_only_after_separate_confirmation(tmp_path, monkeypatch, save_key):
     from nooa import paths
@@ -250,16 +533,20 @@ def test_new_key_path_persists_only_after_separate_confirmation(tmp_path, monkey
         )
 
 
-def test_wizard_discovery_auth_failure_stops_before_generation_or_save(tmp_path, monkeypatch):
+def test_a_rejected_key_is_asked_for_again_and_the_listing_retried(tmp_path, monkeypatch):
+    """A stale key in the preset's variable must not end the wizard: it says so and asks."""
     import httpx
 
     sent = []
 
     def handle(request):
-        sent.append(request.method)
-        return httpx.Response(401)
+        sent.append((request.method, request.headers.get("authorization")))
+        if request.headers.get("authorization") != "Bearer fresh-private-key":
+            return httpx.Response(401)
+        return httpx.Response(200, json={"object": "list", "data": [{"id": "wire/model"}]})
 
     mock_http(monkeypatch, handle)
+    monkeypatch.setenv("CONNECT_TEST_KEY", "stale-private-key")
     path = tmp_path / "models.yaml"
     result = CliRunner().invoke(
         command,
@@ -267,17 +554,46 @@ def test_wizard_discovery_auth_failure_stops_before_generation_or_save(tmp_path,
             "--endpoint",
             "https://api.test/v1",
             "--api-key-env",
-            "",
+            "CONNECT_TEST_KEY",
             "--no-catalogue",
+            "--no-probe",
             "--output",
             str(path),
         ],
-        input="y\n",
+        # The new key; then input ends at the model choice, which cancels.
+        input="fresh-private-key\n",
     )
-    assert result.exit_code == 1
-    assert "Authentication failed" in result.output
-    assert sent == ["GET"]
+    assert "The server rejected the key in CONNECT_TEST_KEY" in result.output
+    assert "Server listed 1 model(s)" in result.output
+    assert [auth for _, auth in sent] == ["Bearer stale-private-key", "Bearer fresh-private-key"]
+    assert "private-key" not in result.output
     assert not path.exists()
+
+
+def test_a_rejected_key_still_stops_a_yes_run(tmp_path, monkeypatch):
+    """Without prompts there is no one to ask: --yes keeps the error."""
+    import httpx
+    from nooa_cli.commands import _connect_wizard as wizard
+
+    mock_http(monkeypatch, lambda request: httpx.Response(401))
+    state = wizard.WizardState(endpoint="https://api.test/v1", yes=True)
+    state.discovery_style, state.api_key = "chat", "stale"
+    with pytest.raises(Exception, match="Authentication failed"):
+        wizard.select_model(state)
+
+
+def test_the_wizard_names_the_variable_its_key_comes_from(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONNECT_TEST_KEY", "private-test-key")
+    path = tmp_path / "models.yaml"
+    result = CliRunner().invoke(command, args(path), input="n\n")
+    assert "Using the key in CONNECT_TEST_KEY." in result.output
+    assert "private-test-key" not in result.output
+
+
+def test_an_unknown_provider_lists_every_preset():
+    result = CliRunner().invoke(command, ["--provider", "nope", "--no-probe"])
+    assert result.exit_code != 0
+    assert "hub" in result.output and "openrouter" in result.output
 
 
 @pytest.mark.parametrize("show_config", [False, True])
@@ -297,7 +613,7 @@ def test_full_yaml_preview_is_explicit_and_does_not_change_saved_entry(
         assert result.output.index("provenance:") < result.output.index("Write model entry")
     entry = yaml.safe_load(path.read_text())["models"]["local"]
     assert entry["model_name"] == "openai/wire/model"
-    assert all(p["outcome"] == "not_probed" for p in entry["provenance"]["probes"].values())
+    assert "provenance" not in entry  # preview shows it; the registry never stores it
 
 
 def test_declining_final_write_leaves_no_file(tmp_path):
@@ -492,7 +808,11 @@ def test_bare_command_walks_through_setup_and_checks_inline(tmp_path, monkeypatc
         ),
     )
     assert result.exit_code == 0, result.output
-    assert [r.method for r in requests] == ["GET"] + ["POST"] * 5
+    # An unset --budget-tokens is now unlimited, so every check that would
+    # previously have been skipped by the old 131072-token default budget
+    # now actually runs (3 more than before). check_interfaces now also
+    # probes reasoning by default for the one accepted (chat) interface.
+    assert [r.method for r in requests] == ["GET"] + ["POST"] * 9
     entry = yaml.safe_load((tmp_path / "llm_config.yaml").read_text())["models"]["my-model"]
     assert entry["model_name"] == "openai/example-model"
     assert "temporary-secret" not in result.output + yaml.safe_dump(entry)
@@ -569,6 +889,8 @@ def test_authentication_recovery_keeps_budget_and_secrets(tmp_path, monkeypatch,
     import httpx
     import litellm
 
+    from nooa.unifiedllm import connect
+
     monkeypatch.setenv("CONNECT_BAD", "wrong-test-secret")
     monkeypatch.setenv("CONNECT_GOOD", "right-test-secret")
     monkeypatch.setattr(litellm, "suppress_debug_info", False)
@@ -614,17 +936,19 @@ def test_authentication_recovery_keeps_budget_and_secrets(tmp_path, monkeypatch,
     context = details["run_context"]
     assert context["target_file"] == str(path.resolve())
     assert context["alias"] == "local"
-    assert context["remaining_budget_tokens"] == 131072 - 3 * 712
+    assert context["remaining_budget_tokens"] == connect.DEFAULT_CHECK_BUDGET - 3 * 712
     assert context["interface_timeout_seconds"] == 30
     assert "--stage interfaces" in context["rerun_command"]
     assert "skills/nooa-model-configuration/SKILL.md" in handoff
     assert "git clone" not in handoff
     assert litellm.suppress_debug_info is False
-    assert len(sent) == (7 if recover else 3)
+    # check_interfaces now also probes reasoning by default for the one
+    # accepted (chat) interface once recovery succeeds.
+    assert len(sent) == (8 if recover else 3)
     if recover:
         entry = yaml.safe_load(path.read_text())["models"]["local"]
         assert entry["api_key_env"] == "CONNECT_GOOD"
-        assert entry["provenance"]["tokens_charged_to_budget"] == 6 * 712 + 32768 + 512
+        assert "provenance" not in entry
         assert "test-secret" not in path.read_text()
     else:
         assert not path.exists()
@@ -714,10 +1038,8 @@ def test_interface_and_later_checks_share_the_cli_budget(tmp_path, monkeypatch):
     )
     assert result.exit_code == 0, result.output
     assert len(sent) == 3  # All of the budget was spent testing interfaces.
-    provenance = yaml.safe_load(path.read_text())["models"]["local"]["provenance"]
-    assert provenance["tokens_charged_to_budget"] == 2136
-    assert provenance["probes"]["routing"]["outcome"] == "not_probed"
-    assert provenance["probes"]["tools"]["outcome"] == "not_probed"
+    entry = yaml.safe_load(path.read_text())["models"]["local"]
+    assert "provenance" not in entry
     assert "approved budget is too small" in result.output
     assert "setup is incomplete; budget exhausted before routing" in result.output
     assert result.output.index("approved budget is too small") < result.output.index(
@@ -760,6 +1082,59 @@ def test_model_details_appear_before_accepting_published_settings(tmp_path, monk
     assert entry["reasoning_default"] == "low"
 
 
+@pytest.mark.parametrize("select", [True, False])
+def test_no_exact_catalogue_match_offers_a_fuzzy_suggestion(tmp_path, monkeypatch, select):
+    from nooa.unifiedllm import connect
+
+    # "gateway/wired-model" is close to "wire/model" but not an exact or
+    # suffix match, the way a gateway-routed model ID (aws/..., bedrock-...)
+    # commonly isn't an exact match for the catalogue's own model ID.
+    suggestion = {
+        "id": "gateway/wired-model",
+        "context_length": 50000,
+        "top_provider": {"max_completion_tokens": 4096},
+    }
+
+    async def catalogue():
+        return [suggestion]
+
+    monkeypatch.setattr(connect, "catalogue", catalogue)
+    path = tmp_path / "models.yaml"
+    options = [arg for arg in args(path) if arg != "--no-catalogue"]
+    result = CliRunner().invoke(
+        command,
+        options,
+        input=("gateway/wired-model\n" if select else "\n") + "use\ny\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert "Model not found; did you mean one of these?" in result.output
+    assert "gateway/wired-model" in result.output
+    entry = yaml.safe_load(path.read_text())["models"]["local"]
+    if select:
+        assert entry["context_window"] == 50000
+        assert "No catalogue match" not in result.output
+    else:
+        assert "context_window" not in entry
+        assert "No catalogue match; model limits and reasoning levels remain unknown." in (
+            result.output
+        )
+
+
+def test_no_exact_catalogue_match_is_not_guessed_under_yes(tmp_path, monkeypatch):
+    from nooa.unifiedllm import connect
+
+    async def catalogue():
+        return [{"id": "gateway/wired-model"}]
+
+    monkeypatch.setattr(connect, "catalogue", catalogue)
+    path = tmp_path / "models.yaml"
+    options = [arg for arg in args(path) if arg != "--no-catalogue"] + ["--yes"]
+    result = CliRunner().invoke(command, options)
+    assert result.exit_code == 0, result.output
+    assert "Model not found; did you mean" not in result.output
+    assert "No catalogue match; model limits and reasoning levels remain unknown." in result.output
+
+
 @pytest.mark.parametrize("action", ["edit", "keep_context", "skip", "cancel"])
 def test_model_settings_can_be_edited_skipped_or_cancelled(tmp_path, monkeypatch, action):
     from nooa.unifiedllm import connect
@@ -799,21 +1174,12 @@ def test_model_settings_can_be_edited_skipped_or_cancelled(tmp_path, monkeypatch
         if action == "edit":
             assert "Enter a positive whole number" in result.output
         assert entry["context_window"] == (128000 if action == "keep_context" else 64000)
-        assert entry["provenance"]["catalogue_limits"]["max_completion_tokens"] == 2048
         assert entry["reasoning_levels"] == {
             "low": {"reasoning_effort": "low"},
             "medium": {"reasoning_effort": "medium"},
         }
         assert entry["reasoning_default"] == "medium"
-        for field in (
-            "context_window",
-            "max_output_tokens",
-            "reasoning_levels",
-            "reasoning_default",
-        ):
-            assert entry["provenance"][field]["source"] == "user"
-        probes = entry["provenance"]["probes"]
-        assert set(probes) == {"routing", "tools", "level:low", "level:medium"}
+        assert "provenance" not in entry  # edit sources and probe plans stay in the session
 
 
 def test_default_budget_covers_explicit_small_cap_and_every_level(tmp_path, monkeypatch):
@@ -857,15 +1223,50 @@ def test_default_budget_covers_explicit_small_cap_and_every_level(tmp_path, monk
         input="y\ny\n",
     )
     assert result.exit_code == 0, result.output
-    assert [
-        body["reasoning_effort"] for body in bodies if "reasoning_effort" in body
-    ] == levels.split(",")
+    assert [body["reasoning_effort"] for body in bodies if "reasoning_effort" in body] == [
+        levels.split(",")[0],
+        *levels.split(","),
+    ]
     # Two interfaces reach HTTP; the runtime rejects the third before sending.
-    # Routing is rechecked at the configured cap; tools and all six levels run.
+    # check_interfaces also probes the first level (max) per interface, cheaply,
+    # to recommend which interface actually surfaces reasoning. Routing is then
+    # rechecked at the configured cap; tools and all six levels run for real.
     # The session seed is also attempted; this minimal mock lacks a finish reason.
-    assert len(bodies) == 11
-    probes = yaml.safe_load(path.read_text())["models"]["local"]["provenance"]["probes"]
-    assert all(record["outcome"] == "accepted" for record in probes.values())
+    assert len(bodies) == 12
+    entry = yaml.safe_load(path.read_text())["models"]["local"]
+    assert "provenance" not in entry  # outcomes were checked on the wire; see bodies
+
+
+def test_unset_budget_tokens_is_unlimited_and_never_warns(tmp_path, monkeypatch):
+    import httpx
+
+    def handle(request):
+        if request.url.path.endswith("chat/completions"):
+            return httpx.Response(200, json={"choices": [{"message": {"content": "323"}}]})
+        return httpx.Response(404)
+
+    mock_http(monkeypatch, handle)
+    path = tmp_path / "models.yaml"
+    result = CliRunner().invoke(
+        command,
+        [
+            "model",
+            "--as",
+            "local",
+            "--endpoint",
+            "https://api.test/v1",
+            "--api-key-env",
+            "",
+            "--no-catalogue",
+            "--output",
+            str(path),
+        ],
+        input="y\ny\n",
+    )
+    assert result.exit_code == 0, result.output
+    assert "budget remaining: unlimited" in result.output
+    assert "too small for all checks" not in result.output
+    assert "The approved check budget is exhausted" not in result.output
 
 
 def test_bare_command_cancel_before_endpoint_does_nothing(tmp_path, monkeypatch):

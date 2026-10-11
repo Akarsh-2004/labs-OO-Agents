@@ -217,6 +217,31 @@ def test_discovery_stages_report_structured_results(monkeypatch, stage):
     assert report["data"]
 
 
+def test_stage_catalogue_offers_fuzzy_suggestions_when_nothing_matches(monkeypatch):
+    """--stage catalogue used to call only match_models(), never
+    fuzzy_match_models() — the wizard's own "did you mean" fallback for a
+    gateway-routed model ID never reached this non-interactive JSON front
+    door used by scripts/agents.
+    """
+
+    async def catalogue():
+        return [{"id": "anthropic/claude-opus-5"}]
+
+    monkeypatch.setattr(connect, "catalogue", catalogue)
+    result = CliRunner().invoke(
+        command,
+        [
+            "aws/anthropic/bedrock-claude-opus-5",
+            "--stage",
+            "catalogue",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.stdout)
+    assert report["data"]["models"] == []
+    assert report["data"]["fuzzy_models"] == [{"id": "anthropic/claude-opus-5"}]
+
+
 @pytest.mark.parametrize("stage", ["tools", "reasoning", "session"])
 def test_acceptance_without_feature_evidence_is_inconclusive(monkeypatch, tmp_path, stage):
     monkeypatch.setenv("STAGE_TEST_KEY", "test-secret")
@@ -265,3 +290,66 @@ def test_invalid_save_document_still_returns_safe_json(monkeypatch, tmp_path, en
     assert json.loads(result.stdout)["diagnostic_prompt"]
     assert "secret-value" not in result.output
     assert not target.exists()
+
+
+def test_interfaces_stage_reports_reasoning_recommendation(monkeypatch):
+    """--stage interfaces --reasoning-template surfaces which interface to prefer.
+
+    An interface can accept ordinary calls and still never put a reasoning
+    item on the wire (e.g. Kimi/Qwen over Hub Responses without
+    reasoning.summary requested). recommended_style must reflect which
+    interface actually showed reasoning, not just the first one that worked.
+    """
+    monkeypatch.setenv("STAGE_TEST_KEY", "test-secret")
+    chat_reply = response_body("chat")
+    chat_reply["choices"][0]["message"]["reasoning_content"] = "Thinking it through."
+    responses_reply = response_body("responses")
+
+    def handle(request):
+        if request.url.path.endswith("chat/completions"):
+            return httpx.Response(200, json=chat_reply)
+        if request.url.path.endswith("/responses"):
+            return httpx.Response(200, json=responses_reply)
+        return httpx.Response(404)
+
+    mock_http(monkeypatch, handle)
+    result = CliRunner().invoke(
+        command,
+        [
+            *BASE,
+            "--stage",
+            "interfaces",
+            "--reasoning-template",
+            "effort",
+            "--reasoning-level",
+            "medium",
+            "--reasoning-output-tokens",
+            "64",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.stdout)["data"]
+    assert "chat" in data["accepted"] and "responses" in data["accepted"]
+    assert data["reasoning_observed"]["chat"] is True
+    assert data["reasoning_observed"]["responses"] is False
+    assert data["recommended_style"] == "chat"
+
+
+def test_reasoning_template_rejected_outside_interfaces_stage(monkeypatch):
+    monkeypatch.setenv("STAGE_TEST_KEY", "test-secret")
+    mock_http(monkeypatch, lambda request: pytest.fail("Rejected options must not send HTTP"))
+    result = CliRunner().invoke(
+        command, [*BASE, "--stage", "routing", "--reasoning-template", "effort"]
+    )
+    assert result.exit_code == 2
+    assert "--reasoning-template" in result.output
+
+
+def test_reasoning_level_rejected_outside_interfaces_stage(monkeypatch):
+    """--reasoning-level only means anything alongside --reasoning-template's
+    per-interface reasoning probe, same as --reasoning-template itself."""
+    monkeypatch.setenv("STAGE_TEST_KEY", "test-secret")
+    mock_http(monkeypatch, lambda request: pytest.fail("Rejected options must not send HTTP"))
+    result = CliRunner().invoke(command, [*BASE, "--stage", "routing", "--reasoning-level", "high"])
+    assert result.exit_code == 2
+    assert "--reasoning-level" in result.output

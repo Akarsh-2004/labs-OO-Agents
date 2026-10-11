@@ -202,6 +202,9 @@ async def test_minimal_approval_posts_exact_plan_once(monkeypatch, style, suffix
     expected = deepcopy(proposal.probes[0].body)
     if style == "responses":
         expected["truncation"] = "disabled"
+        expected["input"][0]["content"] = [
+            {"type": "input_text", "text": expected["input"][0]["content"]}
+        ]
     elif style == "anthropic":
         expected["messages"][0]["content"] = [
             {"type": "text", "text": expected["messages"][0]["content"]}
@@ -276,9 +279,27 @@ def test_write_replaces_hand_written_alias_preserving_neighbors(tmp_path):
     assert text.startswith("# human notes\n")
     assert "  other: {model_name: openai/other} # keep this\n" in text
     assert "settings: true # keep this too\n" in text
-    assert yaml.safe_load(text)["models"]["local"] == connect.configure_entry(
-        {"model_name": "openai/new"}
-    )
+    expected = connect.configure_entry({"model_name": "openai/new"})
+    expected.pop("provenance", None)  # connect evidence never reaches the registry
+    assert yaml.safe_load(text)["models"]["local"] == expected
+
+
+def test_write_persists_settings_without_connect_history(tmp_path):
+    """The registry captures discovered settings, not the connect call's history."""
+    entry = make_plan().entry
+    entry["provenance"]["probes"]["routing"] = {
+        "outcome": "accepted",
+        "request": {
+            "input": [{"role": "user", "content": "Compute 17 * 19. Reply with the number."}]
+        },
+    }
+    entry["provenance"]["catalogue"] = {"url": "https://example.test", "id": "provider/model"}
+    path = tmp_path / "llm_config.yaml"
+    connect.write(entry, path, alias="local")
+    saved = yaml.safe_load(path.read_text())["models"]["local"]
+    assert "provenance" not in saved
+    assert saved["model_name"] == entry["model_name"]
+    assert saved["max_tokens"] == entry["max_tokens"]
 
 
 @pytest.mark.parametrize(
@@ -325,7 +346,8 @@ def test_connect_uses_existing_registry_discovery(tmp_path, monkeypatch):
     monkeypatch.setattr(layered_config, "get_project_dir", lambda name: project / name)
     monkeypatch.delenv("NEMO_OO_LLM_CONFIG", raising=False)
     assert llm_config.llm_config_chain() == [manual]
-    assert yaml.safe_load(manual.read_text())["models"]["local"] == make_plan().entry
+    persisted = {k: v for k, v in make_plan().entry.items() if k != "provenance"}
+    assert yaml.safe_load(manual.read_text())["models"]["local"] == persisted
 
 
 @pytest.mark.parametrize(
@@ -430,10 +452,35 @@ async def test_alternate_cap_cannot_bypass_budget(monkeypatch):
 
     mock_post(monkeypatch, post)
     result = await connect.run(
-        make_plan(reasoning_levels={"high": {"max_completion_tokens": 100000}}), approved="all"
+        make_plan(
+            reasoning_levels={"high": {"max_completion_tokens": 100000}},
+            budget_tokens=131072,
+        ),
+        approved="all",
     )
     assert len(bodies) == 2
     assert result.entry["provenance"]["probes"]["level:high"]["outcome"] == "not_probed"
+
+
+def test_fuzzy_match_finds_a_gateway_routed_model_by_its_catalogue_name():
+    catalogue = [
+        {"id": "anthropic/claude-opus-5"},
+        {"id": "anthropic/claude-opus-4.5"},
+        {"id": "openai/gpt-5.6"},
+        {"id": "google/gemini-3-pro"},
+    ]
+    assert connect.match_models("aws/anthropic/bedrock-claude-opus-5", catalogue) == []
+    matches = connect.fuzzy_match_models("aws/anthropic/bedrock-claude-opus-5", catalogue)
+    ids = [item["id"] for item in matches]
+    assert "anthropic/claude-opus-5" in ids
+    assert len(matches) <= 3
+    assert "openai/gpt-5.6" not in ids
+    assert "google/gemini-3-pro" not in ids
+
+
+def test_fuzzy_match_returns_nothing_below_the_cutoff():
+    catalogue = [{"id": "openai/gpt-5.6"}, {"id": "google/gemini-3-pro"}]
+    assert connect.fuzzy_match_models("totally-unrelated-vendor/made-up-model", catalogue) == []
 
 
 def test_entry_loads_through_main_registry(tmp_path, monkeypatch):
@@ -549,9 +596,9 @@ def test_comment_only_registry_and_quoted_alias_round_trip(tmp_path):
     connect.write({"model_name": "openai/m"}, path, alias="off")
     connect.write({"model_name": "openai/n"}, path, alias="off")
     assert path.read_text().startswith("# Keep this note\n")
-    assert yaml.safe_load(path.read_text())["models"] == {
-        "off": connect.configure_entry({"model_name": "openai/n"})
-    }
+    expected = connect.configure_entry({"model_name": "openai/n"})
+    expected.pop("provenance", None)
+    assert yaml.safe_load(path.read_text())["models"] == {"off": expected}
 
 
 @pytest.mark.asyncio
