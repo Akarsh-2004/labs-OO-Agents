@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import inspect
 from typing import Any, Callable, Dict, Optional
 from nooa.acs.schema import ACSDecision, ACSHook
 from nooa.acs.handler import ACSHandler
@@ -12,12 +13,33 @@ class ACSBlockedError(Exception):
         self.reason = reason
 
 
+class ACSApprovalRequiredError(Exception):
+    """Raised when an action requires approval before it can execute."""
+
+    def __init__(self, reason: Optional[str] = None):
+        super().__init__(f"Approval required. Reason: {reason or 'Human approval required'}")
+        self.reason = reason
+
+
+class ACSDeferExhaustedError(Exception):
+    """Raised when a deferred decision exceeds its retry limit or deadline."""
+
+
+def acs_thread_safe(callback: Callable[[], Any]) -> Callable[[], Any]:
+    """Mark a synchronous ACS action callback safe to run in a worker thread."""
+    setattr(callback, "__acs_thread_safe__", True)
+    return callback
+
+
 async def enforce_acs_decision(
     handler: ACSHandler,
     hook_type: str,
     payload: Dict[str, Any],
     provenance: Dict[str, Any],
-    execute_func: Callable[[], Any]
+    execute_func: Callable[[], Any],
+    *,
+    max_defer_retries: int = 5,
+    defer_timeout: float | None = 30.0,
 ) -> Any:
     """
     Wraps an executable function with an ACS governance check.
@@ -32,39 +54,65 @@ async def enforce_acs_decision(
     Returns:
         The result of execute_func() if allowed.
         
-    Raises:
+        Raises:
         ACSBlockedError: If the Guardian denies the request.
+        ACSApprovalRequiredError: If the Guardian requires human approval.
+        ACSDeferExhaustedError: If deferred decisions exceed configured bounds.
     """
+    if max_defer_retries < 0:
+        raise ValueError("max_defer_retries must be nonnegative")
+    if defer_timeout is not None and defer_timeout <= 0:
+        raise ValueError("defer_timeout must be positive or None")
+
     hook = ACSHook(
         hook_type=hook_type,  # type: ignore
         payload=payload,
         provenance=provenance
     )
     
-    # Evaluate the decision, potentially retrying if deferred
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + defer_timeout if defer_timeout is not None else None
+    defer_retries = 0
+
+    # Evaluate the decision, potentially retrying if deferred.
     while True:
         decision = await handler.evaluate(hook)
         
         if decision.status == "allow":
-            # Execute the actual logic
-            if asyncio.iscoroutinefunction(execute_func):
-                return await execute_func()
+            if getattr(execute_func, "__acs_thread_safe__", False):
+                result = await asyncio.to_thread(execute_func)
             else:
-                return execute_func()
+                result = execute_func()
+            if inspect.isawaitable(result):
+                return await result
+            return result
                 
         elif decision.status == "deny":
             # Block execution and raise an exception that the agent/system can handle
             raise ACSBlockedError(reason=decision.reason)
             
         elif decision.status == "ask":
-            # Human-in-the-loop fallback.
-            # In a real implementation, this might raise a special 'RequiresApprovalError'
-            # or trigger a blocking prompt to the console/UI. For now, we simulate asking
-            # by either raising or (if we have an approval callback injected) waiting for it.
-            # TODO: Integrate with NOOA's standard interactive prompt system.
-            raise ACSBlockedError(reason="Requires human approval (not yet implemented in current context).")
+            raise ACSApprovalRequiredError(reason=decision.reason)
             
         elif decision.status == "defer":
-            # Backoff and retry
-            wait_ms = decision.retry_after_ms or 1000
-            await asyncio.sleep(wait_ms / 1000.0)
+            if defer_retries >= max_defer_retries:
+                raise ACSDeferExhaustedError(
+                    f"ACS defer retry limit reached ({max_defer_retries})"
+                )
+
+            remaining = deadline - loop.time() if deadline is not None else None
+            if remaining is not None and remaining <= 0:
+                raise ACSDeferExhaustedError("ACS defer deadline reached")
+
+            wait_ms = (
+                decision.retry_after_ms
+                if decision.retry_after_ms is not None
+                else 1000
+            )
+            wait_seconds = wait_ms / 1000.0
+            if remaining is not None and wait_seconds >= remaining:
+                await asyncio.sleep(remaining)
+                raise ACSDeferExhaustedError("ACS defer deadline reached")
+
+            await asyncio.sleep(wait_seconds)
+            defer_retries += 1

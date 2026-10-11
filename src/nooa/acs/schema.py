@@ -20,7 +20,8 @@ class ACSDecision(BaseModel):
     reason: Optional[str] = None
     decision_id: Optional[str] = None
     retry_after_ms: Optional[int] = Field(
-        default=None, 
+        default=None,
+        ge=0,
         description="Used only when status='defer'. Wait time before retry."
     )
 

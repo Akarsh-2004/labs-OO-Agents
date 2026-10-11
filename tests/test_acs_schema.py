@@ -47,3 +47,12 @@ def test_malformed_hook_data_fails_validation():
     with pytest.raises(ValidationError):
         # 'invalidType' is not in the HookType Literal
         ACSHook(hook_type="invalidType", payload={})
+
+
+def test_retry_after_ms_accepts_none_and_rejects_negative_values():
+    import pytest
+    from pydantic import ValidationError
+
+    assert ACSDecision(status="defer", retry_after_ms=None).retry_after_ms is None
+    with pytest.raises(ValidationError):
+        ACSDecision(status="defer", retry_after_ms=-1)

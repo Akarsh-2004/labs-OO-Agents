@@ -1,10 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import inspect
+import logging
 from abc import ABC, abstractmethod
 from typing import Callable, Any
 
 from nooa.acs.schema import ACSDecision, ACSHook
+
+logger = logging.getLogger(__name__)
 
 class ACSHandler(ABC):
     """
@@ -37,12 +41,21 @@ class AuditOnlyHandler(ACSHandler):
     
     def __init__(self, sink_func: Callable[[ACSHook], Any]):
         self.sink_func = sink_func
+        self._delivery_tasks: set[asyncio.Task[None]] = set()
 
     async def evaluate(self, hook: ACSHook) -> ACSDecision:
-        # Call the sink function (can be sync or async)
-        if asyncio.iscoroutinefunction(self.sink_func):
-            await self.sink_func(hook)
-        else:
-            self.sink_func(hook)
-        
+        async def deliver() -> None:
+            try:
+                if asyncio.iscoroutinefunction(self.sink_func):
+                    result = self.sink_func(hook)
+                else:
+                    result = await asyncio.to_thread(self.sink_func, hook)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                logger.exception("Audit sink delivery failed")
+
+        task = asyncio.create_task(deliver())
+        self._delivery_tasks.add(task)
+        task.add_done_callback(self._delivery_tasks.discard)
         return ACSDecision(status="allow")
