@@ -156,6 +156,24 @@ async def test_slow_deferred_evaluation_expires_without_executing_action():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("defer_timeout", [None, 1.0])
+async def test_handler_timeout_propagates_before_defer_deadline(defer_timeout):
+    class TimedOutHandler(ACSHandler):
+        async def evaluate(self, hook):
+            raise asyncio.TimeoutError("handler-specific timeout")
+
+    with pytest.raises(asyncio.TimeoutError, match="handler-specific timeout"):
+        await enforce_acs_decision(
+            TimedOutHandler(),
+            "toolCallRequest",
+            {},
+            {},
+            lambda: None,
+            defer_timeout=defer_timeout,
+        )
+
+
+@pytest.mark.asyncio
 async def test_sync_callback_returning_coroutine_is_called_once_and_awaited():
     handler = MockHandler([ACSDecision(status="allow")])
     calls = []

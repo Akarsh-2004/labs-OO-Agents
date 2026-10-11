@@ -91,6 +91,8 @@ async def enforce_acs_decision(
                     evaluation, timeout=remaining
                 )
         except asyncio.TimeoutError as error:
+            if deadline is None or loop.time() < deadline:
+                raise
             raise ACSDeferExhaustedError(
                 "ACS defer deadline reached while awaiting a decision"
             ) from error
