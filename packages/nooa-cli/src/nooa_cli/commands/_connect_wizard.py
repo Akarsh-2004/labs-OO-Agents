@@ -64,6 +64,7 @@ class WizardState:
     prompt_key: Any = None
     proposal: Any = None
     provider: Any = None
+    reasoning_level: Any = None
     reasoning_output_tokens: Any = None
     reasoning_template: Any = None
     registry: Any = None
@@ -73,6 +74,7 @@ class WizardState:
     server_urls: Any = None
     show_config: Any = None
     unobserved: Any = None
+    working_dir: Any = None
     yes: Any = None
 
 
@@ -159,6 +161,19 @@ def select_connection(state: WizardState) -> bool:
         state.explicit_key_env = True
         state.no_catalogue = True
         view.line(f"Editing {state.edit_model} from {source_path}. No model discovery is needed.")
+        # --working-dir only redirects entries() to the target's own file
+        # when that file already exists (it cannot read a file that isn't
+        # there yet) — otherwise this alias was found via the general
+        # chain (cwd/global), not target's own copy. Silently saving that
+        # into target without saying so looks like an in-place edit of
+        # target's own prior settings when it's actually a copy from
+        # elsewhere into a project that never had this alias.
+        if state.working_dir and source_path.resolve() != state.path.resolve():
+            view.line(
+                f"{state.path} does not define {state.edit_model!r} yet; copying it in from "
+                f"{source_path} rather than editing it in place there.",
+                fg="yellow",
+            )
     state.data = {}
     if state.path.exists():
         with state.path.open() as source:
@@ -199,7 +214,7 @@ def select_connection(state: WizardState) -> bool:
         view.step(1, "Connection")
     if state.provider and state.provider not in (*connect.PROVIDERS, "custom"):
         raise click.UsageError(
-            "Unknown provider. Choose nvidia, openai, anthropic, google, openrouter, or custom."
+            f"Unknown provider. Choose {', '.join(connect.PROVIDERS)}, or custom."
         )
     if not state.provider and not state.endpoint and not state.yes:
         state.provider = prompts.prompt(
@@ -227,13 +242,25 @@ def select_connection(state: WizardState) -> bool:
         "Model server URL", suggestions=state.server_urls, open_menu=True
     )
     state.endpoint = connect.normalize_endpoint(state.endpoint)
+    announced = False
     if not state.explicit_key_env:
         saved_names = credential_names(state.registry, state.endpoint)
         if len(saved_names) == 1:
             state.api_key_env = saved_names[0]
-            view.line(
-                f"Using saved key variable {state.api_key_env or '(no authentication)'} for this endpoint."
-            )
+            announced = True
+            if not state.api_key_env:
+                view.line("Using saved key variable (no authentication) for this endpoint.")
+            elif os.environ.get(state.api_key_env):
+                view.line(f"Using saved key variable {state.api_key_env} for this endpoint.")
+            else:
+                # credential_names only remembers which variable NAME this
+                # endpoint used last time, not whether a value is still set —
+                # saying "using" here when we're about to prompt for the same
+                # key again reads as broken, not reassuring.
+                view.line(
+                    f"This endpoint previously used key variable {state.api_key_env}, "
+                    "but it has no value set."
+                )
         elif len(saved_names) > 1:
             if state.yes:
                 raise click.UsageError(
@@ -287,14 +314,42 @@ def select_connection(state: WizardState) -> bool:
         and state.api_key_env
         and not os.environ.get(state.api_key_env)
     )
+    asked = bool(state.prompt_key or needs_key)
     state.api_key = (
         prompts.prompt("API key (used only for this setup)", hide_input=True)
-        if state.prompt_key or needs_key
+        if asked
         else os.environ.get(state.api_key_env)
         if state.api_key_env
         else None
     )
+    if state.api_key and not asked and not announced:
+        # A preset's variable is used silently otherwise; a stale key there
+        # then looks like a broken provider.
+        view.line(f"Using the key in {state.api_key_env}.")
     return True
+
+
+def ask_for_rejected_key(state: WizardState) -> None:
+    """The server refused the key: say where it came from and ask for another.
+
+    The new key is used for this setup; the save step offers to store it
+    under ``state.api_key_env``, as for any key typed during setup.
+    """
+    source = (
+        f"the key in {state.api_key_env}"
+        if state.api_key_env and state.api_key == os.environ.get(state.api_key_env)
+        else "that key"
+        if state.api_key
+        else "the request without a key"
+    )
+    view.line(f"The server rejected {source}. Enter a key to try again (Ctrl-C to cancel).")
+    if not state.api_key_env:
+        state.api_key_env = prompts.prompt(
+            "Save key under variable name",
+            default="NOOA_MODEL_API_KEY",
+            suggestions=prompts.environment_names(),
+        )
+    state.api_key = prompts.prompt("API key (used only for this setup)", hide_input=True)
 
 
 def select_model(state: WizardState) -> bool:
@@ -309,7 +364,7 @@ def select_model(state: WizardState) -> bool:
 
         state.endpoint_models = read_discovery(state.discovery_file, state.endpoint)
         state.discovery_endpoint = state.endpoint
-    if not state.model:
+    while not state.model:
         click.echo("Connecting to the server and listing models...")
         try:
             found = asyncio.run(
@@ -322,9 +377,12 @@ def select_model(state: WizardState) -> bool:
             state.discovery_endpoint = state.endpoint
             click.echo(f"Could not list models: {exc}", err=True)
             if exc.status_code in {401, 403}:
-                raise click.ClickException(
-                    "Authentication failed. Check the key and try again."
-                ) from None
+                if state.yes:
+                    raise click.ClickException(
+                        "Authentication failed. Check the key and try again."
+                    ) from None
+                ask_for_rejected_key(state)
+                continue
             state.model = prompts.prompt("Exact model ID (if known; Ctrl-C to cancel)")
         else:
             state.endpoint = found.api_base
@@ -351,6 +409,16 @@ def check_interfaces(state: WizardState) -> bool:
             retry_styles = ("chat", "responses", "anthropic")
             interface_timeout = 30
             while True:
+                # Always test reasoning per interface, not just connectivity --
+                # "nooa connect" with no arguments should run the best check we
+                # have by default, not require the caller to already know to
+                # ask for it. If the user gave us their own --reasoning-template
+                # (e.g. for an Anthropic-only setup), that shape wins; "effort"
+                # is a reasonable default elsewhere, understood by chat and
+                # responses (and harmless if a style ignores/rejects it).
+                reasoning_level = state.reasoning_level or (
+                    state.levels.split(",")[0].strip() if state.levels else "medium"
+                )
                 state.interfaces = asyncio.run(
                     show_checks(
                         connect.check_interfaces(
@@ -363,6 +431,12 @@ def check_interfaces(state: WizardState) -> bool:
                             api_key=state.api_key,
                             styles=retry_styles,
                             timeout_seconds=interface_timeout,
+                            reasoning_template=state.reasoning_template or "effort",
+                            reasoning_level=reasoning_level,
+                            reasoning_output_tokens=(
+                                state.reasoning_output_tokens
+                                or connect.DEFAULT_REASONING_OUTPUT_TOKENS
+                            ),
                         ),
                         summary=False,
                     )
@@ -373,6 +447,8 @@ def check_interfaces(state: WizardState) -> bool:
                 )
                 available = state.interfaces.accepted
                 if available:
+                    if state.interfaces.recommended_style in available:
+                        state.default_style = state.interfaces.recommended_style
                     break
                 failed_checks = {
                     style: r.entry["provenance"]["probes"]["routing"]
@@ -492,14 +568,22 @@ def check_interfaces(state: WizardState) -> bool:
             click.echo(
                 "Interfaces that returned the expected response format: " + ", ".join(available)
             )
+            observed = [s for s in available if state.interfaces.reasoning_observed.get(s)]
+            click.echo(
+                "Interfaces that actually returned reasoning: "
+                + (", ".join(observed) if observed else "none")
+            )
         if state.interfaces and len(available) == 1:
             state.api_style = available[0]
             click.echo(f"Using {state.api_style} for {state.model}.")
         else:
             click.echo(f"Choose the request interface for {state.model}:")
-            click.echo(
-                "chat = OpenAI-compatible; responses = OpenAI Responses; anthropic = Anthropic Messages."
-            )
+            legend = {
+                "chat": "chat = OpenAI-compatible",
+                "responses": "responses = OpenAI Responses",
+                "anthropic": "anthropic = Anthropic Messages",
+            }
+            click.echo("; ".join(legend[style] for style in available) + ".")
             state.api_style = prompts.prompt(
                 "API format",
                 choices=available,
@@ -523,14 +607,10 @@ def configure_metadata(state: WizardState) -> bool:
         state.candidate = {
             "id": state.editing.get("underlying_model", state.model),
             "context_length": state.editing.get("context_window"),
-            "top_provider": {
-                "max_completion_tokens": state.editing.get(
-                    "max_output_tokens",
-                    state.editing.get("provenance", {})
-                    .get("catalogue_limits", {})
-                    .get("max_completion_tokens"),
-                )
-            },
+            # Saved entries keep settings only, not the catalogue limits, and an
+            # edit does not look the model up, so its ceiling is known here only
+            # if the entry saved max_output_tokens. The saved cap is kept as is.
+            "top_provider": {"max_completion_tokens": state.editing.get("max_output_tokens")},
             "reasoning": {
                 "supported_efforts": list(state.editing.get("reasoning_levels", {})),
                 "default_effort": state.editing.get("reasoning_default"),
@@ -578,7 +658,27 @@ def configure_metadata(state: WizardState) -> bool:
                 if state.candidate is None:
                     raise click.ClickException("Choose one of the displayed model IDs.")
         else:
-            click.echo("No catalogue match; model limits and reasoning levels remain unknown.")
+            # An exact/suffix match found nothing — likely a gateway prefix
+            # (aws/..., bedrock-..., vertex/...) the catalogue never records.
+            # Never auto-select a fuzzy guess; only offer it for confirmation.
+            fuzzy = [] if state.yes else connect.fuzzy_match_models(state.model, models)
+            if fuzzy:
+                click.echo(
+                    "Model not found; did you mean one of these? "
+                    + ", ".join(item["id"] for item in fuzzy)
+                )
+                selected = prompts.prompt(
+                    "Catalogue model (blank leaves it unknown)",
+                    default="",
+                    show_default=False,
+                    choices=[""] + [item["id"] for item in fuzzy],
+                )
+                if selected:
+                    state.candidate = next((item for item in fuzzy if item["id"] == selected), None)
+                    if state.candidate is None:
+                        raise click.ClickException("Choose one of the displayed model IDs.")
+            if state.candidate is None:
+                click.echo("No catalogue match; model limits and reasoning levels remain unknown.")
     endpoint_model = (
         next((item for item in state.endpoint_models if item.get("id") == state.model), None)
         if state.endpoint == state.discovery_endpoint
@@ -769,21 +869,29 @@ def configure_checks(state: WizardState) -> bool:
         state.proposal.entry, reply_tokens=state.reply_tokens
     )
     if state.reply_tokens is None and not state.yes:
+        output_ceiling = (
+            state.configured["provenance"].get("catalogue_limits", {}).get("max_completion_tokens")
+        )
+        if not (
+            isinstance(output_ceiling, int)
+            and not isinstance(output_ceiling, bool)
+            and output_ceiling > 0
+        ):
+            output_ceiling = None
         bounds = [
             v
             for v in (
                 state.configured["context_window"] - 1
                 if state.configured.get("context_window")
                 else None,
-                state.configured["provenance"]
-                .get("catalogue_limits", {})
-                .get("max_completion_tokens"),
+                output_ceiling,
             )
             if isinstance(v, int) and v > 0
         ]
         chosen_cap = prompts.choose_reply_limit(
             state.configured["max_tokens"],
             min(bounds) if bounds else None,
+            output_ceiling=output_ceiling,
             source=state.configured["provenance"]["reply_limit"]["source"],
         )
         state.configured = connect.configure_entry(state.configured, reply_tokens=chosen_cap)
@@ -822,7 +930,8 @@ def run_checks(state: WizardState) -> bool:
         dim=True,
     )
     view.line(
-        f"Estimated tokens: {state.remaining_estimate:,} · budget remaining: {state.proposal.budget_tokens:,} · estimated price: {price}",
+        f"Estimated tokens: {state.remaining_estimate:,} · budget remaining: "
+        f"{view.format_budget(state.proposal.budget_tokens)} · estimated price: {price}",
         dim=True,
     )
     if state.remaining_estimate > state.proposal.budget_tokens:
@@ -938,7 +1047,7 @@ def save_model(state: WizardState) -> bool:
             "Full configuration is saved with the model. Use --show-config to preview the YAML.",
             dim=True,
         )
-    if shadow := shadowing_source(state.alias, state.path):
+    if shadow := shadowing_source(state.alias, state.path, extra_priority=bool(state.working_dir)):
         view.line(
             f"Warning: {shadow} currently defines this alias and takes precedence over this destination. Update that file or explicitly load {state.path} to use this entry.",
             fg="yellow",
@@ -988,7 +1097,7 @@ def save_model(state: WizardState) -> bool:
                 f"The key was not saved. Set {state.api_key_env} (or add it to your NOOA secrets file) before using this alias."
             )
         click.echo(f'Use it in Python: get_llm_client("{state.alias}")')
-        if state.output:
+        if state.output and not state.working_dir:
             click.echo(
                 "For a custom path, include it in NEMO_OO_LLM_CONFIG or reload_registry(path)."
             )

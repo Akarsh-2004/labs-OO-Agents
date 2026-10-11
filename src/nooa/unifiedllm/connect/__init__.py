@@ -11,6 +11,8 @@ obeyed. The runtime reads the result, never these onboarding templates.
 from __future__ import annotations
 
 import asyncio
+import base64
+import difflib
 import json
 import math
 import os
@@ -19,7 +21,7 @@ import stat
 import tempfile
 import time
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import aclosing
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -36,7 +38,11 @@ from nooa.unifiedllm.limits import REPLY_CAP_KEYS
 from ._records import ProbeRecord, check_status, public_record
 
 CATALOGUE_URL = "https://openrouter.ai/api/v1/models"
-DEFAULT_CHECK_BUDGET = 131072
+# Effectively unlimited: no real check plan approaches this, so an unset
+# --budget-tokens never causes checks to be skipped. A finite sentinel (not
+# float("inf")) keeps every arithmetic site, type annotation, and JSON
+# encoding of a ConnectPlan unchanged.
+DEFAULT_CHECK_BUDGET = 10**15
 DEFAULT_REASONING_OUTPUT_TOKENS = 4096
 REASONING_CHECK_PROMPT = """Eight jobs—A, B, C, D, E, F, G and H—must run one at a time.
 Each job runs exactly once.
@@ -130,6 +136,12 @@ PROVIDERS = {
     "nvidia": ProviderPreset(
         "NVIDIA (build.nvidia.com)", "https://integrate.api.nvidia.com/v1", "chat", "NVIDIA_API_KEY"
     ),
+    "hub": ProviderPreset(
+        "NVIDIA Inference Hub (inference-api.nvidia.com)",
+        "https://inference-api.nvidia.com/v1",
+        "chat",
+        "NVIDIA_INFERENCE_API_KEY",
+    ),
     "openai": ProviderPreset("OpenAI", "https://api.openai.com/v1", "responses", "OPENAI_API_KEY"),
     "anthropic": ProviderPreset(
         "Anthropic", "https://api.anthropic.com/v1", "anthropic", "ANTHROPIC_API_KEY"
@@ -190,6 +202,36 @@ class InterfaceResult:
             for style, result in self.results.items()
             if result.entry["provenance"]["probes"]["routing"]["outcome"] == "accepted"
         )
+
+    @property
+    def reasoning_observed(self) -> dict[str, bool]:
+        """Which interfaces put a reasoning item on the wire, not merely accepted a call.
+
+        Empty (all False) unless check_interfaces was given reasoning_levels;
+        an interface can be accepted and still never surface reasoning.
+        """
+        observed: dict[str, bool] = {}
+        for style, result in self.results.items():
+            probes = result.entry["provenance"]["probes"]
+            observed[style] = any(
+                record.get("reasoning_observed")
+                for name, record in probes.items()
+                if name.startswith("level:")
+            )
+        return observed
+
+    @property
+    def recommended_style(self) -> str | None:
+        """The accepted interface to prefer: the first (by ``styles`` order) that
+        actually showed reasoning, or else the first accepted interface, or
+        None if nothing was accepted.
+        """
+        accepted = self.accepted
+        observed = self.reasoning_observed
+        for style in accepted:
+            if observed.get(style):
+                return style
+        return accepted[0] if accepted else None
 
 
 @dataclass(frozen=True)
@@ -397,12 +439,18 @@ async def catalogue() -> list[dict]:
         return data
 
 
+def _normalized_model_id(value: str) -> str:
+    """Shared normalization rule for match_models() and fuzzy_match_models().
+
+    Kept in one place so the two matchers cannot silently disagree on what
+    counts as "the same" model id.
+    """
+    return re.sub(r"[-_.]", "", value.lower())
+
+
 def match_models(model: str, models: list[dict]) -> list[dict]:
     """Suggest up to three matches. The frontend must confirm a candidate."""
-
-    def normalized(value):
-        return re.sub(r"[-_.]", "", value.lower())
-
+    normalized = _normalized_model_id
     target = normalized(model)
     matches = []
     for item in models:
@@ -417,11 +465,53 @@ def match_models(model: str, models: list[dict]) -> list[dict]:
     return [item for _, _, item in sorted(matches, key=lambda item: item[:2])[:3]]
 
 
+_FUZZY_MATCH_CUTOFF = 0.6
+
+
+def fuzzy_match_models(model: str, models: list[dict]) -> list[dict]:
+    """Best-effort "did you mean" suggestions once match_models finds nothing.
+
+    A gateway-routed model ID (e.g. ``aws/anthropic/bedrock-claude-opus-5``)
+    carries routing segments the catalogue never records, so exact/suffix
+    matching in match_models() can find nothing even though the model is
+    listed under its own name. This never auto-selects a candidate; the
+    frontend must still confirm one.
+    """
+    normalized = _normalized_model_id
+    target = normalized(model)
+    target_tail = target.rsplit("/", 1)[-1]
+    scored = []
+    for item in models:
+        name = item.get("id")
+        if not isinstance(name, str):
+            continue
+        candidate = normalized(name)
+        candidate_tail = candidate.rsplit("/", 1)[-1]
+        ratio = max(
+            difflib.SequenceMatcher(None, target, candidate).ratio(),
+            difflib.SequenceMatcher(None, target_tail, candidate_tail).ratio(),
+        )
+        if ratio >= _FUZZY_MATCH_CUTOFF:
+            scored.append((ratio, name, item))
+    scored.sort(key=lambda entry: entry[0], reverse=True)
+    return [item for _, _, item in scored[:3]]
+
+
 def reasoning_settings(template: str, style: str, level: str, *, budget: int = 4096) -> dict:
-    """Build an onboarding candidate, not a claim about a model's support."""
+    """Build an onboarding candidate, not a claim about a model's support.
+
+    Responses always asks for ``reasoning.summary`` alongside effort. Some
+    routes (OpenAI/Azure/DeepSeek observed) return summary text without being
+    asked, but others (Kimi, Qwen observed on the Hub) omit the entire
+    "reasoning" output item -- not just its text -- unless summary is
+    explicitly requested, even though usage still reports billed reasoning
+    tokens. Asking unconditionally is harmless where it's already the
+    default and is required to observe reasoning at all on routes where it
+    isn't.
+    """
     if template == "effort":
         return (
-            {"reasoning": {"effort": level}}
+            {"reasoning": {"effort": level, "summary": "auto"}}
             if style == "responses"
             else {"reasoning_effort": level}
         )
@@ -1293,7 +1383,113 @@ async def run_steps(
                     proposal.alias, entry, probe, key
                 )
             usage = response.usage
-            reasoning = bool(response.reasoning or (usage and usage.reasoning_tokens))
+            # response.reasoning joins only non-empty AssistantReasoning parts,
+            # so a provider that returns a reasoning part with a signature but
+            # deliberately empty/opaque text (Claude Sonnet 5/Opus 5 via Azure
+            # or Bedrock) reads as no reasoning at all through that property.
+            # Check for the part's presence directly, matching how session
+            # checks in _session.py already detect it.
+            reasoning_parts = [part for part in response.parts if part.kind == "reasoning"]
+            # Confirmed live: Kimi/Qwen bill nonzero usage.reasoning_tokens on
+            # routes that never put a reasoning item on the wire at all --
+            # capture_parts has nothing to attach, so parts stays empty. Billed
+            # tokens alone are not evidence; only a captured part is (visible
+            # text or not, per the empty-text Claude case above).
+            reasoning = bool(reasoning_parts)
+            # Anthropic withholds the visible thinking text in (at least) two
+            # distinct wire shapes, both preserved on .native by chat_parts.py:
+            # a genuine redacted_thinking block (opaque "data" blob, no text
+            # field at all), and a normal *signed* "thinking" block whose
+            # "thinking" text happens to be empty (observed live for Claude
+            # Sonnet 5/Opus 5 via this Bedrock/Azure route) — chat_parts.py
+            # accepts empty text there as long as a real signature is present.
+            # Either way there's no visible text left for litellm to estimate
+            # a token count from — surface that instead of a bare, misleading 0.
+            reasoning_encrypted = False
+            reasoning_encrypted_bytes = None
+
+            def _encrypted_blob_size(data: str) -> int:
+                # The decoded byte count of an opaque encrypted blob is a
+                # rough size signal only — a proxy for how much reasoning
+                # state it carries, not a token count. Providers give no way
+                # to convert this into an actual reasoning-token figure.
+                try:
+                    return len(base64.b64decode(data, validate=False))
+                except ValueError:  # binascii.Error is a ValueError subclass
+                    return len(data)
+
+            for part in reasoning_parts:
+                if not isinstance(part.native, Mapping):
+                    continue
+                block = part.native.get("thinking_blocks")
+                if isinstance(block, Mapping):
+                    kind = block.get("type")
+                    if kind == "redacted_thinking" and isinstance(block.get("data"), str):
+                        reasoning_encrypted = True
+                        data = block["data"]
+                        reasoning_encrypted_bytes = (reasoning_encrypted_bytes or 0) + (
+                            _encrypted_blob_size(data)
+                        )
+                    elif (
+                        kind == "thinking"
+                        and isinstance(block.get("signature"), str)
+                        and not part.text
+                    ):
+                        # chat_parts.py already popped "thinking" text out of
+                        # this dict, so part.text (not the dict) is the only
+                        # place left to check whether it was actually empty.
+                        # A signature's length is fixed by the signing
+                        # scheme, not by how much was thought — there is no
+                        # size signal to report here, only that the text was
+                        # withheld.
+                        reasoning_encrypted = True
+                    continue
+                # openai/azure Chat Completions routes (chat_parts.py) store
+                # their reasoning item under "reasoning_items", a third
+                # shape distinct from both "thinking_blocks" above and the
+                # unwrapped Responses-style native below — same
+                # encrypted_content field, different wrapper key.
+                #
+                # An OpenAI-style reasoning item can carry a visible summary
+                # (part.text) alongside encrypted_content at the same time —
+                # the encrypted blob is opaque replay state, not proof the
+                # readable text was withheld. Only flag "withheld" when there
+                # is no visible text, matching the "thinking" branch above.
+                block = part.native.get("reasoning_items")
+                if isinstance(block, Mapping):
+                    encrypted_content = block.get("encrypted_content")
+                    if isinstance(encrypted_content, str) and encrypted_content and not part.text:
+                        reasoning_encrypted = True
+                        reasoning_encrypted_bytes = (reasoning_encrypted_bytes or 0) + (
+                            _encrypted_blob_size(encrypted_content)
+                        )
+                    continue
+                # Responses-style routes (response_parts.py) store the raw
+                # output item on .native directly, not wrapped under
+                # "thinking_blocks" or "reasoning_items" — e.g. {"type":
+                # "reasoning", "encrypted_content": "..."}. Detect that shape
+                # too, or Responses/OpenAI-style encrypted reasoning always
+                # reads as "not encrypted" here regardless of what the
+                # provider sent. Same visible-summary-plus-encrypted-blob
+                # caveat as the reasoning_items branch above.
+                encrypted_content = part.native.get("encrypted_content")
+                if isinstance(encrypted_content, str) and encrypted_content and not part.text:
+                    reasoning_encrypted = True
+                    reasoning_encrypted_bytes = (reasoning_encrypted_bytes or 0) + (
+                        _encrypted_blob_size(encrypted_content)
+                    )
+            # litellm's text-length reasoning_tokens estimate (see the
+            # redacted_thinking/signed-empty-thinking comment above) only
+            # exists in its Anthropic/Bedrock transformation code — for every
+            # other provider it makes no estimate at all, even when real,
+            # non-empty reasoning text came back (observed live for Qwen and
+            # DeepSeek routes on this gateway). We already have that text
+            # in hand; report its length ourselves rather than nothing. Never
+            # the text itself — only its size, same privacy stance as the
+            # encrypted-blob byte count above.
+            reasoning_text_chars = (
+                sum(len(part.text) for part in reasoning_parts if part.text) or None
+            )
             tool = any(call.name == "probe_tool" for call in response.tool_calls)
             tokens = usage.input_tokens + usage.output_tokens if usage else 0
         except Exception as exc:
@@ -1335,6 +1531,9 @@ async def run_steps(
             transport=transport,
             request=deepcopy(probe.body),
             reasoning_observed=reasoning,
+            reasoning_encrypted=reasoning_encrypted,
+            reasoning_encrypted_bytes=reasoning_encrypted_bytes,
+            reasoning_text_chars=reasoning_text_chars,
             tool_observed=tool,
             reported_tokens=tokens,
             input_tokens=usage.input_tokens if usage else None,
@@ -1420,11 +1619,14 @@ async def check_interfaces(
     api_base: str,
     api_key_env: str,
     *,
-    budget_tokens: int = 4096,
+    budget_tokens: int = DEFAULT_CHECK_BUDGET,
     output_tokens: int = 200,
     api_key: str | None = None,
     styles: tuple[str, ...] = ("chat", "responses", "anthropic"),
     timeout_seconds: float = 30,
+    reasoning_template: str | None = None,
+    reasoning_level: str = "medium",
+    reasoning_output_tokens: int = DEFAULT_REASONING_OUTPUT_TOKENS,
 ) -> AsyncIterator[ProbeUpdate | InterfaceResult]:
     """Try one routing request per interface, sharing one budget and no retries.
 
@@ -1434,6 +1636,21 @@ async def check_interfaces(
     have different authentication conventions, so failure on one does not stop
     the other bounded attempts. Close the iterator when cancelling. The selected
     result can be passed as plan(existing_entry=...) to reuse its routing check.
+
+    ``reasoning_template``, when given, also runs one reasoning-eliciting probe
+    per interface (the same puzzle prompt ``plan`` uses for its own
+    reasoning-level checks), built per style via ``reasoning_settings`` so each
+    interface gets its own correct wire shape rather than one shape reused
+    everywhere. This makes ``InterfaceResult.reasoning_observed`` and
+    ``.recommended_style`` reflect which interfaces actually surface reasoning
+    for this model, not just which accept an ordinary call. A route can accept
+    calls on every interface while only one of them ever puts a "reasoning"
+    item on the wire -- e.g. Responses needs ``reasoning.summary`` requested
+    (see ``reasoning_settings``) for some Hub routes that Chat's plain
+    ``reasoning_content`` surfaces without any extra parameter. Only the
+    "effort" template is meaningful across chat and responses together; an
+    anthropic-only comparison needs a matching template (adaptive/budget/
+    thinking) passed explicitly.
     """
     if (
         not styles
@@ -1444,6 +1661,11 @@ async def check_interfaces(
     results = {}
     spent = 0
     for style in dict.fromkeys(styles):
+        style_reasoning_levels = (
+            {reasoning_level: reasoning_settings(reasoning_template, style, reasoning_level)}
+            if reasoning_template
+            else None
+        )
         proposal = plan(
             alias,
             model,
@@ -1452,26 +1674,41 @@ async def check_interfaces(
             api_key_env,
             budget_tokens=budget_tokens,
             output_tokens=output_tokens,
+            reasoning_levels=style_reasoning_levels,
+            reasoning_output_tokens=reasoning_output_tokens,
+        )
+        routing = replace(
+            proposal.probes[0],
+            timeout_seconds=timeout_seconds,
+            body={
+                **proposal.probes[0].body,
+                "max_output_tokens" if style == "responses" else "max_tokens": output_tokens,
+            },
+            token_estimate=output_tokens + 512,
+            uses_configured_cap=False,
+        )
+        level_probes = tuple(
+            replace(
+                p,
+                timeout_seconds=timeout_seconds,
+                body={
+                    **p.body,
+                    "max_output_tokens" if style == "responses" else "max_tokens": (
+                        reasoning_output_tokens
+                    ),
+                },
+                token_estimate=reasoning_output_tokens + 512,
+                uses_configured_cap=False,
+            )
+            for p in proposal.probes
+            if p.name.startswith("level:")
         )
         proposal = replace(
             proposal,
-            probes=(
-                replace(
-                    proposal.probes[0],
-                    timeout_seconds=timeout_seconds,
-                    body={
-                        **proposal.probes[0].body,
-                        "max_output_tokens"
-                        if style == "responses"
-                        else "max_tokens": output_tokens,
-                    },
-                    token_estimate=output_tokens + 512,
-                    uses_configured_cap=False,
-                ),
-            ),
+            probes=(routing, *level_probes),
             budget_tokens=max(0, budget_tokens - spent),
         )
-        async with aclosing(run_steps(proposal, approved="minimal", api_key=api_key)) as steps:
+        async with aclosing(run_steps(proposal, approved="all", api_key=api_key)) as steps:
             async for event in steps:
                 if isinstance(event, ConnectResult):
                     results[style] = event
@@ -1488,6 +1725,11 @@ def write(entry: dict, path: Path, *, alias: str) -> None:
     unrelated entries and comments remain intact. The final replace is atomic.
     """
     entry = configure_entry(entry)
+    # Persist discovered settings only. Probe evidence, request bodies, catalogue
+    # data and warnings belong to the connect session (surfaces via
+    # ``nooa connect check --json``); embedding them here would write the whole
+    # history of the connect call into the registry.
+    entry.pop("provenance", None)
     path = Path(path).resolve()
     path.parent.mkdir(parents=True, exist_ok=True)
     # Lock a stable sidecar inode, not the registry inode replaced atomically.

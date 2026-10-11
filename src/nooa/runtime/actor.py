@@ -117,6 +117,7 @@ def _make_llm_metrics_bridge(hm: "HarnessMetrics") -> Callable[[str, Any], None]
         "json_double_decoded": lambda _: hm.record_json_double_decoded(),
         "reasoning_as_structured_output": lambda _: hm.record_reasoning_as_structured_output(),
         "token_usage": _handle_token_usage,
+        "llm_queue": lambda detail: hm.record_llm_queue(detail),
     }
 
     def bridge(event: str, detail: Any = None) -> None:
@@ -190,27 +191,6 @@ def _snapshot_llm_request(
             record=False,
         )
     return _extract_trailing_context_envelope(messages)
-
-
-def _resolve_provider_formatter(llm_client: Any, default_formatter: Any) -> Any:
-    """Auto-select provider formatter based on LLM client type.
-
-    ResponsesClient needs ResponsesProviderFormatter to emit native Responses
-    API wire format.  All other clients (including Anthropic via LiteLLM) use
-    the agent's configured formatter.
-
-    This is intentionally runtime-dispatched rather than config-driven:
-    Anthropic formatting is handled by LiteLLM (so OpenAIProviderFormatter
-    works), but the Responses API has a fundamentally different wire shape
-    that LiteLLM does not translate, requiring its own formatter.
-    """
-    from nooa.unifiedllm import ResponsesClient
-
-    if isinstance(llm_client, ResponsesClient):
-        from nooa.context_blocks.formatter import ResponsesProviderFormatter
-
-        return ResponsesProviderFormatter()
-    return default_formatter
 
 
 # ---------------------------------------------------------------------------
@@ -1294,6 +1274,7 @@ class ActorRuntime:
         # exited before they were assigned (caught by NameError previously).
         stdout_buffer: Any = None
         stderr_buffer: Any = None
+        media_buffer: Any = None
         # Set parent agent context for LLM inheritance by subagents
         parent_token = _parent_agent_var.set(self.agent)
         try:
@@ -1835,6 +1816,27 @@ class ActorRuntime:
 
         except asyncio.CancelledError as error:
             execution_exception = error
+            # A cancelled cell still produced output up to the cancel point. Build
+            # a partial result from the buffers captured so far and append it to
+            # the exception's ``execution_results`` list, so the strategy can show
+            # the model what ran. The buffers are still open here (they close in
+            # the finally below). The cancellation itself is re-raised unchanged.
+            # Nested execute_code calls see the same exception and each appends
+            # its own result, innermost first, so the frame that just unwound is
+            # always the last entry.
+            if stdout_buffer is not None and stderr_buffer is not None:
+                results = getattr(error, "execution_results", None)
+                if results is None:
+                    results = []
+                    error.execution_results = results  # type: ignore[attr-defined]
+                results.append(
+                    ExecutionResult(
+                        stdout=stdout_buffer.getvalue(),
+                        stderr=stderr_buffer.getvalue(),
+                        cancelled=True,
+                        images=media_buffer.blocks if media_buffer is not None else [],
+                    )
+                )
             raise
         finally:
             # NOTE: We do NOT restore sys.stdout/sys.stderr here.
@@ -2696,6 +2698,9 @@ class ActorRuntime:
                     # Authoritative ordered names from the live signature (excludes
                     # 'self') so format_parameters_as_code never re-parses the string.
                     param_names=[p for p in sig.parameters if p != "self"],
+                    # Preserve Annotated parameter overrides on top-level calls,
+                    # just as the nested method wrapper does.
+                    param_specs=CurrentCall.from_method(method).param_specs,
                 )
 
                 # Store current call context in context vars for RuntimeServices.generate()
@@ -3021,13 +3026,10 @@ class ActorRuntime:
             return round(len(text) * ratio)
 
         with hm.timer("time_render_context"):
-            provider_formatter = _resolve_provider_formatter(
-                llm_client, self.agent.render_config.provider_formatter
-            )
             result = render_context(
                 blocks,
                 block_formatter=self.agent.render_config.block_formatter,
-                provider_formatter=provider_formatter,
+                provider_formatter=self.agent.render_config.provider_formatter,
                 context_limit=effective_context_limit,
                 count_tokens=count_tokens,
                 event_format=tc.event_format,
