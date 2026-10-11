@@ -1096,6 +1096,87 @@ class TestLSPPackageInterface:
 
 
 class TestDegradedTransition:
+    @pytest.mark.parametrize(
+        "dispatch_error",
+        [
+            LSPClientError("invalid server request"),
+            AttributeError("missing field"),
+            TypeError("invalid field type"),
+            KeyError("required field"),
+        ],
+    )
+    async def test_malformed_dispatch_degrades_and_reader_continues(
+        self, monkeypatch, dispatch_error
+    ):
+        client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
+        notification = json.dumps(
+            {"jsonrpc": "2.0", "method": "test/malformed", "params": {}}
+        ).encode()
+        response = json.dumps(
+            {"jsonrpc": "2.0", "id": 2, "result": []}
+        ).encode()
+        process = _FakeProcess(
+            responses={1: [_initialize_response(), notification], 2: [response]}
+        )
+        original_handle_message = client._handle_message
+        dispatch_failed = False
+
+        async def fake_exec(*args, **kwargs):
+            return process
+
+        def handle_message(message):
+            nonlocal dispatch_failed
+            if message.get("method") == "test/malformed" and not dispatch_failed:
+                dispatch_failed = True
+                raise dispatch_error
+            original_handle_message(message)
+
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+        monkeypatch.setattr(client, "_handle_message", handle_message)
+        await client.start()
+        try:
+            for _ in range(100):
+                if client.status == LSPClientStatus.DEGRADED:
+                    break
+                await asyncio.sleep(0.01)
+
+            assert client.status == LSPClientStatus.DEGRADED
+            assert client._decode_errors == 1
+            assert await client.definition(
+                "file:///tmp/x.py", {"line": 0, "character": 0}
+            ) == []
+            assert client.status == LSPClientStatus.DEGRADED
+        finally:
+            await client.stop()
+
+    async def test_dispatch_error_does_not_overwrite_failed_status(
+        self, monkeypatch
+    ):
+        client = LSPClient(command=["fake-server"], root_uri="file:///tmp")
+        process = _FakeProcess()
+        client.process = process
+        client.status = LSPClientStatus.COMPLETE
+
+        def fail_dispatch(message):
+            client.status = LSPClientStatus.FAILED
+            raise KeyError("malformed message")
+
+        monkeypatch.setattr(client, "_handle_message", fail_dispatch)
+        process.stdout.push(
+            json.dumps({"jsonrpc": "2.0", "method": "test/notification"}).encode()
+        )
+        reader = asyncio.create_task(client._read_loop())
+        try:
+            for _ in range(100):
+                if client._decode_errors:
+                    break
+                await asyncio.sleep(0.001)
+
+            assert client._decode_errors == 1
+            assert client.status == LSPClientStatus.FAILED
+        finally:
+            reader.cancel()
+            await reader
     async def test_malformed_diagnostics_during_handshake_remain_degraded(
         self, monkeypatch
     ):

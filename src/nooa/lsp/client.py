@@ -218,7 +218,13 @@ class LSPClient:
                         type(message).__name__,
                     )
                     continue
-                self._handle_message(message)
+                try:
+                    self._handle_message(message)
+                except (LSPClientError, AttributeError, TypeError, KeyError) as error:
+                    self._decode_errors += 1
+                    if self.status != LSPClientStatus.FAILED:
+                        self.status = LSPClientStatus.DEGRADED
+                    logger.error("Invalid LSP message: %s", error)
             # The loop only ends when the stream reaches EOF: the pipe closed
             # under us, so the server is gone. asyncio's process.wait() can stay
             # pending even after the child dies (returncode set, waiter never
