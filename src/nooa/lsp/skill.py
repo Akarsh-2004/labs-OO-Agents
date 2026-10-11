@@ -5,8 +5,9 @@
 import asyncio
 import pathlib
 import re
+import shutil
 from collections.abc import Sequence
-from typing import Any, Dict
+from typing import Dict
 
 from nooa.skill import Skill
 
@@ -102,6 +103,8 @@ class LSPSkill(Skill):
             client = await self._get_or_start_client(
                 server_cmd_key, server_config.command
             )
+        if client is None:
+            return None
 
         uri = path.as_uri()
         content = path.read_text(encoding="utf-8")
@@ -151,7 +154,7 @@ class LSPSkill(Skill):
 
     async def _get_or_start_client(
         self, server_cmd_key: tuple[str, ...], command: list[str]
-    ) -> LSPClient:
+    ) -> LSPClient | None:
         client = self._clients.get(server_cmd_key)
         if client is not None and client.status == "FAILED":
             stale_uris = [
@@ -167,6 +170,8 @@ class LSPSkill(Skill):
             client = None
 
         if client is None:
+            if not command or shutil.which(command[0]) is None:
+                return None
             client = LSPClient(command=command, root_uri=self._root_uri)
             try:
                 await client.start()

@@ -3,6 +3,7 @@
 """Tests for LSP document synchronization."""
 
 import asyncio
+import shutil
 
 import pytest
 
@@ -111,6 +112,7 @@ async def test_for_file_replaces_failed_cached_client(tmp_path, monkeypatch):
     async def stop(client):
         stopped.append(client)
 
+    monkeypatch.setattr(shutil, "which", lambda command: f"/usr/bin/{command}")
     monkeypatch.setattr(LSPClient, "start", start)
     monkeypatch.setattr(LSPClient, "send_notification", send_notification)
     monkeypatch.setattr(LSPClient, "stop", stop)
@@ -146,6 +148,7 @@ async def test_concurrent_for_file_calls_start_one_client(tmp_path, monkeypatch)
     async def send_notification(client, method, params=None):
         pass
 
+    monkeypatch.setattr(shutil, "which", lambda command: f"/usr/bin/{command}")
     monkeypatch.setattr(LSPClient, "start", start)
     monkeypatch.setattr(LSPClient, "send_notification", send_notification)
 
@@ -167,3 +170,20 @@ async def test_for_file_propagates_file_read_failures(tmp_path):
         await skill.for_file(str(missing_source))
 
     assert missing_source.as_uri() not in skill._opened_documents
+
+
+async def test_for_file_returns_none_when_server_binary_is_missing(
+    tmp_path, monkeypatch
+):
+    skill = LSPSkill(root_uri=tmp_path.as_uri())
+    source = tmp_path / "module.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+
+    monkeypatch.setattr(shutil, "which", lambda command: None)
+
+    async def unexpected_start(client):
+        pytest.fail("client should not start without an installed server binary")
+
+    monkeypatch.setattr(LSPClient, "start", unexpected_start)
+
+    assert await skill.for_file(str(source)) is None
