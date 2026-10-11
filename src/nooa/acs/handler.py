@@ -56,7 +56,7 @@ class AuditOnlyHandler(ACSHandler):
 
         async def deliver() -> None:
             try:
-                if asyncio.iscoroutinefunction(self.sink_func):
+                if inspect.iscoroutinefunction(self.sink_func):
                     result = self.sink_func(hook)
                 else:
                     result = await asyncio.to_thread(self.sink_func, hook)
