@@ -67,7 +67,9 @@ async def test_enforce_defer_then_allow():
 
 @pytest.mark.asyncio
 async def test_ask_requires_approval_without_running_action():
-    handler = MockHandler([ACSDecision(status="ask")])
+    handler = MockHandler(
+        [ACSDecision(status="ask", reason="Needs review", decision_id="decision-7")]
+    )
     executed = False
 
     def execute():
@@ -78,6 +80,8 @@ async def test_ask_requires_approval_without_running_action():
         await enforce_acs_decision(handler, "toolCallRequest", {}, {}, execute)
 
     assert not isinstance(error.value, ACSBlockedError)
+    assert error.value.reason == "Needs review"
+    assert error.value.decision_id == "decision-7"
     assert not executed
 
 
@@ -114,6 +118,41 @@ async def test_defer_deadline_has_distinct_outcome():
         )
 
     assert handler.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_slow_deferred_evaluation_expires_without_executing_action():
+    class SlowAfterDeferHandler(ACSHandler):
+        def __init__(self):
+            self.call_count = 0
+
+        async def evaluate(self, hook):
+            self.call_count += 1
+            if self.call_count == 1:
+                return ACSDecision(status="defer", retry_after_ms=0)
+            await asyncio.sleep(0.05)
+            return ACSDecision(status="allow")
+
+    handler = SlowAfterDeferHandler()
+    executed = False
+
+    def execute():
+        nonlocal executed
+        executed = True
+
+    with pytest.raises(ACSDeferExhaustedError, match="deadline"):
+        await enforce_acs_decision(
+            handler,
+            "toolCallRequest",
+            {},
+            {},
+            execute,
+            max_defer_retries=2,
+            defer_timeout=0.01,
+        )
+
+    assert handler.call_count == 2
+    assert not executed
 
 
 @pytest.mark.asyncio
@@ -224,8 +263,7 @@ async def test_audit_sink_failure_does_not_change_allow_decision():
     decision = await handler.evaluate(
         ACSHook(hook_type="toolCallRequest", payload={})
     )
-    pending_deliveries = tuple(handler._delivery_tasks)
-    await asyncio.gather(*pending_deliveries)
+    await handler.drain()
 
     assert decision.status == "allow"
 
@@ -247,3 +285,40 @@ async def test_audit_only_async_sink_is_scheduled_without_awaiting():
     assert decision.status == "allow"
     await asyncio.wait_for(sink_started.wait(), timeout=0.1)
     release_sink.set()
+
+
+@pytest.mark.asyncio
+async def test_audit_delivery_capacity_is_bounded_and_shutdown_drains():
+    started = asyncio.Event()
+    release = asyncio.Event()
+    calls = []
+
+    async def stalled_sink(hook):
+        calls.append(hook)
+        started.set()
+        await release.wait()
+
+    handler = AuditOnlyHandler(stalled_sink)
+    handler.MAX_PENDING_DELIVERIES = 1
+    hooks = [
+        ACSHook(hook_type="toolCallRequest", payload={"number": number})
+        for number in range(3)
+    ]
+
+    assert (await handler.evaluate(hooks[0])).status == "allow"
+    await asyncio.wait_for(started.wait(), timeout=0.1)
+    assert (await handler.evaluate(hooks[1])).status == "allow"
+    assert len(handler._delivery_tasks) == 1
+    assert (await handler.evaluate(hooks[2])).status == "allow"
+    assert len(handler._delivery_tasks) == 1
+    assert len(calls) == 1
+
+    shutdown = asyncio.create_task(handler.shutdown())
+    await asyncio.sleep(0)
+    assert not shutdown.done()
+    release.set()
+    await shutdown
+
+    assert handler._delivery_tasks == set()
+    assert (await handler.evaluate(hooks[2])).status == "allow"
+    assert len(calls) == 1

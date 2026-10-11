@@ -38,12 +38,22 @@ class AuditOnlyHandler(ACSHandler):
     Audit-only Guardian: Records hooks to a provided sink function,
     but always allows execution without blocking.
     """
+
+    MAX_PENDING_DELIVERIES = 100
     
     def __init__(self, sink_func: Callable[[ACSHook], Any]):
         self.sink_func = sink_func
         self._delivery_tasks: set[asyncio.Task[None]] = set()
+        self._accepting_deliveries = True
 
     async def evaluate(self, hook: ACSHook) -> ACSDecision:
+        if not self._accepting_deliveries:
+            logger.warning("Skipping audit delivery after handler shutdown")
+            return ACSDecision(status="allow")
+        if len(self._delivery_tasks) >= self.MAX_PENDING_DELIVERIES:
+            logger.warning("Skipping audit delivery: pending delivery limit reached")
+            return ACSDecision(status="allow")
+
         async def deliver() -> None:
             try:
                 if asyncio.iscoroutinefunction(self.sink_func):
@@ -59,3 +69,15 @@ class AuditOnlyHandler(ACSHandler):
         self._delivery_tasks.add(task)
         task.add_done_callback(self._delivery_tasks.discard)
         return ACSDecision(status="allow")
+
+    async def drain(self) -> None:
+        """Wait for all audit deliveries currently pending to finish."""
+        while self._delivery_tasks:
+            await asyncio.gather(
+                *tuple(self._delivery_tasks), return_exceptions=True
+            )
+
+    async def shutdown(self) -> None:
+        """Stop accepting audit deliveries and wait for pending deliveries."""
+        self._accepting_deliveries = False
+        await self.drain()

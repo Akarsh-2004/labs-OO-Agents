@@ -16,9 +16,12 @@ class ACSBlockedError(Exception):
 class ACSApprovalRequiredError(Exception):
     """Raised when an action requires approval before it can execute."""
 
-    def __init__(self, reason: Optional[str] = None):
+    def __init__(
+        self, reason: Optional[str] = None, decision_id: Optional[str] = None
+    ):
         super().__init__(f"Approval required. Reason: {reason or 'Human approval required'}")
         self.reason = reason
+        self.decision_id = decision_id
 
 
 class ACSDeferExhaustedError(Exception):
@@ -76,7 +79,24 @@ async def enforce_acs_decision(
 
     # Evaluate the decision, potentially retrying if deferred.
     while True:
-        decision = await handler.evaluate(hook)
+        remaining = deadline - loop.time() if deadline is not None else None
+        if remaining is not None and remaining <= 0:
+            raise ACSDeferExhaustedError("ACS defer deadline reached")
+        try:
+            evaluation = handler.evaluate(hook)
+            if remaining is None:
+                decision = await evaluation
+            else:
+                decision = await asyncio.wait_for(
+                    evaluation, timeout=remaining
+                )
+        except asyncio.TimeoutError as error:
+            raise ACSDeferExhaustedError(
+                "ACS defer deadline reached while awaiting a decision"
+            ) from error
+
+        if deadline is not None and loop.time() >= deadline:
+            raise ACSDeferExhaustedError("ACS defer deadline reached")
         
         if decision.status == "allow":
             if getattr(execute_func, "__acs_thread_safe__", False):
@@ -92,7 +112,9 @@ async def enforce_acs_decision(
             raise ACSBlockedError(reason=decision.reason)
             
         elif decision.status == "ask":
-            raise ACSApprovalRequiredError(reason=decision.reason)
+            raise ACSApprovalRequiredError(
+                reason=decision.reason, decision_id=decision.decision_id
+            )
             
         elif decision.status == "defer":
             if defer_retries >= max_defer_retries:
