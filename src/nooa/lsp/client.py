@@ -141,8 +141,12 @@ class LSPClient:
                     await asyncio.wait_for(
                         self.send_request("shutdown", {}), timeout=1.0
                     )
-                    await self.send_notification("exit", {})
                 except (LSPClientError, OSError, asyncio.TimeoutError):
+                    pass
+
+                try:
+                    await self.send_notification("exit", {})
+                except (LSPClientError, OSError):
                     pass
 
                 # Give it a short moment to exit gracefully

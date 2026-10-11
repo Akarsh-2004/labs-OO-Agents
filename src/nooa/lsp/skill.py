@@ -6,7 +6,7 @@ import asyncio
 import pathlib
 import re
 from collections.abc import Sequence
-from typing import Dict
+from typing import Any, Dict
 
 from nooa.skill import Skill
 
