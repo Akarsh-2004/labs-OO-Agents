@@ -779,6 +779,7 @@ class QueueManager:
 
         Also shows active spawned jobs so the LLM knows background
         producers are still running even when queues are empty.
+        Returns ``"(nothing queued)"`` when there is no status to show.
         """
         parts = [
             ch.status(max_items=max_items, max_chars=max_chars)
@@ -811,7 +812,7 @@ class QueueManager:
             cheat = f"💡 self.queue_manager{hints} | .shutdown()"
             body = f"{body}\n{cheat}" if body else cheat
 
-        return body
+        return body or "(nothing queued)"
 
     # ---- race ------------------------------------------------------------
 
