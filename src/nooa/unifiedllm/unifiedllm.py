@@ -271,7 +271,8 @@ class _ClientHttp:
         # OpenAI SDK path: client= must be an AsyncOpenAI / OpenAI wrapping httpx.
         api_key = config.get("api_key") or dynamic_api_key
         api_base = config.get("api_base") or dynamic_api_base
-        common: dict[str, Any] = {"timeout": self._timeout}
+        # CompletionClient's RetryConfig owns retries; calls set their own value.
+        common: dict[str, Any] = {"timeout": self._timeout, "max_retries": 0}
         if api_key:
             common["api_key"] = api_key
         if api_base:
@@ -1956,7 +1957,9 @@ class CompletionClient(UnifiedLLM):
             },
         }
 
-    def _completion_http_client(self, call_config: dict[str, Any], *, is_async: bool) -> Any:
+    def _completion_http_client(
+        self, call_config: dict[str, Any], *, is_async: bool, max_retries: int
+    ) -> Any:
         """Reuse the owned transport only while its constructor routing still applies."""
         routing_fields = ("api_base", "base_url", "api_key", "custom_llm_provider")
         if self._effective_model(call_config) != self.model or any(
@@ -1967,7 +1970,12 @@ class CompletionClient(UnifiedLLM):
             # for overrides; these calls use LiteLLM's default HTTP pool settings.
             return None
         assert self._http is not None
-        return self._http.async_client if is_async else self._http.sync_client
+        client = self._http.async_client if is_async else self._http.sync_client
+        # LiteLLM writes max_retries onto the SDK client it is given. A per-call
+        # copy shares the HTTP pool, so concurrent calls cannot see each other's
+        # retry setting.
+        with_options = getattr(client, "with_options", None)
+        return client if with_options is None else with_options(max_retries=max_retries)
 
     def call(
         self,
@@ -2042,7 +2050,9 @@ class CompletionClient(UnifiedLLM):
 
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
-        http_client = self._completion_http_client(call_config, is_async=False)
+        http_client = self._completion_http_client(
+            call_config, is_async=False, max_retries=api_params["max_retries"]
+        )
         if http_client is not None:
             api_params.setdefault("client", http_client)
 
@@ -2146,7 +2156,9 @@ class CompletionClient(UnifiedLLM):
 
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
-        http_client = self._completion_http_client(call_config, is_async=True)
+        http_client = self._completion_http_client(
+            call_config, is_async=True, max_retries=api_params["max_retries"]
+        )
         if http_client is not None:
             api_params.setdefault("client", http_client)
 

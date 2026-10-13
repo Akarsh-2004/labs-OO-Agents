@@ -10,7 +10,9 @@ import asyncio
 from typing import Any
 
 import httpx
+import litellm
 import pytest
+from litellm.caching.llm_caching_handler import LLMClientCache
 from litellm.llms.openai.openai import OpenAIChatCompletion
 
 from nooa.unifiedllm import CompletionClient, RetryConfig
@@ -41,6 +43,9 @@ def _retry(max_retries: int) -> RetryConfig:
 
 def _install(monkeypatch, transport: Any) -> None:
     """Route NOOA's owned clients and LiteLLM's default pool to ``transport``."""
+    # LiteLLM caches SDK clients per event-loop id, which a later test's loop
+    # can reuse; a cached client would still hold an earlier test's transport.
+    monkeypatch.setattr(litellm, "in_memory_llm_clients_cache", LLMClientCache())
     monkeypatch.setattr(
         _ClientHttp, "_httpx_hardening", staticmethod(lambda: {"transport": transport})
     )
@@ -186,3 +191,28 @@ async def test_cancellation_stops_without_further_attempts(monkeypatch):
         await client.aclose()
 
     assert attempts == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_calls_keep_their_own_sdk_retry_setting(monkeypatch):
+    # LiteLLM writes max_retries onto the SDK client it is given. Concurrent
+    # calls on one NOOA client must not read each other's value.
+    attempts = {"explicit": 0, "default": 0}
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        caller = "explicit" if b"explicit" in request.content else "default"
+        attempts[caller] += 1
+        await asyncio.sleep(0.05)
+        return httpx.Response(500, json={"error": {"message": "boom"}})
+
+    _install(monkeypatch, httpx.MockTransport(respond))
+    client = _client(0)
+    try:
+        explicit = client.acall([{"role": "user", "content": "explicit"}], max_retries=2)
+        default = client.acall([{"role": "user", "content": "default"}])
+        results = await asyncio.gather(explicit, default, return_exceptions=True)
+    finally:
+        await client.aclose()
+
+    assert all(isinstance(result, Exception) for result in results)
+    assert attempts == {"explicit": 3, "default": 1}
