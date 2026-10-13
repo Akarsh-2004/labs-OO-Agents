@@ -1550,6 +1550,17 @@ def _collect_sync(raw: Any) -> "litellm.ModelResponse":
     return raw
 
 
+def _with_sdk_retries(client: Any, max_retries: int) -> Any:
+    """Return a per-call copy of an OpenAI SDK client with its own retry setting.
+
+    LiteLLM writes ``max_retries`` onto the SDK client it is given, so a shared
+    client would let concurrent calls change each other's retry budget. The
+    copy keeps the same HTTP pool. Other client types are returned unchanged.
+    """
+    with_options = getattr(client, "with_options", None)
+    return with_options(max_retries=max_retries) if callable(with_options) else client
+
+
 async def _collect_async(raw: Any) -> "litellm.ModelResponse":
     """Consume an async streaming or non-streaming litellm response, returning ModelResponse."""
     if isinstance(raw, litellm.CustomStreamWrapper):
@@ -1971,11 +1982,7 @@ class CompletionClient(UnifiedLLM):
             return None
         assert self._http is not None
         client = self._http.async_client if is_async else self._http.sync_client
-        # LiteLLM writes max_retries onto the SDK client it is given. A per-call
-        # copy shares the HTTP pool, so concurrent calls cannot see each other's
-        # retry setting.
-        with_options = getattr(client, "with_options", None)
-        return client if with_options is None else with_options(max_retries=max_retries)
+        return _with_sdk_retries(client, max_retries)
 
     def call(
         self,
@@ -2050,11 +2057,16 @@ class CompletionClient(UnifiedLLM):
 
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
-        http_client = self._completion_http_client(
-            call_config, is_async=False, max_retries=api_params["max_retries"]
-        )
-        if http_client is not None:
-            api_params.setdefault("client", http_client)
+        if "client" in api_params:
+            api_params["client"] = _with_sdk_retries(
+                api_params["client"], api_params["max_retries"]
+            )
+        else:
+            http_client = self._completion_http_client(
+                call_config, is_async=False, max_retries=api_params["max_retries"]
+            )
+            if http_client is not None:
+                api_params["client"] = http_client
 
         def _make_call():
             raw_response = _collect_sync(litellm.completion(**api_params))
@@ -2156,11 +2168,16 @@ class CompletionClient(UnifiedLLM):
 
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
-        http_client = self._completion_http_client(
-            call_config, is_async=True, max_retries=api_params["max_retries"]
-        )
-        if http_client is not None:
-            api_params.setdefault("client", http_client)
+        if "client" in api_params:
+            api_params["client"] = _with_sdk_retries(
+                api_params["client"], api_params["max_retries"]
+            )
+        else:
+            http_client = self._completion_http_client(
+                call_config, is_async=True, max_retries=api_params["max_retries"]
+            )
+            if http_client is not None:
+                api_params["client"] = http_client
 
         async def _make_call():
             async def provider_call():

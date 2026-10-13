@@ -216,3 +216,66 @@ async def test_concurrent_calls_keep_their_own_sdk_retry_setting(monkeypatch):
 
     assert all(isinstance(result, Exception) for result in results)
     assert attempts == {"explicit": 3, "default": 1}
+
+
+@pytest.mark.asyncio
+async def test_caller_supplied_sdk_client_is_not_shared_between_calls(monkeypatch):
+    from openai import AsyncOpenAI
+
+    attempts = {"explicit": 0, "default": 0}
+
+    async def respond(request: httpx.Request) -> httpx.Response:
+        caller = "explicit" if b"explicit" in request.content else "default"
+        attempts[caller] += 1
+        await asyncio.sleep(0.05)
+        return httpx.Response(500, json={"error": {"message": "boom"}})
+
+    transport = httpx.MockTransport(respond)
+    _install(monkeypatch, transport)
+    supplied = AsyncOpenAI(
+        api_key="key",
+        base_url="https://endpoint.example/v1",
+        http_client=httpx.AsyncClient(transport=transport),
+    )
+    client = _client(0, client=supplied)
+    try:
+        explicit = client.acall([{"role": "user", "content": "explicit"}], max_retries=2)
+        default = client.acall([{"role": "user", "content": "default"}])
+        results = await asyncio.gather(explicit, default, return_exceptions=True)
+    finally:
+        await client.aclose()
+        await supplied.close()
+
+    assert all(isinstance(result, Exception) for result in results)
+    assert attempts == {"explicit": 3, "default": 1}
+    # The caller's own client is left as configured.
+    assert supplied.max_retries == 2
+
+
+def test_sync_call_copies_caller_supplied_sdk_client(monkeypatch):
+    from openai import OpenAI
+
+    attempts = 0
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        return httpx.Response(500, json={"error": {"message": "boom"}})
+
+    transport = httpx.MockTransport(respond)
+    _install(monkeypatch, transport)
+    supplied = OpenAI(
+        api_key="key",
+        base_url="https://endpoint.example/v1",
+        http_client=httpx.Client(transport=transport),
+    )
+    client = _client(0, client=supplied)
+    try:
+        with pytest.raises(Exception, match="(?i)internal"):
+            client.call(MESSAGES)
+    finally:
+        client.close()
+        supplied.close()
+
+    assert attempts == 1
+    assert supplied.max_retries == 2
