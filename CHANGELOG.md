@@ -6,6 +6,10 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- The bench `TaskResult` gains an optional `value` field: the exact output the
+  task asks for, with no explanation. `_run_evaluation` returns a non-empty
+  `value` as `answer`, and the runner writes it to `/app/answer.txt` verbatim.
+  When `value` is empty, the answer file holds `how_to_verify`, as before.
 - LLM provider calls are bounded by an overall per-attempt deadline
   (`HttpConfig.request_timeout`, default 600s). `read_timeout` only bounds the
   gap between received bytes, so a stalled stream that still trickled keepalive
