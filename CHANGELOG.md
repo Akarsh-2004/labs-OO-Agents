@@ -6,6 +6,11 @@ to follow semantic versioning.
 
 ## [Unreleased]
 
+- `CompletionClient` makes exactly `RetryConfig.max_retries + 1` HTTP attempts
+  on OpenAI-compatible routes. LiteLLM let the OpenAI SDK retry each attempt
+  twice more, so `RetryConfig(max_retries=2)` sent 9 requests for a persistent
+  server error, not 3. NOOA now passes `max_retries=0` to the SDK; passing
+  `max_retries` to the client explicitly still enables SDK retries.
 - LLM provider calls are bounded by an overall per-attempt deadline
   (`HttpConfig.request_timeout`, default 600s). `read_timeout` only bounds the
   gap between received bytes, so a stalled stream that still trickled keepalive

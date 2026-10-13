@@ -1918,7 +1918,9 @@ class CompletionClient(UnifiedLLM):
                          disconnects, and unreachable endpoints. Pass
                          RetryConfig(max_retries=0, rate_limit_extra_retries=0) to disable endpoint retries. Set
                          retry_on_empty_content=True to also retry when reasoning
-                         models return empty content.
+                         models return empty content. The OpenAI SDK's own
+                         retries are disabled unless ``max_retries`` is passed
+                         in ``**config``.
             http_config: Optional per-client HTTP connection-pool and timeout
                          settings. Applied only to THIS client's requests: the
                          client builds its own httpx client from these values and
@@ -2033,6 +2035,10 @@ class CompletionClient(UnifiedLLM):
             api_params.pop("tool_choice")
 
         add_session_affinity_header(api_params)
+        # RetryConfig owns endpoint retries. LiteLLM otherwise has the OpenAI SDK
+        # retry each attempt twice more, tripling the configured budget. An
+        # explicit max_retries passthrough still opts into SDK retries.
+        api_params.setdefault("max_retries", 0)
 
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
@@ -2133,6 +2139,10 @@ class CompletionClient(UnifiedLLM):
             api_params.pop("tool_choice")
 
         add_session_affinity_header(api_params)
+        # RetryConfig owns endpoint retries. LiteLLM otherwise has the OpenAI SDK
+        # retry each attempt twice more, tripling the configured budget. An
+        # explicit max_retries passthrough still opts into SDK retries.
+        api_params.setdefault("max_retries", 0)
 
         retry_on_empty = self.retry_config.retry_on_empty_content if self.retry_config else False
 
